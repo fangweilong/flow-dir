@@ -4,27 +4,43 @@ Windows 文件管理器：多窗格 + 标签、原生 Shell 集成、低内存�
 
 [![release](https://github.com/fangweilong/flow-dir/actions/workflows/release.yml/badge.svg)](https://github.com/fangweilong/flow-dir/actions/workflows/release.yml)
 
+<p align="center">
+  <img src="screenshots/home.png" alt="FlowDir 主界面" width="960">
+</p>
+
 ## 特性
 
 - **布局**：单窗格、左右/上下双窗格、三窗格、四窗格；每窗格无限标签，标签可跨窗格拖动，拖到窗格边缘即拆分。
-- **浏览**：批量枚举 + 虚拟列表（2.5 万项时 DOM 仅几十行）、面包屑与前进/后退、`Ctrl+L` 地址栏、磁盘下拉切换、文件名筛选、隐藏/系统项开关。
+- **浏览**：批量枚举 + 虚拟列表、面包屑与前进/后退、`Ctrl+L` 地址栏、磁盘下拉切换、文件名筛选、隐藏/系统项开关。
 - **搜索**：优先使用 Everything（本机运行时），不可用时自动降级为内置 `jwalk` 扫描，`Ctrl+F` 呼出。
-- **预览**：WIC 缩放解码图片、PDF 首页、视频首帧、文本（BOM / UTF-8 / GBK 回退）、ZIP 目录、EXE/DLL 版本信息，超过 64 MB 不生成预览。
+- **预览**：WIC 缩放解码图片、PDF 首页、视频首帧、文本（BOM / UTF-8 / GBK 回退）、ZIP 目录、EXE/DLL 版本信息；超过 64 MB 不生成预览。
 - **文件操作**：复制、移动、回收站删除、重命名、新建文件夹，全部走 `IFileOperation`，带进度与取消；文件/文件夹右键为系统原生菜单（含第三方扩展）。
 - **系统集成**：单实例、托盘、原生窗口阴影与深色菜单、`Alt+Enter` 属性页。
 - **外观与语言**：深浅色/跟随系统、中英双语。
 - **资源占用**：WebView2 GPU 加速可在设置中关闭以省内存，最小化自动挂起渲染进程。
 - **自动更新**：按可配置间隔检查 GitHub Release，单文件版原地替换，安装版静默升级。
 
-## 截图
+## 界面
 
-| 主界面 | 多窗格 |
-| --- | --- |
-| ![主界面](screenshots/home.png) | ![多窗格](screenshots/panes.png) |
+<table>
+  <tr>
+    <td width="50%"><img src="screenshots/panes.png" alt="四窗格与标签"><br><sub>四窗格布局，标签可跨窗格拖动拆分</sub></td>
+    <td width="50%"><img src="screenshots/search-everything.png" alt="搜索"><br><sub>Ctrl+F 搜索，优先走 Everything</sub></td>
+  </tr>
+  <tr>
+    <td><img src="screenshots/preview-image.png" alt="图片预览"><br><sub>右侧预览：图片缩放解码</sub></td>
+    <td><img src="screenshots/preview-video.png" alt="视频预览"><br><sub>视频首帧预览</sub></td>
+  </tr>
+  <tr>
+    <td><img src="screenshots/ops-progress.png" alt="文件操作进度"><br><sub>复制/移动进度卡片，可随时取消</sub></td>
+    <td><img src="screenshots/settings-gpu.png" alt="设置"><br><sub>设置：行为、GPU 加速、快速访问</sub></td>
+  </tr>
+</table>
 
-| 预览 | 搜索 |
-| --- | --- |
-| ![预览](screenshots/preview-image.png) | ![搜索](screenshots/search-everything.png) |
+<p align="center">
+  <img src="screenshots/mem-idle.png" alt="深色主题" width="900"><br>
+  <sub>深色主题与隐藏项显示</sub>
+</p>
 
 ## 安装
 
@@ -41,7 +57,7 @@ Windows 文件管理器：多窗格 + 标签、原生 Shell 集成、低内存�
 
 设置 → 更新：显示当前版本与构建形态，可手动检查、一键下载安装；自动检查间隔可选 6/12/24/72 小时或关闭（默认 24 小时，`0` = 仅手动）。
 
-版本信息来自 Release 资产 `latest.json`（版本号 + 两个安装包的文件名、大小、SHA-256），应用下载后会校验大小与前 2 字节 PE 头、SHA-256 摘要，通过后才执行替换/安装。仓库需保持 **public**，否则匿名拉取 `latest.json` 会失败。
+版本信息来自 Release 资产 `latest.json`（版本号 + 两个安装包的文件名、大小、SHA-256）。应用下载后校验大小、PE 头与 SHA-256 摘要，通过后才执行替换/安装。仓库需保持 **public**，否则匿名拉取 `latest.json` 会失败。
 
 ## 开发
 
@@ -68,9 +84,13 @@ cd src-tauri && cargo test
 | `%APPDATA%\FlowDir\update.json` | 上次更新检查时间与最近一次发现的版本 |
 | `%LOCALAPPDATA%\FlowDir\EBWebView` | WebView2 浏览器配置 |
 
+## 性能
+
+Rust 侧分批枚举 + 前端虚拟列表，只渲染可视行。本机实测：`C:\Windows\System32`（4,931 项）首行 30 ms、全部到齐约 0.44 s；`WinSxS`（25,773 项）约 0.53 s，DOM 仅 51 个行节点。
+
 ## 发布
 
-版本号在 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 三处必须一致。发版只需同时递增三处并 push `main`：`release.yml` 检测到 `v<version>` 尚未发布会自动编译、打包并创建 Release（单文件版、NSIS 安装包、`latest.json`）。版本未变则整条流水线跳过；需要重建已发布版本时手动触发 workflow 并勾选 `force`。
+版本号在 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 三处必须一致。发版只需同时递增三处并 push `main`：`release.yml` 检测到 `v<version>` 尚未发布后自动编译、打包并创建 Release（单文件版、NSIS 安装包、`latest.json`）。版本未变则整条流水线跳过；需要重建已发布版本时手动触发 workflow 并勾选 `force`。
 
 细节与约束见 [AGENTS.md](AGENTS.md)。
 
