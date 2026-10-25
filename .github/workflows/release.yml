@@ -1,0 +1,128 @@
+name: release
+
+# Version-driven release: any push to main that touches a version file checks whether
+# the tag already exists and only then builds. A manual run can force a rebuild.
+# Assets: portable exe, NSIS installer, latest.json (consumed by in-app updates).
+on:
+  push:
+    branches: [main]
+    paths:
+      - package.json
+      - src-tauri/Cargo.toml
+      - src-tauri/tauri.conf.json
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild even when the tag already exists
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $tauri = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $npm = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $cargo = (Select-String -Path src-tauri/Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ($tauri -ne $npm -or $tauri -ne $cargo) {
+            throw "version mismatch: tauri=$tauri npm=$npm cargo=$cargo"
+          }
+          $tag = "v$tauri"
+          $tags = git ls-remote --tags origin "refs/tags/$tag"
+          if ($LASTEXITCODE -ne 0) { throw "git ls-remote failed" }
+          $exists = [bool]$tags
+          $force = "${{ inputs.force }}" -eq "true"
+          $release = (-not $exists) -or $force
+          "version=$tauri" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "release=$($release.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          Write-Host "version=$tauri tag=$tag tagExists=$exists force=$force release=$release"
+
+      - if: steps.version.outputs.release == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - if: steps.version.outputs.release == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - if: steps.version.outputs.release == 'true'
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - if: steps.version.outputs.release == 'true'
+        run: npm ci
+
+      - if: steps.version.outputs.release == 'true'
+        run: npx tsc --noEmit
+
+      - if: steps.version.outputs.release == 'true'
+        name: Build (portable + NSIS)
+        env:
+          FLOWDIR_UPDATE_REPO: ${{ github.repository }}
+        run: npx tauri build --bundles nsis
+
+      - if: steps.version.outputs.release == 'true'
+        name: Collect artifacts
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          New-Item -ItemType Directory -Force dist-release | Out-Null
+
+          $portable = "FlowDir_${version}_x64_portable.exe"
+          Copy-Item src-tauri/target/release/flowdir.exe "dist-release/$portable"
+
+          $setup = "FlowDir_${version}_x64-setup.exe"
+          $setupPath = "src-tauri/target/release/bundle/nsis/$setup"
+          if (!(Test-Path $setupPath)) { throw "installer not found: $setupPath" }
+          Copy-Item $setupPath "dist-release/$setup"
+
+          function Asset($path) {
+            $file = Get-Item $path
+            @{
+              name = $file.Name
+              sha256 = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+              size = $file.Length
+            }
+          }
+
+          $manifest = @{
+            version = $version
+            portable = Asset "dist-release/$portable"
+            installer = Asset "dist-release/$setup"
+          }
+          $manifest | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 dist-release/latest.json
+
+          Get-ChildItem dist-release | ForEach-Object { "{0}  {1}" -f $_.Name, $_.Length }
+
+      - if: steps.version.outputs.release == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: flowdir-${{ steps.version.outputs.version }}
+          path: dist-release/*
+          if-no-files-found: error
+
+      - if: steps.version.outputs.release == 'true'
+        name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ steps.version.outputs.tag }}
+          files: dist-release/*
+          generate_release_notes: true

@@ -1,0 +1,74 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --color-surface: #ffffff;
+  --color-surface-2: #f8fafc;
+  --color-surface-3: #f1f5f9;
+  --color-line: #e2e8f0;
+  --color-line-strong: #cbd5e1;
+  --color-fg: #334155;
+  --color-fg-strong: #0f172a;
+  --color-muted: #64748b;
+  --color-muted-2: #94a3b8;
+  --color-sel: #dbeafe;
+}
+
+.dark {
+  --color-surface: #0f172a;
+  --color-surface-2: #0b1220;
+  --color-surface-3: #1e293b;
+  --color-line: #1e293b;
+  --color-line-strong: #334155;
+  --color-fg: #cbd5e1;
+  --color-fg-strong: #f1f5f9;
+  --color-muted: #94a3b8;
+  --color-muted-2: #64748b;
+  --color-sel: #1e3a8a;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  overflow: hidden;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgb(0 0 0 / 0.18);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(0 0 0 / 0.3);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+.no-bar {
+  scrollbar-width: none;
+}
+.no-bar::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}

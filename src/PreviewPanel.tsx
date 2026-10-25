@@ -1,0 +1,157 @@
+import { makeT } from './i18n'
+import { formatSize, formatTime } from './paths'
+import type { ApiError, Lang, PreviewInfo } from './types'
+
+type Props = {
+  info: PreviewInfo | null
+  loading: boolean
+  error: ApiError | null
+  name: string
+  lang: Lang
+  onClose: () => void
+}
+
+/** Maps raw error codes/details to a human sentence; never prints `[object Object]`. */
+function friendlyError(error: ApiError, t: ReturnType<typeof makeT>) {
+  switch (error.code) {
+    case 'ACCESS_DENIED':
+    case 'WINDOWS':
+      return t('preview.errorAccess')
+    case 'TOO_LARGE':
+      return t('preview.tooLarge')
+    case 'IS_DIR':
+      return t('preview.folder')
+    case 'NOT_FOUND':
+      return t('preview.errorMissing')
+    default:
+      return t('preview.errorGeneric')
+  }
+}
+
+export function PreviewPanel({ info, loading, error, name, lang, onClose }: Props) {
+  const t = makeT(lang)
+
+  return (
+    <aside className="flex w-[320px] shrink-0 flex-col border-l border-line bg-surface">
+      <header className="flex h-8 shrink-0 items-center gap-2 border-b border-line px-2.5">
+        <span className="text-[10px] font-semibold tracking-wider text-muted-2">{t('preview.title')}</span>
+        <span className="min-w-0 flex-1 truncate text-[11.5px] font-medium text-fg-strong" title={name}>
+          {name}
+        </span>
+        <button
+          type="button"
+          onClick={onClose}
+          className="grid h-5 w-5 place-items-center rounded text-muted-2 hover:bg-surface-3 hover:text-fg"
+          title={t('settings.close')}
+        >
+          ×
+        </button>
+      </header>
+
+      <div className="relative min-h-0 flex-1 overflow-auto p-3">
+        {loading && (
+          <div className="grid h-full place-items-center text-[11.5px] text-muted-2">{t('preview.loading')}</div>
+        )}
+
+        {!loading && error && (
+          <div className="grid h-full place-items-center px-4 text-center">
+            <div>
+              <div className="text-[12px] text-fg">{friendlyError(error, t)}</div>
+              <div className="mt-1 font-mono text-[10px] text-muted-2">{error.code}</div>
+            </div>
+          </div>
+        )}
+
+        {!loading && !error && !info && (
+          <div className="grid h-full place-items-center text-center text-[11.5px] text-muted-2">
+            {t('preview.empty')}
+          </div>
+        )}
+
+        {!loading && !error && info && (
+          <>
+            {(info.kind === 'image' || info.kind === 'pdf' || info.kind === 'video') && info.url && (
+              <div className="grid h-full place-items-center">
+                <img
+                  src={info.url}
+                  alt={name}
+                  className="max-h-full max-w-full rounded border border-line object-contain shadow-sm"
+                />
+              </div>
+            )}
+
+            {info.kind === 'folder' && (
+              <div className="grid h-full place-items-center px-4 text-center">
+                <div>
+                  <svg viewBox="0 0 48 48" className="mx-auto h-12 w-12 text-amber-400" fill="currentColor" aria-hidden>
+                    <path d="M4 12a4 4 0 0 1 4-4h11l4 5h17a4 4 0 0 1 4 4v19a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4V12Z" />
+                  </svg>
+                  <div className="mt-2 text-[12px] font-medium text-fg-strong">{t('preview.folder')}</div>
+                  <div className="mt-1 text-[11px] text-muted-2">{t('preview.folderHint')}</div>
+                </div>
+              </div>
+            )}
+
+            {info.kind === 'text' && (
+              <pre className="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-fg">
+                {info.text}
+              </pre>
+            )}
+
+            {info.kind === 'archive' && (
+              <div>
+                <div className="pb-1.5 text-[10.5px] text-muted-2">{t('preview.archive')}</div>
+                <div className="space-y-0.5 font-mono text-[11px]">
+                  {(info.entries ?? []).map((entry) => (
+                    <div key={entry.name} className="flex justify-between gap-3">
+                      <span className="min-w-0 truncate text-fg">{entry.name}</span>
+                      <span className="shrink-0 text-muted-2">{formatSize(entry.size, false)}</span>
+                    </div>
+                  ))}
+                  {!info.entries?.length && <div className="text-muted-2">—</div>}
+                </div>
+              </div>
+            )}
+
+            {info.kind === 'binary' && (
+              <div>
+                <div className="pb-1.5 text-[10.5px] text-muted-2">{t('preview.version')}</div>
+                <div className="space-y-1 text-[11.5px]">
+                  {(info.meta ?? []).map((row) => (
+                    <div key={row.label} className="flex justify-between gap-3">
+                      <span className="shrink-0 text-muted-2">{row.label}</span>
+                      <span className="min-w-0 truncate text-right text-fg">{row.value}</span>
+                    </div>
+                  ))}
+                  {!info.meta?.length && <div className="text-muted-2">—</div>}
+                </div>
+              </div>
+            )}
+
+            {info.kind === 'unsupported' && (
+              <div className="grid h-full place-items-center px-4 text-center">
+                <div>
+                  <svg viewBox="0 0 48 48" className="mx-auto h-11 w-11 text-muted-2" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                    <path d="M12 6h16l8 8v28a2 2 0 0 1-2 2H12a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2Z" />
+                    <path d="M28 6v8h8" />
+                  </svg>
+                  <div className="mt-2 text-[12px] text-fg">{t('preview.unsupported')}</div>
+                  <div className="mt-1 text-[11px] text-muted-2">
+                    {info.reason === 'too-large' ? t('preview.tooLarge') : t('preview.noPreview')}
+                  </div>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {info && (
+        <footer className="flex h-7 shrink-0 items-center justify-between border-t border-line px-2.5 text-[10.5px] text-muted-2">
+          <span>{info.kind === 'folder' ? '' : `${t('preview.size')} ${formatSize(info.size, false)}`}</span>
+          <span>{formatTime(info.mtime)}</span>
+        </footer>
+      )}
+    </aside>
+  )
+}
