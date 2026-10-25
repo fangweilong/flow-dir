@@ -101,7 +101,6 @@ src/              React 前端（文件列表、预览、搜索、设置）
 src-tauri/src/    Rust 后端（枚举/扫描、文件操作、预览、Shell 菜单、更新）
 src-tauri/icons/  应用图标
 screenshots/      README 与文档截图
-scripts/          CDP/窗口级验证脚本
 .github/          Release 流水线
 ```
 
