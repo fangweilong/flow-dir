@@ -3,3 +3,7 @@ dist
 src-tauri/target
 src-tauri/gen
 *.log
+
+# 内部设计与方案文档，只保留在本地
+技术方案.md
+方案书.md
