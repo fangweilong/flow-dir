@@ -20,6 +20,28 @@ export type Workspace = {
 
 export type DropMode = 'center' | 'left' | 'right' | 'top' | 'bottom'
 
+/**
+ * Back/forward moves only the cursor: the stack is the record of visited folders, so a
+ * step never appends. Returns null at either edge instead of clamping silently.
+ */
+export function stepHistory(tab: TabState, delta: number): TabState | null {
+  const index = tab.histIdx + delta
+  if (index < 0 || index >= tab.history.length || index === tab.histIdx) return null
+  return { ...tab, path: tab.history[index], histIdx: index }
+}
+
+/**
+ * A fresh navigation truncates the forward tail and appends the target. Re-entering a
+ * folder that is already the cursor's successor (e.g. a crumb click) moves the cursor
+ * rather than duplicating the entry.
+ */
+export function pushHistory(tab: TabState, path: string): TabState {
+  if (tab.path === path) return tab
+  const stack = tab.history.slice(0, tab.histIdx + 1)
+  if (stack[stack.length - 1] !== path) stack.push(path)
+  return { ...tab, path, history: stack, histIdx: stack.length - 1 }
+}
+
 let seq = 0
 export const uid = (prefix: string) => `${prefix}${++seq}`
 

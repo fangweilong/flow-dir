@@ -94,6 +94,8 @@ type Props = {
   onCloseTab: (tabId: string) => void
   onActivateTab: (tabId: string) => void
   onNavigate: (tabId: string, path: string) => void
+  /** Steps the tab's history cursor without touching the stack (back/forward). */
+  onHistoryMove: (tabId: string, delta: number) => void
   onTabDragStart: (tabId: string, ev: React.PointerEvent) => void
   onSortChange: (sort: SortState) => void
   onToggleHidden: () => void
@@ -144,6 +146,7 @@ export function PaneView({
   onCloseTab,
   onActivateTab,
   onNavigate,
+  onHistoryMove,
   onTabDragStart,
   onSortChange,
   onToggleHidden,
@@ -409,12 +412,12 @@ export function PaneView({
     }
     if (matchBinding(ev, keys.back)) {
       ev.preventDefault()
-      if (tab.histIdx > 0) onNavigate(tab.id, tab.history[tab.histIdx - 1])
+      onHistoryMove(tab.id, -1)
       return
     }
     if (matchBinding(ev, keys.forward)) {
       ev.preventDefault()
-      if (tab.histIdx < tab.history.length - 1) onNavigate(tab.id, tab.history[tab.histIdx + 1])
+      onHistoryMove(tab.id, 1)
       return
     }
     // Alt+Up stays a fixed alias for the parent folder; older habits outlive rebinds.
@@ -624,7 +627,7 @@ export function PaneView({
         <button
           type="button"
           title={t('nav.back')}
-          onClick={() => tab && tab.histIdx > 0 && onNavigate(tab.id, tab.history[tab.histIdx - 1])}
+          onClick={() => tab && onHistoryMove(tab.id, -1)}
           disabled={!tab || tab.histIdx <= 0}
           style={navButtonStyle}
           className="grid place-items-center rounded text-muted hover:bg-surface-3 disabled:opacity-30"
@@ -636,9 +639,7 @@ export function PaneView({
         <button
           type="button"
           title={t('nav.forward')}
-          onClick={() =>
-            tab && tab.histIdx < tab.history.length - 1 && onNavigate(tab.id, tab.history[tab.histIdx + 1])
-          }
+          onClick={() => tab && onHistoryMove(tab.id, 1)}
           disabled={!tab || tab.histIdx >= tab.history.length - 1}
           style={navButtonStyle}
           className="grid place-items-center rounded text-muted hover:bg-surface-3 disabled:opacity-30"

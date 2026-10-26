@@ -79,6 +79,8 @@ import {
   removePane,
   setRatio,
   splitPane,
+  stepHistory,
+  pushHistory,
   uid,
 } from './workspace'
 import type { DropMode, Node, PaneState, TabState, Workspace } from './workspace'
@@ -803,20 +805,39 @@ export default function App() {
       const tab = current.tabs[tabId]
       if (!pane || !tab) return
       if (tab.path === next) return
-      const stack = tab.history.slice(0, tab.histIdx + 1)
-      if (stack[stack.length - 1] !== next) stack.push(next)
-      setWs((prev) =>
-        prev
-          ? {
-              ...prev,
-              tabs: {
-                ...prev.tabs,
-                [tabId]: { ...tab, path: next, history: stack, histIdx: stack.length - 1 },
-              },
-            }
-          : prev,
-      )
+      setWs((prev) => {
+        const live = prev?.tabs[tabId]
+        if (!prev || !live) return prev
+        const moved = pushHistory(live, next)
+        if (moved === live) return prev
+        return { ...prev, tabs: { ...prev.tabs, [tabId]: moved } }
+      })
       startScan(tabId, next, pane.sort, pane.hidden)
+    },
+    [startScan],
+  )
+
+  /**
+   * Back/forward: move the cursor only. `navigate` is for new locations and appends to the
+   * stack; reusing it here rewrote the history with the target path, which turned the second
+   * "back" back into "forward" and grew the stack without bound.
+   */
+  const historyMove = useCallback(
+    (tabId: string, delta: number) => {
+      const current = wsRef.current
+      if (!current) return
+      const pane = Object.values(current.panes).find((p) => p.tabIds.includes(tabId))
+      const tab = current.tabs[tabId]
+      if (!pane || !tab) return
+      const moved = stepHistory(tab, delta)
+      if (!moved) return
+      setWs((prev) => {
+        const live = prev?.tabs[tabId]
+        if (!prev || !live) return prev
+        const next = stepHistory(live, delta)
+        return next ? { ...prev, tabs: { ...prev.tabs, [tabId]: next } } : prev
+      })
+      startScan(tabId, moved.path, pane.sort, pane.hidden)
     },
     [startScan],
   )
@@ -1818,6 +1839,7 @@ export default function App() {
               onCloseTab={(tabId) => closeTab(pane.id, tabId)}
               onActivateTab={(tabId) => activateTab(pane.id, tabId)}
               onNavigate={(tabId, path) => navigate(tabId, path)}
+              onHistoryMove={historyMove}
               onTabDragStart={startTabDrag}
               onSortChange={(sort) => setPaneSort(pane.id, sort)}
               onToggleHidden={() => toggleHidden(pane.id)}
@@ -1852,6 +1874,7 @@ export default function App() {
       closeTab,
       activateTab,
       navigate,
+      historyMove,
       startTabDrag,
       setPaneSort,
       toggleHidden,
