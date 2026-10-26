@@ -5,6 +5,8 @@ type Props = {
   ops: OpProgress[]
   lang: Lang
   onCancel: (opId: string) => void
+  /** Removes a finished card, including one kept around to show its failure list. */
+  onDismiss: (opId: string) => void
 }
 
 const PHASE_KEY = {
@@ -16,7 +18,7 @@ const PHASE_KEY = {
 } as const
 
 /** Bottom-right stack of running operations. */
-export function OpsPanel({ ops, lang, onCancel }: Props) {
+export function OpsPanel({ ops, lang, onCancel, onDismiss }: Props) {
   const t = makeT(lang)
   if (!ops.length) return null
   return (
@@ -44,15 +46,31 @@ export function OpsPanel({ ops, lang, onCancel }: Props) {
                     {t('op.items', { current: Math.min(op.current, op.total), total: op.total })}
                   </span>
                 )}
+                {op.failedCount > 0 && (
+                  <span className="ml-1.5 font-normal text-red-500">
+                    {t('op.failedCount', { count: op.failedCount })}
+                  </span>
+                )}
               </span>
-              <button
-                type="button"
-                data-op-cancel
-                onClick={() => onCancel(op.opId)}
-                className="rounded border border-line px-1.5 py-0.5 text-[0.65625rem] text-muted hover:bg-surface-3 hover:text-fg"
-              >
-                {t('op.cancel')}
-              </button>
+              {op.done ? (
+                <button
+                  type="button"
+                  data-op-dismiss
+                  onClick={() => onDismiss(op.opId)}
+                  className="rounded border border-line px-1.5 py-0.5 text-[0.65625rem] text-muted hover:bg-surface-3 hover:text-fg"
+                >
+                  {t('op.close')}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  data-op-cancel
+                  onClick={() => onCancel(op.opId)}
+                  className="rounded border border-line px-1.5 py-0.5 text-[0.65625rem] text-muted hover:bg-surface-3 hover:text-fg"
+                >
+                  {t('op.cancel')}
+                </button>
+              )}
             </div>
             {op.name && (
               <div className="mt-1 truncate text-[0.65625rem] text-muted" title={op.name}>
@@ -63,6 +81,23 @@ export function OpsPanel({ ops, lang, onCancel }: Props) {
               <div className="h-full rounded-full bg-blue-500 transition-[width]" style={{ width: `${percent}%` }} />
             </div>
             <div className="mt-1 text-right text-[0.625rem] tabular text-muted-2">{percent}%</div>
+            {op.failed.length > 0 && (
+              <ul
+                data-op-failures
+                className="mt-1 max-h-32 overflow-auto border-t border-line pt-1 text-[0.625rem]"
+              >
+                {op.failed.map((failure) => (
+                  <li
+                    key={`${failure.path}:${failure.code}`}
+                    title={failure.detail}
+                    className="flex items-baseline gap-1 py-0.5"
+                  >
+                    <span className="shrink-0 font-mono text-red-500">{failure.code}</span>
+                    <span className="truncate text-muted">{failure.path || failure.detail}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         )
       })}

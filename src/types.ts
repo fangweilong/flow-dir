@@ -17,6 +17,8 @@ export type EverythingStatus = { usable: boolean; version: string | null; reason
 /** `action` is FlowDir's own appended entry (e.g. the hidden-items toggle), not a shell verb. */
 export type MenuOutcome = { invoked: boolean; id: number; action: string | null }
 export type OpKind = 'copy' | 'move' | 'delete' | 'rename' | 'newdir'
+/** One item the shell rejected; `code` is the mapped app error code. */
+export type OpFailure = { path: string; code: string; detail: string }
 export type OpProgress = {
   opId: string
   phase: string
@@ -25,6 +27,9 @@ export type OpProgress = {
   name: string | null
   work: number
   workTotal: number
+  /** Live count of failed items; `failed` only arrives with the final message. */
+  failedCount: number
+  failed: OpFailure[]
   done: boolean
   aborted: boolean
   error: ApiError | null

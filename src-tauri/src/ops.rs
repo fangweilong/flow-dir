@@ -11,21 +11,33 @@ use std::time::Instant;
 
 use serde::Serialize;
 use tauri::ipc::Channel;
-use windows::core::{implement, Result as WinResult, HSTRING, PCWSTR};
+use windows::core::{implement, HRESULT, Result as WinResult, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{E_ABORT, HWND};
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
+    COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::UI::Shell::{
     FileOperation, IFileOperation, IFileOperationProgressSink, IFileOperationProgressSink_Impl,
-    IShellItem, SHCreateItemFromParsingName, FOFX_RECYCLEONDELETE, FOF_ALLOWUNDO, FOF_SILENT,
-    FOF_WANTNUKEWARNING,
+    IShellItem, SHCreateItemFromParsingName, FOFX_RECYCLEONDELETE, FOF_ALLOWUNDO, FOF_NOERRORUI,
+    FOF_SILENT, FOF_WANTNUKEWARNING, SIGDN_FILESYSPATH,
 };
 
 use crate::error::ApiError;
 
 const PROGRESS_INTERVAL_MS: u128 = 80;
 const PHASES: [&str; 6] = ["start", "copy", "move", "delete", "rename", "newdir"];
+/// Failures are listed for the user to retry; a mass failure must not grow the message.
+const MAX_REPORTED_FAILURES: usize = 200;
+
+/// One item the shell refused, with the HRESULT mapped to an app error code.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct OpFailure {
+    pub path: String,
+    pub code: String,
+    pub detail: String,
+}
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -37,9 +49,62 @@ pub struct OpProgress {
     pub name: Option<String>,
     pub work: u64,
     pub work_total: u64,
+    /// Failures seen so far; kept live so the card can show them while the op runs.
+    pub failed_count: u32,
+    /// Failure details, sent once with the final message.
+    pub failed: Vec<OpFailure>,
     pub done: bool,
     pub aborted: bool,
     pub error: Option<ApiError>,
+}
+
+/// `IFileOperation::PerformOperations` returns `S_OK` when individual items failed; the
+/// per-item HRESULT arrives in the sink callbacks. This log is shared between the sink and
+/// the operation thread so the final progress message can carry the failures.
+#[derive(Default)]
+struct FailureLog {
+    total: AtomicU32,
+    items: Mutex<Vec<OpFailure>>,
+}
+
+impl FailureLog {
+    fn record(&self, path: &str, hr: HRESULT) {
+        if hr.is_err() {
+            self.push(path, ApiError::from_windows(path, hr.0));
+        }
+    }
+
+    /// Queue-time failures already carry a mapped {@link ApiError}.
+    fn push(&self, path: &str, err: ApiError) {
+        self.total.fetch_add(1, Ordering::Relaxed);
+        let mut items = self.items.lock().unwrap();
+        if items.len() < MAX_REPORTED_FAILURES {
+            items.push(OpFailure {
+                path: path.to_string(),
+                code: err.code,
+                detail: err.detail,
+            });
+        }
+    }
+
+    fn count(&self) -> u32 {
+        self.total.load(Ordering::Relaxed)
+    }
+
+    fn take(&self) -> Vec<OpFailure> {
+        std::mem::take(&mut *self.items.lock().unwrap())
+    }
+}
+
+/// What the operation thread reports back after `PerformOperations` returns.
+#[derive(Debug)]
+struct Outcome {
+    aborted: bool,
+    error: Option<ApiError>,
+    /// Detailed entries, capped at {@link MAX_REPORTED_FAILURES}.
+    failed: Vec<OpFailure>,
+    /// Every failure, including the ones cut from `failed`.
+    failed_total: u32,
 }
 
 #[derive(Clone, Default)]
@@ -118,22 +183,21 @@ pub fn start(
     std::thread::Builder::new()
         .name(format!("flowdir-op-{op_id}"))
         .spawn(move || {
-            let result = run(&request, kind, hwnd, token, progress.clone());
-            let (aborted, error) = match result {
-                Ok(aborted) => (aborted, None),
-                Err(err) => (false, Some(err)),
-            };
+            let total = request.sources.len() as u32;
+            let outcome = run(&request, kind, hwnd, token, progress.clone());
             let _ = progress.send(OpProgress {
                 op_id: op_id.clone(),
                 phase: "done".into(),
-                current: 0,
-                total: 0,
+                current: total,
+                total,
                 name: None,
                 work: 0,
                 work_total: 0,
+                failed_count: outcome.failed_total,
+                failed: outcome.failed,
                 done: true,
-                aborted,
-                error,
+                aborted: outcome.aborted,
+                error: outcome.error,
             });
             state.finish(&op_id);
         })
@@ -147,14 +211,19 @@ fn run(
     hwnd: Option<isize>,
     cancel: Arc<AtomicBool>,
     progress: Channel<OpProgress>,
-) -> Result<bool, ApiError> {
+) -> Outcome {
     unsafe {
-        CoInitializeEx(None, COINIT_APARTMENTTHREADED)
-            .ok()
-            .map_err(|e| ApiError::new("COM", e.to_string()))?;
-        let result = perform(request, kind, hwnd, cancel, progress);
+        if let Err(e) = CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok() {
+            return Outcome {
+                aborted: false,
+                error: Some(ApiError::new("COM", e.to_string())),
+                failed: Vec::new(),
+                failed_total: 0,
+            };
+        }
+        let outcome = perform(request, kind, hwnd, cancel, progress);
         CoUninitialize();
-        result
+        outcome
     }
 }
 
@@ -169,14 +238,32 @@ fn shell_item(path: &str) -> Result<IShellItem, ApiError> {
     }
 }
 
+/// Filesystem path of a shell item, for the failure report and the delete caption.
+fn item_path(item: &IShellItem) -> Option<String> {
+    unsafe {
+        let wide = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let text = wide.to_string().ok();
+        CoTaskMemFree(Some(wide.0 as *const core::ffi::c_void));
+        text
+    }
+}
+
+/// Last path segment, used as the progress caption when the shell passes no name.
+fn file_name(path: &str) -> Option<String> {
+    path.rsplit(|c| c == '\\' || c == '/')
+        .find(|part| !part.is_empty())
+        .map(str::to_string)
+}
+
 fn perform(
     request: &Request,
     kind: Kind,
     hwnd: Option<isize>,
     cancel: Arc<AtomicBool>,
     progress: Channel<OpProgress>,
-) -> Result<bool, ApiError> {
+) -> Outcome {
     let total = request.sources.len() as u32;
+    let failures = Arc::new(FailureLog::default());
     let sink = Sink {
         op_id: request.op_id.clone(),
         phase: AtomicU8::new(0),
@@ -187,35 +274,51 @@ fn perform(
         last: Mutex::new(
             Instant::now() - std::time::Duration::from_millis(PROGRESS_INTERVAL_MS as u64),
         ),
+        current_path: Mutex::new(String::new()),
+        failures: failures.clone(),
         cancel,
         progress,
     };
 
     unsafe {
-        let operation: IFileOperation = CoCreateInstance(&FileOperation, None, CLSCTX_ALL)
-            .map_err(|e| ApiError::new("SHELL_FAILED", e.to_string()))?;
+        let failure = |error: ApiError| Outcome {
+            aborted: false,
+            error: Some(error),
+            failed: failures.take(),
+            failed_total: failures.count(),
+        };
+        let operation: IFileOperation = match CoCreateInstance(&FileOperation, None, CLSCTX_ALL) {
+            Ok(operation) => operation,
+            Err(e) => return failure(ApiError::new("SHELL_FAILED", e.to_string())),
+        };
         if let Some(raw) = hwnd {
             let _ = operation.SetOwnerWindow(HWND(raw as *mut core::ffi::c_void));
         }
-        let mut flags = FOF_SILENT | FOF_WANTNUKEWARNING;
+        // Failures are reported in-app (with retryable entries), so the shell must not put a
+        // modal in front of every item that fails; conflict prompts are not errors and stay.
+        let mut flags = FOF_SILENT | FOF_WANTNUKEWARNING | FOF_NOERRORUI;
         if !request.permanent {
             flags |= FOF_ALLOWUNDO;
         }
         if kind == Kind::Delete && !request.permanent {
             flags |= FOFX_RECYCLEONDELETE;
         }
-        operation
-            .SetOperationFlags(flags)
-            .map_err(|e| ApiError::new("SHELL_FAILED", e.to_string()))?;
+        if let Err(e) = operation.SetOperationFlags(flags) {
+            return failure(ApiError::new("SHELL_FAILED", e.to_string()));
+        }
 
         let sink_iface: IFileOperationProgressSink = sink.into();
-        let cookie = operation
-            .Advise(&sink_iface)
-            .map_err(|e| ApiError::new("SHELL_FAILED", e.to_string()))?;
+        let cookie = match operation.Advise(&sink_iface) {
+            Ok(cookie) => cookie,
+            Err(e) => return failure(ApiError::new("SHELL_FAILED", e.to_string())),
+        };
 
-        let queued = queue(&operation, request, kind);
+        let queued = queue(&operation, request, kind, &failures);
         let result = match queued {
-            Ok(()) => operation
+            // Every source already failed to resolve; the shell has nothing to perform and
+            // would report an unrelated error of its own.
+            Ok(0) => Ok(()),
+            Ok(_) => operation
                 .PerformOperations()
                 .map_err(|e| ApiError::from_windows("", e.code().0)),
             Err(err) => Err(err),
@@ -226,42 +329,57 @@ fn perform(
             .unwrap_or(false);
         let _ = operation.Unadvise(cookie);
 
-        match result {
-            Ok(()) => Ok(aborted),
-            Err(err) if aborted => {
-                let _ = err;
-                Ok(true)
-            }
-            Err(err) => Err(err),
+        let failed_total = failures.count();
+        let error = match result {
+            Ok(()) => None,
+            // A canceled operation is not an error: the items it never reached are not failures.
+            Err(_) if aborted => None,
+            // The shell's error is a consequence of the item failures already recorded; the
+            // list is what the user can act on, so the batch error adds nothing.
+            Err(_) if failed_total > 0 => None,
+            Err(err) => Some(err),
+        };
+        Outcome {
+            aborted,
+            error,
+            failed: failures.take(),
+            failed_total,
         }
     }
 }
 
-fn queue(operation: &IFileOperation, request: &Request, kind: Kind) -> Result<(), ApiError> {
+fn queue(
+    operation: &IFileOperation,
+    request: &Request,
+    kind: Kind,
+    failures: &FailureLog,
+) -> Result<usize, ApiError> {
     unsafe {
+        let failure = |path: &str, error: ApiError| failures.push(path, error);
         if kind == Kind::NewDir {
-            let folder = shell_item(
-                request
-                    .target_dir
-                    .as_deref()
-                    .ok_or_else(|| ApiError::new("BAD_ARGS", "newdir needs targetDir"))?,
-            )?;
-            let name = HSTRING::from(
-                request
-                    .new_name
-                    .as_deref()
-                    .ok_or_else(|| ApiError::new("BAD_ARGS", "newdir needs newName"))?,
-            );
-            operation
-                .NewItem(
-                    &folder,
-                    0x10,
-                    &name,
-                    PCWSTR::null(),
-                    None::<&IFileOperationProgressSink>,
-                )
-                .map_err(|e| ApiError::from_windows("", e.code().0))?;
-            return Ok(());
+            let dir = request
+                .target_dir
+                .as_deref()
+                .ok_or_else(|| ApiError::new("BAD_ARGS", "newdir needs targetDir"))?;
+            let name_text = request
+                .new_name
+                .as_deref()
+                .ok_or_else(|| ApiError::new("BAD_ARGS", "newdir needs newName"))?;
+            let folder = shell_item(dir)?;
+            let name = HSTRING::from(name_text);
+            return match operation.NewItem(
+                &folder,
+                0x10,
+                &name,
+                PCWSTR::null(),
+                None::<&IFileOperationProgressSink>,
+            ) {
+                Ok(()) => Ok(1),
+                Err(e) => {
+                    failure(dir, ApiError::from_windows("", e.code().0));
+                    Ok(0)
+                }
+            };
         }
 
         let target = match request.target_dir.as_deref() {
@@ -269,9 +387,21 @@ fn queue(operation: &IFileOperation, request: &Request, kind: Kind) -> Result<()
             None => None,
         };
         let new_name = request.new_name.as_deref().map(HSTRING::from);
+        let mut queued_count = 0;
 
         for path in &request.sources {
-            let item = shell_item(path)?;
+            let item = match shell_item(path) {
+                Ok(item) => item,
+                // One unresolvable path (deleted meanwhile, unparsable) must not abort the
+                // whole batch; report it and keep queueing the rest.
+                Err(err) => {
+                    failure(
+                        path,
+                        ApiError::new(&err.code, err.detail),
+                    );
+                    continue;
+                }
+            };
             let queued = match kind {
                 Kind::Copy => match &new_name {
                     Some(name) => operation.CopyItem(
@@ -311,9 +441,13 @@ fn queue(operation: &IFileOperation, request: &Request, kind: Kind) -> Result<()
                 ),
                 Kind::NewDir => unreachable!(),
             };
-            queued.map_err(|e| ApiError::from_windows(path, e.code().0))?;
+            if let Err(e) = queued {
+                failure(path, ApiError::from_windows(path, e.code().0));
+            } else {
+                queued_count += 1;
+            }
         }
-        Ok(())
+        Ok(queued_count)
     }
 }
 
@@ -327,6 +461,9 @@ struct Sink {
     work: AtomicU64,
     work_total: AtomicU64,
     last: Mutex<Instant>,
+    /// Path of the item currently being processed, so a Post callback can name its failure.
+    current_path: Mutex<String>,
+    failures: Arc<FailureLog>,
     cancel: Arc<AtomicBool>,
     progress: Channel<OpProgress>,
 }
@@ -346,6 +483,8 @@ impl Sink {
             name,
             work: self.work.load(Ordering::Relaxed),
             work_total: self.work_total.load(Ordering::Relaxed),
+            failed_count: self.failures.count(),
+            failed: Vec::new(),
             done: false,
             aborted: false,
             error: None,
@@ -359,19 +498,34 @@ impl Sink {
         Ok(())
     }
 
-    fn enter_item(&self, phase: &'static str, name: &PCWSTR) -> WinResult<()> {
+    fn enter_item(&self, phase: &'static str, name: &PCWSTR, item: Option<&IShellItem>) -> WinResult<()> {
         self.check_cancel()?;
         self.phase.store(
             PHASES.iter().position(|p| *p == phase).unwrap_or(0) as u8,
             Ordering::Relaxed,
         );
         self.current.fetch_add(1, Ordering::Relaxed);
+        if let Some(path) = item.and_then(item_path) {
+            *self.current_path.lock().unwrap() = path;
+        }
         let label = if name.is_null() {
-            None
+            // Deletes arrive without a name; the path we captured above supplies the caption.
+            file_name(&self.current_path.lock().unwrap())
         } else {
             Some(unsafe { name.to_string() }.unwrap_or_default())
         };
         self.emit(label, true);
+        Ok(())
+    }
+
+    /// A failing item is not an abort: record it, keep the queue going, and let the final
+    /// message carry the list so the UI can say "X done, Y failed" instead of "done".
+    fn post_item(&self, hr: HRESULT) -> WinResult<()> {
+        self.check_cancel()?;
+        if hr.is_err() && !self.cancel.load(Ordering::Relaxed) {
+            self.failures.record(&self.current_path.lock().unwrap(), hr);
+            self.emit(None, true);
+        }
         Ok(())
     }
 }
@@ -382,17 +536,21 @@ impl IFileOperationProgressSink_Impl for Sink_Impl {
         Ok(())
     }
 
-    fn FinishOperations(&self, _hr: windows::core::HRESULT) -> WinResult<()> {
+    fn FinishOperations(&self, hr: HRESULT) -> WinResult<()> {
+        // `PerformOperations` can return S_OK with a failing final HRESULT here.
+        if hr.is_err() {
+            self.failures.record("", hr);
+        }
         Ok(())
     }
 
     fn PreRenameItem(
         &self,
         _flags: u32,
-        _item: windows::core::Ref<'_, IShellItem>,
+        item: windows::core::Ref<'_, IShellItem>,
         name: &PCWSTR,
     ) -> WinResult<()> {
-        self.enter_item("rename", name)
+        self.enter_item("rename", name, item.as_ref())
     }
 
     fn PostRenameItem(
@@ -400,10 +558,10 @@ impl IFileOperationProgressSink_Impl for Sink_Impl {
         _flags: u32,
         _item: windows::core::Ref<'_, IShellItem>,
         _name: &PCWSTR,
-        _hr: windows::core::HRESULT,
+        hr: HRESULT,
         _new: windows::core::Ref<'_, IShellItem>,
     ) -> WinResult<()> {
-        self.check_cancel()
+        self.post_item(hr)
     }
 
     fn PreMoveItem(
@@ -413,8 +571,7 @@ impl IFileOperationProgressSink_Impl for Sink_Impl {
         _dir: windows::core::Ref<'_, IShellItem>,
         name: &PCWSTR,
     ) -> WinResult<()> {
-        let _ = item;
-        self.enter_item("move", name)
+        self.enter_item("move", name, item.as_ref())
     }
 
     fn PostMoveItem(
@@ -423,20 +580,20 @@ impl IFileOperationProgressSink_Impl for Sink_Impl {
         _item: windows::core::Ref<'_, IShellItem>,
         _dir: windows::core::Ref<'_, IShellItem>,
         _name: &PCWSTR,
-        _hr: windows::core::HRESULT,
+        hr: HRESULT,
         _new: windows::core::Ref<'_, IShellItem>,
     ) -> WinResult<()> {
-        self.check_cancel()
+        self.post_item(hr)
     }
 
     fn PreCopyItem(
         &self,
         _flags: u32,
-        _item: windows::core::Ref<'_, IShellItem>,
+        item: windows::core::Ref<'_, IShellItem>,
         _dir: windows::core::Ref<'_, IShellItem>,
         name: &PCWSTR,
     ) -> WinResult<()> {
-        self.enter_item("copy", name)
+        self.enter_item("copy", name, item.as_ref())
     }
 
     fn PostCopyItem(
@@ -445,38 +602,41 @@ impl IFileOperationProgressSink_Impl for Sink_Impl {
         _item: windows::core::Ref<'_, IShellItem>,
         _dir: windows::core::Ref<'_, IShellItem>,
         _name: &PCWSTR,
-        _hr: windows::core::HRESULT,
+        hr: HRESULT,
         _new: windows::core::Ref<'_, IShellItem>,
     ) -> WinResult<()> {
-        self.check_cancel()
+        self.post_item(hr)
     }
 
     fn PreDeleteItem(
         &self,
         _flags: u32,
-        _item: windows::core::Ref<'_, IShellItem>,
+        item: windows::core::Ref<'_, IShellItem>,
     ) -> WinResult<()> {
-        self.enter_item("delete", &PCWSTR::null())
+        self.enter_item("delete", &PCWSTR::null(), item.as_ref())
     }
 
     fn PostDeleteItem(
         &self,
         _flags: u32,
         _item: windows::core::Ref<'_, IShellItem>,
-        _hr: windows::core::HRESULT,
+        hr: HRESULT,
         _new: windows::core::Ref<'_, IShellItem>,
     ) -> WinResult<()> {
-        let _ = _new;
-        self.check_cancel()
+        self.post_item(hr)
     }
 
     fn PreNewItem(
         &self,
         _flags: u32,
-        _dir: windows::core::Ref<'_, IShellItem>,
+        dir: windows::core::Ref<'_, IShellItem>,
         name: &PCWSTR,
     ) -> WinResult<()> {
-        self.enter_item("newdir", name)
+        let label = unsafe { name.to_string() }.unwrap_or_default();
+        if let Some(base) = dir.as_ref().and_then(item_path) {
+            *self.current_path.lock().unwrap() = format!("{base}\\{label}");
+        }
+        self.enter_item("newdir", name, None)
     }
 
     fn PostNewItem(
@@ -486,10 +646,10 @@ impl IFileOperationProgressSink_Impl for Sink_Impl {
         _name: &PCWSTR,
         _template: &PCWSTR,
         _attrs: u32,
-        _hr: windows::core::HRESULT,
+        hr: HRESULT,
         _new: windows::core::Ref<'_, IShellItem>,
     ) -> WinResult<()> {
-        self.check_cancel()
+        self.post_item(hr)
     }
 
     fn UpdateProgress(&self, work_total: u32, work_so_far: u32) -> WinResult<()> {
@@ -510,5 +670,120 @@ impl IFileOperationProgressSink_Impl for Sink_Impl {
 
     fn ResumeTimer(&self) -> WinResult<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::os::windows::fs::OpenOptionsExt;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("flowdir-op-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn delete_request(path: &std::path::Path) -> Request {
+        Request {
+            op_id: "test".into(),
+            kind: "delete".into(),
+            sources: vec![path.to_string_lossy().into_owned()],
+            target_dir: None,
+            new_name: None,
+            permanent: false,
+        }
+    }
+
+    fn copy_request(path: &std::path::Path, target: &std::path::Path, name: &str) -> Request {
+        Request {
+            op_id: "test".into(),
+            kind: "copy".into(),
+            sources: vec![path.to_string_lossy().into_owned()],
+            target_dir: Some(target.to_string_lossy().into_owned()),
+            new_name: Some(name.into()),
+            permanent: false,
+        }
+    }
+
+    /// The shell returns S_OK from `PerformOperations` even when the single item failed;
+    /// the sink must turn the per-item HRESULT into a reported failure.
+    #[test]
+    fn locked_item_is_reported_as_failure() {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        }
+        let dir = temp_dir("locked");
+        let path = dir.join("locked.txt");
+        fs::write(&path, b"locked").unwrap();
+        // Share mode 0: the shell's copy cannot even open the source for reading.
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+
+        let outcome = perform(
+            &copy_request(&path, &dir, "copy.txt"),
+            Kind::Copy,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Channel::new(|_| Ok(())),
+        );
+
+        assert!(outcome.error.is_none(), "operation-level error");
+        assert_eq!(outcome.failed_total, 1, "detail: {outcome:?}");
+        assert_eq!(outcome.failed.len(), 1);
+        assert!(outcome.failed[0].path.ends_with("locked.txt"));
+        assert_eq!(
+            outcome.failed[0].code, "SHARE_UNAVAILABLE",
+            "detail: {}",
+            outcome.failed[0].detail
+        );
+        assert!(!dir.join("copy.txt").exists(), "the copy must not exist");
+
+        drop(held);
+        let _ = fs::remove_dir_all(&dir);
+        unsafe {
+            CoUninitialize();
+        }
+    }
+
+    /// A path that no longer resolves must be reported, either from the queue or as the
+    /// batch result, and must never turn into a silent success.
+    #[test]
+    fn missing_source_is_reported() {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        }
+        let dir = temp_dir("missing");
+        let path = dir.join("gone.txt");
+
+        let outcome = perform(
+            &delete_request(&path),
+            Kind::Delete,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Channel::new(|_| Ok(())),
+        );
+
+        let code = outcome
+            .error
+            .as_ref()
+            .map(|err| err.code.clone())
+            .or_else(|| outcome.failed.first().map(|item| item.code.clone()));
+        assert_eq!(code.as_deref(), Some("NOT_FOUND"), "outcome: {outcome:?}");
+        assert_eq!(
+            outcome.failed_total + u32::from(outcome.error.is_some()),
+            1,
+            "outcome: {outcome:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+        unsafe {
+            CoUninitialize();
+        }
     }
 }

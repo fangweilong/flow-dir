@@ -1170,7 +1170,11 @@ export default function App() {
   }, [invalidateGit, invalidateTree, startScan])
 
   const runOp = useCallback(
-    (kind: OpKind, sources: string[], options?: { targetDir?: string; newName?: string; permanent?: boolean }) => {
+    (
+      kind: OpKind,
+      sources: string[],
+      options?: { targetDir?: string; newName?: string; permanent?: boolean },
+    ) => {
       if (!sources.length) return
       const opId = uid('op')
       setOps((prev) => ({
@@ -1183,6 +1187,8 @@ export default function App() {
           name: null,
           work: 0,
           workTotal: 0,
+          failedCount: 0,
+          failed: [],
           done: false,
           aborted: false,
           error: null,
@@ -1196,18 +1202,44 @@ export default function App() {
             return next
           })
         }, delay)
-      opStart({ opId, kind, sources, ...options }, (progress) => {
-        setOps((prev) => (prev[opId] ? { ...prev, [opId]: progress } : prev))
-        if (!progress.done) return
-        if (progress.error) {
-          showToast(t('op.failed', { code: progress.error.code }))
-          drop(5000)
-        } else {
-          if (progress.aborted) showToast(t('op.canceled'))
-          else refreshPanes()
-          drop(progress.aborted ? 2500 : 800)
-        }
-      }).catch((e: unknown) => {
+      opStart(
+        {
+          opId,
+          kind,
+          sources,
+          targetDir: options?.targetDir,
+          newName: options?.newName,
+          permanent: options?.permanent,
+        },
+        (progress) => {
+          setOps((prev) => (prev[opId] ? { ...prev, [opId]: progress } : prev))
+          if (!progress.done) return
+          if (progress.error) {
+            showToast(t('op.failed', { code: progress.error.code }))
+            drop(5000)
+            return
+          }
+          // Cancellation wins over the item failures it produced: those items were not
+          // attempted, so they are not "failed" from the user's point of view.
+          if (progress.aborted) {
+            showToast(t('op.canceled'))
+            drop(2500)
+            return
+          }
+          if (progress.failedCount > 0) {
+            const failed = progress.failedCount
+            const ok = Math.max(0, progress.total - failed)
+            showToast(t('op.partial', { ok, failed }))
+            // Rows that did make it are on disk; a stale list would hide them.
+            refreshPanes()
+            // Keep the card around so the failure list stays readable.
+            drop(15000)
+            return
+          }
+          refreshPanes()
+          drop(800)
+        },
+      ).catch((e: unknown) => {
         showToast(t('op.failed', { code: String(e) }))
         drop(4000)
       })
@@ -2148,7 +2180,19 @@ export default function App() {
         />
       )}
 
-      <OpsPanel ops={Object.values(ops)} lang={lang} onCancel={(opId) => void opCancel(opId)} />
+      <OpsPanel
+        ops={Object.values(ops)}
+        lang={lang}
+        onCancel={(opId) => void opCancel(opId)}
+        onDismiss={(opId) =>
+          setOps((prev) => {
+            if (!(opId in prev)) return prev
+            const next = { ...prev }
+            delete next[opId]
+            return next
+          })
+        }
+      />
 
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
 
