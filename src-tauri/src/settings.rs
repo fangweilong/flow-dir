@@ -84,6 +84,10 @@ pub struct Settings {
     pub font_family: String,
     /// Base UI font size in px; drives the rem scale of the whole interface.
     pub font_size: u32,
+    /// File-list size column width in px at the default font size; drag-resizable.
+    pub list_size_width: u32,
+    /// File-list modified column width in px at the default font size; drag-resizable.
+    pub list_time_width: u32,
 }
 
 fn default_language() -> String {
@@ -102,8 +106,22 @@ fn default_font_size() -> u32 {
     13
 }
 
+fn default_list_size_width() -> u32 {
+    96
+}
+
+fn default_list_time_width() -> u32 {
+    142
+}
+
 const FONT_SIZE_MIN: u32 = 12;
 const FONT_SIZE_MAX: u32 = 20;
+
+/// Column widths are stored unscaled; the frontend multiplies them by the font scale.
+/// The lower bounds keep the header labels and the longest "[123,456 items]" readable.
+const LIST_COL_MIN: u32 = 56;
+const LIST_TIME_MIN: u32 = 84;
+const LIST_COL_MAX: u32 = 480;
 
 /// A font family, not a stack: quotes, commas and separators would change the generated
 /// CSS or let a hand-edited file break out of the property.
@@ -129,6 +147,14 @@ fn sanitize_font_size(value: u32) -> u32 {
     }
 }
 
+fn sanitize_list_col(value: u32, min: u32, fallback: u32) -> u32 {
+    if (min..=LIST_COL_MAX).contains(&value) {
+        value
+    } else {
+        fallback
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -148,6 +174,8 @@ impl Default for Settings {
             update_interval_hours: 24,
             font_family: default_font_family(),
             font_size: default_font_size(),
+            list_size_width: default_list_size_width(),
+            list_time_width: default_list_time_width(),
         }
     }
 }
@@ -157,6 +185,16 @@ impl Settings {
     pub fn normalize(mut self) -> Self {
         self.font_family = sanitize_font_family(&self.font_family);
         self.font_size = sanitize_font_size(self.font_size);
+        self.list_size_width = sanitize_list_col(
+            self.list_size_width,
+            LIST_COL_MIN,
+            default_list_size_width(),
+        );
+        self.list_time_width = sanitize_list_col(
+            self.list_time_width,
+            LIST_TIME_MIN,
+            default_list_time_width(),
+        );
         self
     }
 }
@@ -193,6 +231,11 @@ sidebar_open = true
 # 侧边栏和预览面板宽度（像素，可拖拽）/ sidebar and preview widths in px, drag-resizable
 sidebar_width = 176
 preview_width = 320
+
+# 文件列表“大小/修改时间”列宽（像素，拖表头分隔线调整，双击恢复默认）
+# file-list size and modified column widths in px; drag the header divider, double-click to reset
+list_size_width = 96
+list_time_width = 142
 
 # WebView2 硬件合成，关闭省约 90MB 内存 / GPU compositing, saves ~90MB when off
 gpu_accel = true
@@ -235,6 +278,8 @@ struct FileSettings {
     update_interval_hours: u32,
     font_family: String,
     font_size: u32,
+    list_size_width: u32,
+    list_time_width: u32,
     custom_places: Vec<QuickPlace>,
     hidden_places: Vec<String>,
     external_preview: Vec<ExternalPreview>,
@@ -257,6 +302,8 @@ impl Default for FileSettings {
             update_interval_hours: base.update_interval_hours,
             font_family: base.font_family,
             font_size: base.font_size,
+            list_size_width: base.list_size_width,
+            list_time_width: base.list_time_width,
             custom_places: base.custom_places,
             hidden_places: base.hidden_places,
             external_preview: base.external_preview,
@@ -280,6 +327,8 @@ impl From<FileSettings> for Settings {
             update_interval_hours: file.update_interval_hours,
             font_family: file.font_family,
             font_size: file.font_size,
+            list_size_width: file.list_size_width,
+            list_time_width: file.list_time_width,
             custom_places: file.custom_places,
             hidden_places: file.hidden_places,
             external_preview: file.external_preview,
@@ -346,6 +395,16 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), A
     );
     set_value(&mut doc, "font_family", Value::from(settings.font_family.as_str()));
     set_value(&mut doc, "font_size", Value::from(settings.font_size as i64));
+    set_value(
+        &mut doc,
+        "list_size_width",
+        Value::from(settings.list_size_width as i64),
+    );
+    set_value(
+        &mut doc,
+        "list_time_width",
+        Value::from(settings.list_time_width as i64),
+    );
 
     let mut hidden = toml_edit::Array::new();
     for key in &settings.hidden_places {
@@ -454,9 +513,44 @@ mod tests {
     }
 
     #[test]
+    fn list_column_widths_fall_back() {
+        let parsed = Settings {
+            list_size_width: 56,
+            list_time_width: 480,
+            ..Settings::default()
+        }
+        .normalize();
+        assert_eq!(parsed.list_size_width, 56);
+        assert_eq!(parsed.list_time_width, 480);
+
+        for bad in [0, 55, 481, u32::MAX] {
+            let parsed = Settings {
+                list_size_width: bad,
+                ..Settings::default()
+            }
+            .normalize();
+            assert_eq!(parsed.list_size_width, 96, "{bad}");
+        }
+
+        for bad in [0, 83, 481, u32::MAX] {
+            let parsed = Settings {
+                list_time_width: bad,
+                ..Settings::default()
+            }
+            .normalize();
+            assert_eq!(parsed.list_time_width, 142, "{bad}");
+        }
+    }
+
+    #[test]
     fn template_and_inline_rules_parse() {
         let seed: FileSettings = toml_edit::de::from_str(TEMPLATE).unwrap();
         assert!(seed.external_preview.is_empty());
+        assert_eq!(seed.list_size_width, 96);
+        assert_eq!(seed.list_time_width, 142);
+        let legacy: FileSettings = toml_edit::de::from_str("language = \"en\"").unwrap();
+        assert_eq!(legacy.list_size_width, 96);
+        assert_eq!(legacy.list_time_width, 142);
 
         let text = r#"external_preview = [{ ext = "docx", command = '"C:\Tools\WINWORD.EXE" "{path}"' }]"#;
         let parsed: FileSettings = toml_edit::de::from_str(text).unwrap();

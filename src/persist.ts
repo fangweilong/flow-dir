@@ -28,6 +28,10 @@ export type Settings = {
   fontFamily: string
   /** Base UI font size in px (12–20); drives the whole rem scale. */
   fontSize: number
+  /** File-list "size" column width in px at the default font size; drag-resizable. */
+  listSizeWidth: number
+  /** File-list "modified" column width in px at the default font size; drag-resizable. */
+  listTimeWidth: number
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -47,6 +51,8 @@ export const DEFAULT_SETTINGS: Settings = {
   updateIntervalHours: 24,
   fontFamily: 'Segoe UI Variable Text',
   fontSize: 13,
+  listSizeWidth: 96,
+  listTimeWidth: 142,
 }
 
 type Snapshot = {

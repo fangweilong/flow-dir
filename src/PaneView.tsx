@@ -8,6 +8,7 @@ import { openPath } from './api'
 import { matchBinding } from './shortcuts'
 import type { ShortcutId } from './shortcuts'
 import { EMPTY_LIST } from './types'
+import { DEFAULT_SETTINGS } from './persist'
 import type { Drive, Entry, GitStatus, Lang, ListData, SortKey, SortState } from './types'
 import { driveKindLabel, makeT } from './i18n'
 import { BASE_FONT_SIZE, clampFontSize } from './fonts'
@@ -32,11 +33,12 @@ const gitTone = (code: string) =>
 
 /** Metrics at the default 13 px text size; every pane scales them by the settings font size. */
 const ROW_H = 28
-const COL_SIZE = 96
-const COL_TIME = 142
-const COL_SIZE_NARROW = 84
-const MIN_WIDTH_TIME = 380
-const MIN_WIDTH_SIZE = 250
+/** Column bounds in px at the default font size; the stored widths are clamped to them. */
+const MIN_COL_SIZE = 56
+const MIN_COL_TIME = 84
+const MAX_COL_WIDTH = 480
+/** Name column floor, so dragging a divider can never starve the file names. */
+const MIN_COL_NAME = 140
 const MIN_WIDTH_FILTER = 420
 const GRID_NAME = 'minmax(0,1fr)'
 
@@ -67,6 +69,12 @@ type Props = {
   lang: Lang
   /** Base UI text size, shared with the root CSS variables. */
   fontSize: number
+  /** Stored "size" column width in px at the base font size; shared by every pane. */
+  colSize: number
+  /** Stored "modified" column width in px at the base font size; shared by every pane. */
+  colTime: number
+  /** Persists both widths after a drag or a double-click reset. */
+  onColWidths: (size: number, time: number) => void
   dropHint: DropMode | null
   draggingTabId: string | null
   onFocusPane: () => void
@@ -108,6 +116,9 @@ export function PaneView({
   active,
   lang,
   fontSize,
+  colSize,
+  colTime,
+  onColWidths,
   dropHint,
   draggingTabId,
   onFocusPane,
@@ -146,6 +157,8 @@ export function PaneView({
   const scrollRef = useRef<HTMLDivElement>(null)
   const sectionRef = useRef<HTMLElement>(null)
   const [width, setWidth] = useState(0)
+  /** Live column widths while a header divider is dragged; committed once on release. */
+  const [draft, setDraft] = useState<{ size: number; time: number } | null>(null)
   const [addressDraft, setAddressDraft] = useState<string | null>(null)
   const addressRef = useRef<HTMLInputElement>(null)
 
@@ -169,16 +182,29 @@ export function PaneView({
   // breakpoints that hide them must grow by the same factor or the layout overlaps.
   const fontScale = clampFontSize(fontSize) / BASE_FONT_SIZE
   const rowHeight = Math.round(ROW_H * fontScale)
-  const sizeCol = Math.round(COL_SIZE * fontScale)
-  const timeCol = Math.round(COL_TIME * fontScale)
-  const narrowSizeCol = Math.round(COL_SIZE_NARROW * fontScale)
-  const showTime = width === 0 || width >= Math.round(MIN_WIDTH_TIME * fontScale)
-  const showSize = width === 0 || width >= Math.round(MIN_WIDTH_SIZE * fontScale)
+  const nameMin = Math.round(MIN_COL_NAME * fontScale)
+  const minSizeCol = Math.round(MIN_COL_SIZE * fontScale)
+  const minTimeCol = Math.round(MIN_COL_TIME * fontScale)
+  // Dragged widths stay local until release, so one gesture writes settings once.
+  const wantSize = Math.round((draft?.size ?? colSize) * fontScale)
+  const wantTime = Math.round((draft?.time ?? colTime) * fontScale)
+  // A column stays visible while its minimum plus the name floor fit; the stored width is
+  // clamped to what the pane can spare, so neither column ever squeezes the name to zero.
+  const showSize = width === 0 || width >= nameMin + minSizeCol
+  const showTime = width === 0 || width >= nameMin + wantSize + minTimeCol
+  const sizeCol =
+    width === 0
+      ? wantSize
+      : Math.min(wantSize, Math.max(minSizeCol, width - nameMin - (showTime ? minTimeCol : 0)))
+  const timeCol =
+    width === 0
+      ? wantTime
+      : Math.min(wantTime, Math.max(minTimeCol, width - nameMin - wantSize))
   const showFilter = width === 0 || width >= Math.round(MIN_WIDTH_FILTER * fontScale)
   const grid = showTime
     ? `minmax(0,1fr) ${sizeCol}px ${timeCol}px`
     : showSize
-      ? `minmax(0,1fr) ${narrowSizeCol}px`
+      ? `minmax(0,1fr) ${sizeCol}px`
       : GRID_NAME
 
   const view = useMemo(() => {
@@ -221,6 +247,54 @@ export function PaneView({
   const changeSort = (key: SortKey) => {
     const dir = pane.sort.key === key && pane.sort.dir === 'asc' ? 'desc' : 'asc'
     onSortChange({ key, dir })
+  }
+
+  /**
+   * Drags the divider on a column's left edge. The governed column is the one to its
+   * right, so moving right shrinks it and the divider stays under the pointer. The
+   * maximum leaves the name column its floor, so no drag can push rows into overflow.
+   */
+  const startColDrag = (key: 'size' | 'time', ev: React.PointerEvent<HTMLSpanElement>) => {
+    ev.preventDefault()
+    ev.stopPropagation()
+    onFocusPane()
+    const startX = ev.clientX
+    const start = (key === 'size' ? sizeCol : timeCol) / fontScale
+    const min = key === 'size' ? MIN_COL_SIZE : MIN_COL_TIME
+    // The other column keeps its rendered width, so only the name column can give room.
+    const fixed = key === 'size' ? (showTime ? timeCol : 0) : sizeCol
+    const max =
+      width === 0
+        ? MAX_COL_WIDTH
+        : Math.max(min, Math.min(MAX_COL_WIDTH, (width - nameMin - fixed) / fontScale))
+    let next = start
+    let moved = false
+    const move = (e: PointerEvent) => {
+      next = Math.min(max, Math.max(min, start - (e.clientX - startX) / fontScale))
+      const delta = Math.abs(e.clientX - startX)
+      if (delta > 1) moved = true
+      setDraft({ size: key === 'size' ? next : colSize, time: key === 'time' ? next : colTime })
+    }
+    const end = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', end)
+      window.removeEventListener('pointercancel', end)
+      setDraft(null)
+      if (!moved || Math.round(next) === Math.round(start)) return
+      const rounded = Math.round(next)
+      onColWidths(key === 'size' ? rounded : colSize, key === 'time' ? rounded : colTime)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', end)
+    window.addEventListener('pointercancel', end)
+  }
+
+  /** Double-clicking a divider restores the width of the column it governs. */
+  const resetCol = (key: 'size' | 'time') => {
+    onColWidths(
+      key === 'size' ? DEFAULT_SETTINGS.listSizeWidth : colSize,
+      key === 'time' ? DEFAULT_SETTINGS.listTimeWidth : colTime,
+    )
   }
 
   const selectRow = (index: number, ev: React.MouseEvent) => {
@@ -581,10 +655,24 @@ export function PaneView({
         >
           <HeaderCell label={t('list.name')} k="name" sort={pane.sort} onSort={changeSort} align="left" />
           {showSize && (
-            <HeaderCell label={t('list.size')} k="size" sort={pane.sort} onSort={changeSort} align="right" />
+            <div className="relative flex h-full min-w-0">
+              <HeaderCell label={t('list.size')} k="size" sort={pane.sort} onSort={changeSort} align="right" />
+              <ColDivider
+                label={t('list.size')}
+                onPointerDown={(ev) => startColDrag('size', ev)}
+                onDoubleClick={() => resetCol('size')}
+              />
+            </div>
           )}
           {showTime && (
-            <HeaderCell label={t('list.mtime')} k="mtime" sort={pane.sort} onSort={changeSort} align="left" />
+            <div className="relative flex h-full min-w-0">
+              <HeaderCell label={t('list.mtime')} k="mtime" sort={pane.sort} onSort={changeSort} align="left" />
+              <ColDivider
+                label={t('list.mtime')}
+                onPointerDown={(ev) => startColDrag('time', ev)}
+                onDoubleClick={() => resetCol('time')}
+              />
+            </div>
           )}
         </div>
       )}
@@ -919,14 +1007,36 @@ function HeaderCell({
     <button
       type="button"
       onClick={() => onSort(k)}
-      className={`flex h-full items-center gap-1 px-1.5 text-[0.65625rem] font-medium tracking-wide text-muted hover:text-fg ${
+      className={`flex h-full w-full min-w-0 items-center gap-1 px-1.5 text-[0.65625rem] font-medium tracking-wide text-muted hover:text-fg ${
         align === 'right' ? 'justify-end' : 'justify-start'
       }`}
     >
-      {label}
-      <span className={`text-[0.5rem] ${active ? 'text-blue-500' : 'text-transparent'}`}>
+      <span className="truncate">{label}</span>
+      <span className={`shrink-0 text-[0.5rem] ${active ? 'text-blue-500' : 'text-transparent'}`}>
         {sort.dir === 'asc' ? '▲' : '▼'}
       </span>
     </button>
+  )
+}
+
+/** Hit area on a column's left edge: drag resizes it, double-click restores the default. */
+function ColDivider({
+  label,
+  onPointerDown,
+  onDoubleClick,
+}: {
+  label: string
+  onPointerDown: (ev: React.PointerEvent<HTMLSpanElement>) => void
+  onDoubleClick: () => void
+}) {
+  return (
+    <span
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={label}
+      onPointerDown={onPointerDown}
+      onDoubleClick={onDoubleClick}
+      className="absolute inset-y-0 left-0 z-10 w-1.5 -translate-x-1/2 cursor-col-resize touch-none select-none hover:bg-blue-400/60 active:bg-blue-500"
+    />
   )
 }
