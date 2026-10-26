@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { appInfo, configPath, diagnosticsExport, everythingStatus, explorerOpen, logDirPath, openPath, pickFolder, restartApp, updateCheck, updateInstall } from './api'
+import { appInfo, configPath, diagnosticsExport, everythingStatus, logDirPath, pickFolder, restartApp, updateCheck, updateInstall } from './api'
 import { makeT } from './i18n'
 import type { Key } from './i18n'
 import { DEFAULT_BINDINGS, SHORTCUTS, bindingFromEvent, formatBinding, resolveShortcuts, sameBinding } from './shortcuts'
@@ -23,6 +23,8 @@ type Props = {
   settings: Settings
   lang: Lang
   onChange: (next: Settings) => void
+  /** Opens a folder inside FlowDir itself; the settings modal closes first. */
+  onOpenLocation: (path: string) => void
   onClose: () => void
 }
 
@@ -128,7 +130,7 @@ function RegionFontRow({
   )
 }
 
-export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
+export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClose }: Props) {
   const t = makeT(lang)
   const [info, setInfo] = useState<AppInfo | null>(null)
   const [everything, setEverything] = useState<EverythingStatus | null>(null)
@@ -815,7 +817,7 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
               <button
                 type="button"
                 disabled={!configDir}
-                onClick={() => void explorerOpen(configDir).catch(() => undefined)}
+                onClick={() => configDir && onOpenLocation(configDir)}
                 className="shrink-0 rounded-md border border-line px-2 py-1 text-[0.6875rem] text-fg hover:bg-surface-3 disabled:opacity-40"
               >
                 {t('settings.configOpen')}
@@ -911,7 +913,7 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
                   type="button"
                   onClick={() =>
                     void logDirPath()
-                      .then((dir) => (dir ? openPath(dir) : undefined))
+                      .then((dir) => (dir ? onOpenLocation(dir) : undefined))
                       .catch(() => undefined)
                   }
                   className="shrink-0 rounded border border-line px-2 py-0.5 text-[0.6875rem] text-fg hover:bg-surface-3"

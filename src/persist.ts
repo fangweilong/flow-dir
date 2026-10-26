@@ -51,6 +51,10 @@ export type Settings = {
   listSizeWidth: number
   /** File-list "modified" column width in px at the default font size; drag-resizable. */
   listTimeWidth: number
+  /** Drive overview "capacity" column width in px at the default font size; drag-resizable. */
+  driveCapacityWidth: number
+  /** Drive overview "free" column width in px at the default font size; drag-resizable. */
+  driveFreeWidth: number
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -80,6 +84,8 @@ export const DEFAULT_SETTINGS: Settings = {
   navFontSize: 12,
   listSizeWidth: 96,
   listTimeWidth: 142,
+  driveCapacityWidth: 150,
+  driveFreeWidth: 84,
 }
 
 type Snapshot = {

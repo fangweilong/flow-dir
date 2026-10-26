@@ -19,8 +19,8 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::UI::Shell::{
     FileOperation, IFileOperation, IFileOperationProgressSink, IFileOperationProgressSink_Impl,
-    IShellItem, SHCreateItemFromParsingName, FOFX_RECYCLEONDELETE, FOF_ALLOWUNDO, FOF_NOERRORUI,
-    FOF_SILENT, FOF_WANTNUKEWARNING, SIGDN_FILESYSPATH,
+    IShellItem, SHCreateItemFromParsingName, FOFX_RECYCLEONDELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION,
+    FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING, SIGDN_FILESYSPATH,
 };
 
 use crate::error::ApiError;
@@ -320,13 +320,20 @@ fn perform(
             let _ = operation.SetOwnerWindow(HWND(raw as *mut core::ffi::c_void));
         }
         // Failures are reported in-app (with retryable entries), so the shell must not put a
-        // modal in front of every item that fails; conflict prompts are not errors and stay.
+        // modal in front of every item that fails. Nothing here suppresses the shell's own
+        // replace/overwrite prompts: copies and moves keep asking through IFileOperation.
+        // Deletes are confirmed in the app first, so the permanent-delete prompt is redundant;
+        // a Recycle Bin delete keeps FOF_WANTNUKEWARNING in case the shell has to nuke instead.
         let mut flags = FOF_SILENT | FOF_WANTNUKEWARNING | FOF_NOERRORUI;
         if !request.permanent {
             flags |= FOF_ALLOWUNDO;
         }
-        if kind == Kind::Delete && !request.permanent {
-            flags |= FOFX_RECYCLEONDELETE;
+        if kind == Kind::Delete {
+            if request.permanent {
+                flags |= FOF_NOCONFIRMATION;
+            } else {
+                flags |= FOFX_RECYCLEONDELETE;
+            }
         }
         if let Err(e) = operation.SetOperationFlags(flags) {
             return failure(ApiError::new("SHELL_FAILED", e.to_string()));

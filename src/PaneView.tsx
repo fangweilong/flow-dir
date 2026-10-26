@@ -45,11 +45,19 @@ const HEADER_H = 24
 /** Column bounds in px at the default font size; the stored widths are clamped to them. */
 const MIN_COL_SIZE = 56
 const MIN_COL_TIME = 84
+/** "123.4 GB / 465.7 GB" plus the usage bar needs more room than a plain file size. */
+const MIN_DRIVE_CAPACITY = 120
+const MIN_DRIVE_FREE = 56
+/** Drive "type" column; fixed, since the label is short and never wraps. */
+const DRIVE_TYPE_COL = 72
 const MAX_COL_WIDTH = 480
 /** Name column floor, so dragging a divider can never starve the file names. */
 const MIN_COL_NAME = 140
 const MIN_WIDTH_FILTER = 420
 const GRID_NAME = 'minmax(0,1fr)'
+
+/** Header dividers govern the column on their right; the drive grid reuses the same drag. */
+type ColKey = 'size' | 'time' | 'capacity' | 'free'
 
 /** Screen/client coordinates for a context-menu request. */
 export type MenuPoint = {
@@ -86,8 +94,12 @@ type Props = {
   colSize: number
   /** Stored "modified" column width in px at the base font size; shared by every pane. */
   colTime: number
-  /** Persists both widths after a drag or a double-click reset. */
-  onColWidths: (size: number, time: number) => void
+  /** Stored drive-overview "capacity" column width in px at the base font size. */
+  colDriveCapacity: number
+  /** Stored drive-overview "free" column width in px at the base font size. */
+  colDriveFree: number
+  /** Persists every column width after a drag or a double-click reset. */
+  onColWidths: (size: number, time: number, capacity: number, free: number) => void
   dropHint: DropMode | null
   draggingTabId: string | null
   onFocusPane: () => void
@@ -143,6 +155,8 @@ export function PaneView({
   navFontSize,
   colSize,
   colTime,
+  colDriveCapacity,
+  colDriveFree,
   onColWidths,
   dropHint,
   draggingTabId,
@@ -188,7 +202,12 @@ export function PaneView({
   const sectionRef = useRef<HTMLElement>(null)
   const [width, setWidth] = useState(0)
   /** Live column widths while a header divider is dragged; committed once on release. */
-  const [draft, setDraft] = useState<{ size: number; time: number } | null>(null)
+  const [draft, setDraft] = useState<{
+    size: number
+    time: number
+    capacity: number
+    free: number
+  } | null>(null)
   /** Full-path editor: the draft text, whether the last Enter missed, and its request token. */
   const [addressDraft, setAddressDraft] = useState<string | null>(null)
   const [addressBad, setAddressBad] = useState(false)
@@ -258,12 +277,30 @@ export function PaneView({
   // The overview drops the label column first, then the capacity pair, the same way the
   // file list drops size and modified time on a narrow pane.
   const showDriveLabel = width === 0 || width >= 300
-  const showDriveCapacity = width === 0 || width >= 420
+  // The drive grid shares the list's scale, so a stored width means the same at any font.
+  const driveTypeCol = Math.round(DRIVE_TYPE_COL * listScale)
+  const minDriveCapacity = Math.round(MIN_DRIVE_CAPACITY * listScale)
+  const minDriveFree = Math.round(MIN_DRIVE_FREE * listScale)
+  const wantCapacity = Math.round((draft?.capacity ?? colDriveCapacity) * listScale)
+  const wantFree = Math.round((draft?.free ?? colDriveFree) * listScale)
+  const showDriveCapacity =
+    width === 0 || width >= nameMin + driveTypeCol + minDriveCapacity + minDriveFree
+  const capacityCol =
+    width === 0
+      ? wantCapacity
+      : Math.min(
+          wantCapacity,
+          Math.max(minDriveCapacity, width - nameMin - driveTypeCol - (showDriveCapacity ? minDriveFree : 0)),
+        )
+  const freeCol =
+    width === 0
+      ? wantFree
+      : Math.min(wantFree, Math.max(minDriveFree, width - nameMin - driveTypeCol - capacityCol))
   const driveGrid = [
     'minmax(0,2fr)',
     ...(showDriveLabel ? ['minmax(0,1fr)'] : []),
-    '4.5rem',
-    ...(showDriveCapacity ? ['minmax(6rem,1fr)', '4.5rem'] : []),
+    `${driveTypeCol}px`,
+    ...(showDriveCapacity ? [`${capacityCol}px`, `${freeCol}px`] : []),
   ].join(' ')
   const grid = showTime
     ? `minmax(0,1fr) ${sizeCol}px ${timeCol}px`
@@ -363,26 +400,62 @@ export function PaneView({
    * right, so moving right shrinks it and the divider stays under the pointer. The
    * maximum leaves the name column its floor, so no drag can push rows into overflow.
    */
-  const startColDrag = (key: 'size' | 'time', ev: React.PointerEvent<HTMLSpanElement>) => {
+  const startColDrag = (key: ColKey, ev: React.PointerEvent<HTMLSpanElement>) => {
     ev.preventDefault()
     ev.stopPropagation()
     onFocusPane()
     const startX = ev.clientX
-    const start = (key === 'size' ? sizeCol : timeCol) / listScale
-    const min = key === 'size' ? MIN_COL_SIZE : MIN_COL_TIME
-    // The other column keeps its rendered width, so only the name column can give room.
-    const fixed = key === 'size' ? (showTime ? timeCol : 0) : sizeCol
+    const rendered: Record<ColKey, number> = {
+      size: sizeCol,
+      time: timeCol,
+      capacity: capacityCol,
+      free: freeCol,
+    }
+    const stored: Record<ColKey, number> = {
+      size: colSize,
+      time: colTime,
+      capacity: colDriveCapacity,
+      free: colDriveFree,
+    }
+    const floors: Record<ColKey, number> = {
+      size: MIN_COL_SIZE,
+      time: MIN_COL_TIME,
+      capacity: MIN_DRIVE_CAPACITY,
+      free: MIN_DRIVE_FREE,
+    }
+    // The other columns keep their rendered width, so only the name column can give room.
+    const fixed = (() => {
+      switch (key) {
+        case 'size':
+          return showTime ? timeCol : 0
+        case 'time':
+          return sizeCol
+        case 'capacity':
+          return driveTypeCol + freeCol
+        case 'free':
+          return driveTypeCol + capacityCol
+      }
+    })()
+    const start = rendered[key] / listScale
+    const min = floors[key]
     const max =
       width === 0
         ? MAX_COL_WIDTH
         : Math.max(min, Math.min(MAX_COL_WIDTH, (width - nameMin - fixed) / listScale))
     let next = start
     let moved = false
+    const live = (): { size: number; time: number; capacity: number; free: number } => ({
+      size: stored.size,
+      time: stored.time,
+      capacity: stored.capacity,
+      free: stored.free,
+      [key]: next,
+    })
     const move = (e: PointerEvent) => {
       next = Math.min(max, Math.max(min, start - (e.clientX - startX) / listScale))
       const delta = Math.abs(e.clientX - startX)
       if (delta > 1) moved = true
-      setDraft({ size: key === 'size' ? next : colSize, time: key === 'time' ? next : colTime })
+      setDraft(live())
     }
     const end = () => {
       window.removeEventListener('pointermove', move)
@@ -390,8 +463,8 @@ export function PaneView({
       window.removeEventListener('pointercancel', end)
       setDraft(null)
       if (!moved || Math.round(next) === Math.round(start)) return
-      const rounded = Math.round(next)
-      onColWidths(key === 'size' ? rounded : colSize, key === 'time' ? rounded : colTime)
+      const widths = live()
+      onColWidths(widths.size, widths.time, widths.capacity, widths.free)
     }
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', end)
@@ -399,11 +472,21 @@ export function PaneView({
   }
 
   /** Double-clicking a divider restores the width of the column it governs. */
-  const resetCol = (key: 'size' | 'time') => {
-    onColWidths(
-      key === 'size' ? DEFAULT_SETTINGS.listSizeWidth : colSize,
-      key === 'time' ? DEFAULT_SETTINGS.listTimeWidth : colTime,
-    )
+  const resetCol = (key: ColKey) => {
+    const defaults: Record<ColKey, number> = {
+      size: DEFAULT_SETTINGS.listSizeWidth,
+      time: DEFAULT_SETTINGS.listTimeWidth,
+      capacity: DEFAULT_SETTINGS.driveCapacityWidth,
+      free: DEFAULT_SETTINGS.driveFreeWidth,
+    }
+    const stored: Record<ColKey, number> = {
+      size: colSize,
+      time: colTime,
+      capacity: colDriveCapacity,
+      free: colDriveFree,
+    }
+    const widths = { ...stored, [key]: defaults[key] }
+    onColWidths(widths.size, widths.time, widths.capacity, widths.free)
   }
 
   /** Opens the full-path editor; Ctrl+L uses it even at the drive overview. */
@@ -951,12 +1034,26 @@ export function PaneView({
           <span className="truncate px-1.5 text-[0.84em] font-medium tracking-wide">{t('list.type')}</span>
           {showDriveCapacity && (
             <>
-              <span className="truncate px-1.5 text-right text-[0.84em] font-medium tracking-wide">
-                {t('list.capacity')}
-              </span>
-              <span className="truncate px-1.5 text-right text-[0.84em] font-medium tracking-wide">
-                {t('list.free')}
-              </span>
+              <div className="relative flex h-full min-w-0 items-center justify-end">
+                <span className="truncate px-1.5 text-right text-[0.84em] font-medium tracking-wide">
+                  {t('list.capacity')}
+                </span>
+                <ColDivider
+                  label={t('list.capacity')}
+                  onPointerDown={(ev) => startColDrag('capacity', ev)}
+                  onDoubleClick={() => resetCol('capacity')}
+                />
+              </div>
+              <div className="relative flex h-full min-w-0 items-center justify-end">
+                <span className="truncate px-1.5 text-right text-[0.84em] font-medium tracking-wide">
+                  {t('list.free')}
+                </span>
+                <ColDivider
+                  label={t('list.free')}
+                  onPointerDown={(ev) => startColDrag('free', ev)}
+                  onDoubleClick={() => resetCol('free')}
+                />
+              </div>
             </>
           )}
         </div>
@@ -974,6 +1071,7 @@ export function PaneView({
       <div
         ref={scrollRef}
         tabIndex={0}
+        data-list
         onKeyDown={onKeyDown}
         onFocus={(ev) => {
           // IME composition needs an editable target, so the list hands focus to a hidden

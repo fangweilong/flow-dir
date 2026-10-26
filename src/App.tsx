@@ -10,6 +10,7 @@ import { ContextMenu } from './ContextMenu'
 import type { MenuItem } from './ContextMenu'
 import { OpsPanel } from './OpsPanel'
 import { PromptDialog } from './PromptDialog'
+import { ConfirmDialog } from './ConfirmDialog'
 import { PreviewPanel } from './PreviewPanel'
 import { SearchOverlay } from './SearchOverlay'
 import { SettingsModal } from './SettingsModal'
@@ -193,6 +194,12 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null)
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null)
   const [prompt, setPrompt] = useState<{ title: string; initial: string; submit: (value: string) => void } | null>(null)
+  /** Pending delete waiting for the confirmation dialog; nothing leaves the disk until it closes. */
+  const [deleteConfirm, setDeleteConfirm] = useState<{
+    paneId: string
+    names: string[]
+    permanent: boolean
+  } | null>(null)
   const [ops, setOps] = useState<Record<string, OpProgress>>({})
   /** Sidebar tree: expanded folders (key → display path) and their cached children. */
   const [treeOpen, setTreeOpen] = useState<Record<string, string>>({})
@@ -841,10 +848,16 @@ export default function App() {
     void settingsSave(next).catch(() => undefined)
   }, [])
 
-  /** File-list column widths are global: every pane and tab shares them. */
+  /** Column widths are global: every pane and tab shares them. */
   const setColWidths = useCallback(
-    (listSizeWidth: number, listTimeWidth: number) => {
-      updateSettings({ ...settingsRef.current, listSizeWidth, listTimeWidth })
+    (listSizeWidth: number, listTimeWidth: number, driveCapacityWidth: number, driveFreeWidth: number) => {
+      updateSettings({
+        ...settingsRef.current,
+        listSizeWidth,
+        listTimeWidth,
+        driveCapacityWidth,
+        driveFreeWidth,
+      })
     },
     [updateSettings],
   )
@@ -960,6 +973,24 @@ export default function App() {
       startScan(tabId, next, pane.sort, pane.hidden)
     },
     [startScan],
+  )
+
+  /**
+   * Opens a folder inside FlowDir instead of handing it to Explorer: the config and log
+   * directories are ordinary folders, so the app can show them with the same panes.
+   */
+  const openInApp = useCallback(
+    (path: string) => {
+      setSettingsOpen(false)
+      const current = wsRef.current
+      if (!current) return
+      const pane =
+        current.panes[current.activePaneId] ?? Object.values(current.panes)[0]
+      const tab = pane ? current.tabs[pane.activeTabId] : undefined
+      if (!tab) return
+      navigate(tab.id, path)
+    },
+    [navigate],
   )
 
   /**
@@ -1703,12 +1734,31 @@ export default function App() {
     return names.map((name) => joinPath(tab.path, name))
   }, [])
 
-  const deleteEntries = useCallback(
-    (paneId: string, names: string[], permanent: boolean) => {
-      runOp('delete', pathsFor(paneId, names), { permanent })
-    },
-    [pathsFor, runOp],
-  )
+  /** A modal steals focus; the list has to take it back or Delete/F2 stop reaching the pane. */
+  const focusList = useCallback((paneId: string) => {
+    // The dialog's unmount moves focus to <body> as part of the same commit, so focus after it.
+    window.setTimeout(() => {
+      const el = paneEls.current.get(paneId)?.querySelector<HTMLElement>('[data-list]')
+      el?.focus({ preventScroll: true })
+    }, 0)
+  }, [])
+
+  /**
+   * Deleting is never immediate: the dialog names the items and states whether they go to the
+   * Recycle Bin, so a stray Delete or Shift+Delete cannot lose data.
+   */
+  const deleteEntries = useCallback((paneId: string, names: string[], permanent: boolean) => {
+    if (!names.length) return
+    setDeleteConfirm({ paneId, names, permanent })
+  }, [])
+
+  /** First few names, then a count; the dialog stays readable for large selections. */
+  const confirmDetail = useMemo(() => {
+    if (!deleteConfirm) return ''
+    const names = deleteConfirm.names
+    const shown = names.slice(0, 3).join(', ')
+    return names.length > 3 ? t('confirm.more', { names: shown, count: names.length }) : shown
+  }, [deleteConfirm, t])
 
   const openProperties = useCallback(
     (paneId: string, names: string[]) => {
@@ -2172,7 +2222,7 @@ export default function App() {
   // list from reacting to keys typed into them.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (settingsOpen || searchOpen) return
+      if (settingsOpen || searchOpen || deleteConfirm) return
       const bare = !event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey
       if (bare && isTextInput(event.target)) return
 
@@ -2228,6 +2278,7 @@ export default function App() {
     toggleSidebar,
     settingsOpen,
     searchOpen,
+    deleteConfirm,
     activePane,
     activeTab,
     activeList,
@@ -2381,6 +2432,8 @@ export default function App() {
               navFontSize={settings.navFontSize}
               colSize={settings.listSizeWidth}
               colTime={settings.listTimeWidth}
+              colDriveCapacity={settings.driveCapacityWidth}
+              colDriveFree={settings.driveFreeWidth}
               onColWidths={setColWidths}
               dropHint={drag?.target?.paneId === pane.id ? drag.target.mode : null}
               draggingTabId={drag?.tabId ?? null}
@@ -2455,6 +2508,8 @@ export default function App() {
       settings.navFontSize,
       settings.listSizeWidth,
       settings.listTimeWidth,
+      settings.driveCapacityWidth,
+      settings.driveFreeWidth,
       setColWidths,
     ],
   )
@@ -2756,11 +2811,39 @@ export default function App() {
         />
       )}
 
+      {deleteConfirm && (
+        <ConfirmDialog
+          lang={lang}
+          title={t(deleteConfirm.permanent ? 'confirm.deleteTitle' : 'confirm.recycleTitle')}
+          message={t(
+            deleteConfirm.permanent ? 'confirm.deletePermanent' : 'confirm.recycle',
+            { count: deleteConfirm.names.length },
+          )}
+          detail={confirmDetail}
+          confirmLabel={t(
+            deleteConfirm.permanent ? 'confirm.deletePermanentAction' : 'confirm.recycleAction',
+          )}
+          danger
+          onConfirm={() => {
+            const pending = deleteConfirm
+            setDeleteConfirm(null)
+            focusList(pending.paneId)
+            runOp('delete', pathsFor(pending.paneId, pending.names), { permanent: pending.permanent })
+          }}
+          onClose={() => {
+            const pending = deleteConfirm
+            setDeleteConfirm(null)
+            if (pending) focusList(pending.paneId)
+          }}
+        />
+      )}
+
       {settingsOpen && (
         <SettingsModal
           settings={settings}
           lang={lang}
           onChange={updateSettings}
+          onOpenLocation={openInApp}
           onClose={() => setSettingsOpen(false)}
         />
       )}

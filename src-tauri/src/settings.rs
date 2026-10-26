@@ -104,6 +104,10 @@ pub struct Settings {
     pub list_size_width: u32,
     /// File-list modified column width in px at the default font size; drag-resizable.
     pub list_time_width: u32,
+    /// Drive overview capacity column width in px at the default font size; drag-resizable.
+    pub drive_capacity_width: u32,
+    /// Drive overview free-space column width in px at the default font size; drag-resizable.
+    pub drive_free_width: u32,
 }
 
 fn default_language() -> String {
@@ -142,6 +146,14 @@ fn default_list_time_width() -> u32 {
     142
 }
 
+fn default_drive_capacity_width() -> u32 {
+    150
+}
+
+fn default_drive_free_width() -> u32 {
+    84
+}
+
 const FONT_SIZE_MIN: u32 = 12;
 const FONT_SIZE_MAX: u32 = 20;
 /// Region sizes may go below the global floor: compact tab strips stay usable.
@@ -151,6 +163,9 @@ const REGION_FONT_SIZE_MIN: u32 = 10;
 /// The lower bounds keep the header labels and the longest "[123,456 items]" readable.
 const LIST_COL_MIN: u32 = 56;
 const LIST_TIME_MIN: u32 = 84;
+/// "123.4 GB / 465.7 GB" plus the usage bar needs more room than a plain file size.
+const DRIVE_CAPACITY_MIN: u32 = 120;
+const DRIVE_FREE_MIN: u32 = 56;
 const LIST_COL_MAX: u32 = 480;
 
 /// A font family, not a stack: quotes, commas and separators would change the generated
@@ -236,6 +251,8 @@ impl Default for Settings {
             nav_font_size: default_nav_font_size(),
             list_size_width: default_list_size_width(),
             list_time_width: default_list_time_width(),
+            drive_capacity_width: default_drive_capacity_width(),
+            drive_free_width: default_drive_free_width(),
         }
     }
 }
@@ -265,6 +282,13 @@ impl Settings {
             LIST_TIME_MIN,
             default_list_time_width(),
         );
+        self.drive_capacity_width = sanitize_list_col(
+            self.drive_capacity_width,
+            DRIVE_CAPACITY_MIN,
+            default_drive_capacity_width(),
+        );
+        self.drive_free_width =
+            sanitize_list_col(self.drive_free_width, DRIVE_FREE_MIN, default_drive_free_width());
         self
     }
 }
@@ -314,6 +338,11 @@ preview_width = 320
 # file-list size and modified column widths in px; drag the header divider, double-click to reset
 list_size_width = 96
 list_time_width = 142
+
+# 此电脑“容量/剩余”列宽（像素，可拖拽，双击恢复默认）
+# drive overview capacity and free-space column widths in px; drag or double-click to reset
+drive_capacity_width = 150
+drive_free_width = 84
 
 # WebView2 硬件合成，关闭省约 90MB 内存 / GPU compositing, saves ~90MB when off
 gpu_accel = true
@@ -372,6 +401,8 @@ struct FileSettings {
     nav_font_size: u32,
     list_size_width: u32,
     list_time_width: u32,
+    drive_capacity_width: u32,
+    drive_free_width: u32,
     custom_places: Vec<QuickPlace>,
     hidden_places: Vec<String>,
     external_preview: Vec<ExternalPreview>,
@@ -404,6 +435,8 @@ impl Default for FileSettings {
             nav_font_size: base.nav_font_size,
             list_size_width: base.list_size_width,
             list_time_width: base.list_time_width,
+            drive_capacity_width: base.drive_capacity_width,
+            drive_free_width: base.drive_free_width,
             custom_places: base.custom_places,
             hidden_places: base.hidden_places,
             external_preview: base.external_preview,
@@ -437,6 +470,8 @@ impl From<FileSettings> for Settings {
             nav_font_size: file.nav_font_size,
             list_size_width: file.list_size_width,
             list_time_width: file.list_time_width,
+            drive_capacity_width: file.drive_capacity_width,
+            drive_free_width: file.drive_free_width,
             custom_places: file.custom_places,
             hidden_places: file.hidden_places,
             external_preview: file.external_preview,
@@ -518,6 +553,16 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), A
         &mut doc,
         "list_time_width",
         Value::from(settings.list_time_width as i64),
+    );
+    set_value(
+        &mut doc,
+        "drive_capacity_width",
+        Value::from(settings.drive_capacity_width as i64),
+    );
+    set_value(
+        &mut doc,
+        "drive_free_width",
+        Value::from(settings.drive_free_width as i64),
     );
 
     let mut hidden = toml_edit::Array::new();
@@ -661,11 +706,33 @@ mod tests {
         let parsed = Settings {
             list_size_width: 56,
             list_time_width: 480,
+            drive_capacity_width: 120,
+            drive_free_width: 480,
             ..Settings::default()
         }
         .normalize();
         assert_eq!(parsed.list_size_width, 56);
         assert_eq!(parsed.list_time_width, 480);
+        assert_eq!(parsed.drive_capacity_width, 120);
+        assert_eq!(parsed.drive_free_width, 480);
+
+        for bad in [0, 119, 481, u32::MAX] {
+            let parsed = Settings {
+                drive_capacity_width: bad,
+                ..Settings::default()
+            }
+            .normalize();
+            assert_eq!(parsed.drive_capacity_width, 150, "{bad}");
+        }
+
+        for bad in [0, 55, 481, u32::MAX] {
+            let parsed = Settings {
+                drive_free_width: bad,
+                ..Settings::default()
+            }
+            .normalize();
+            assert_eq!(parsed.drive_free_width, 84, "{bad}");
+        }
 
         for bad in [0, 55, 481, u32::MAX] {
             let parsed = Settings {
@@ -692,6 +759,8 @@ mod tests {
         assert!(seed.external_preview.is_empty());
         assert_eq!(seed.list_size_width, 96);
         assert_eq!(seed.list_time_width, 142);
+        assert_eq!(seed.drive_capacity_width, 150);
+        assert_eq!(seed.drive_free_width, 84);
         assert_eq!(seed.tab_font_family, "");
         assert_eq!(seed.tab_font_size, 12);
         assert_eq!(seed.list_font_size, 13);
