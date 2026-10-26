@@ -7,7 +7,20 @@ export type DirBatch = {
   items: RawEntry[]
   error: ApiError | null
 }
-export type Drive = { root: string; kind: string; name: string }
+export type Drive = {
+  root: string
+  kind: string
+  name: string
+  /** Volume label; empty for unlabeled volumes and network locations. */
+  label: string
+  /** Filesystem name (`NTFS`, `exFAT`, …); empty when the volume cannot be queried. */
+  fs: string
+  /** Total and free bytes; 0 when unknown (locations, empty optical drives). */
+  total: number
+  free: number
+  /** False when the media cannot be read now (empty optical drive, disconnected share). */
+  available: boolean
+}
 export type Place = { key: string; path: string }
 export type Lang = 'zh-CN' | 'en'
 export type Theme = 'system' | 'light' | 'dark'

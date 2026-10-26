@@ -231,6 +231,16 @@ pub struct Drive {
     pub kind: String,
     /// Row caption: `C:` for letters, the shortcut name for network locations.
     pub name: String,
+    /// Volume label; empty for unlabeled volumes and network locations.
+    pub label: String,
+    /// Filesystem name (`NTFS`, `exFAT`, …); empty when the volume cannot be queried.
+    pub fs: String,
+    /// Total and free bytes; 0 when unknown (locations, empty optical drives, dead shares).
+    pub total: u64,
+    pub free: u64,
+    /// False for media that cannot be read right now, so the UI can say "unavailable"
+    /// instead of showing a misleading 0-byte volume.
+    pub available: bool,
 }
 
 /// Letter drives followed by Explorer's "网络位置" shortcuts.
@@ -238,6 +248,66 @@ pub fn drives() -> Vec<Drive> {
     let mut out = letter_drives();
     out.extend(network_locations());
     out
+}
+
+#[derive(Default, Clone)]
+struct VolumeInfo {
+    label: String,
+    fs: String,
+    total: u64,
+    free: u64,
+    available: bool,
+}
+
+/// Reads label, filesystem and free space. A disconnected share or an empty optical drive
+/// fails the first call, which is exactly the "unavailable" signal the list needs.
+fn volume_info(root: &str) -> VolumeInfo {
+    use windows::Win32::Storage::FileSystem::{
+        GetDiskFreeSpaceExW, GetVolumeInformationW,
+    };
+
+    let wide: Vec<u16> = root.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut label = [0u16; 64];
+    let mut fs = [0u16; 32];
+    let mut serial = 0u32;
+    let mut max_component = 0u32;
+    let mut flags = 0u32;
+    let named = unsafe {
+        GetVolumeInformationW(
+            PCWSTR(wide.as_ptr()),
+            Some(&mut label),
+            Some(&mut serial),
+            Some(&mut max_component),
+            Some(&mut flags),
+            Some(&mut fs),
+        )
+    };
+    if named.is_err() {
+        return VolumeInfo::default();
+    }
+    let mut free = 0u64;
+    let mut total = 0u64;
+    let sized = unsafe {
+        GetDiskFreeSpaceExW(
+            PCWSTR(wide.as_ptr()),
+            None,
+            Some(&mut total),
+            Some(&mut free),
+        )
+    };
+    VolumeInfo {
+        label: utf16_field(&label),
+        fs: utf16_field(&fs),
+        total: if sized.is_ok() { total } else { 0 },
+        free: if sized.is_ok() { free } else { 0 },
+        available: true,
+    }
+}
+
+/// Trimmed UTF-16 buffer contents, stopping at the first NUL.
+fn utf16_field(buffer: &[u16]) -> String {
+    let len = buffer.iter().position(|unit| *unit == 0).unwrap_or(buffer.len());
+    String::from_utf16_lossy(&buffer[..len])
 }
 
 fn letter_drives() -> Vec<Drive> {
@@ -262,9 +332,48 @@ fn letter_drives() -> Vec<Drive> {
             name: root.trim_end_matches('\\').to_string(),
             root,
             kind: kind.to_string(),
+            label: String::new(),
+            fs: String::new(),
+            total: 0,
+            free: 0,
+            available: false,
         });
     }
+    fill_volumes(&mut out);
     out
+}
+
+/// Queries every letter in parallel with a short overall deadline: one dead network share
+/// must not stall the whole overview.
+fn fill_volumes(drives: &mut [Drive]) {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    const DEADLINE: Duration = Duration::from_millis(1200);
+    let (tx, rx) = mpsc::channel();
+    for drive in drives.iter() {
+        let root = drive.root.clone();
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let info = volume_info(&root);
+            let _ = tx.send((root, info));
+        });
+    }
+    let deadline = Instant::now() + DEADLINE;
+    for _ in 0..drives.len() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Ok((root, info)) = rx.recv_timeout(remaining) else {
+            break;
+        };
+        let Some(drive) = drives.iter_mut().find(|drive| drive.root == root) else {
+            continue;
+        };
+        drive.label = info.label;
+        drive.fs = info.fs;
+        drive.total = info.total;
+        drive.free = info.free;
+        drive.available = info.available;
+    }
 }
 
 /// Shortcuts from `%APPDATA%\Microsoft\Windows\Network Shortcuts`, the per-user
@@ -309,6 +418,12 @@ fn network_locations() -> Vec<Drive> {
             root,
             kind: "location".to_string(),
             name,
+            // Locations have no volume: the UI shows "—" rather than a fake 0 bytes.
+            label: String::new(),
+            fs: String::new(),
+            total: 0,
+            free: 0,
+            available: false,
         });
     }
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -391,5 +506,20 @@ mod tests {
         assert_eq!(all.len(), 3);
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The overview must show real capacity for a system drive and mark dead devices as
+    /// unavailable rather than as 0-byte volumes.
+    #[test]
+    fn volume_info_reports_capacity_and_failures() {
+        let system = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+        let info = volume_info(&format!("{system}\\"));
+        assert!(info.available, "system volume must be readable");
+        assert!(info.total > 0);
+        assert!(info.free <= info.total);
+
+        let dead = volume_info("\\\\localhost\\flowdir-no-such-share");
+        assert!(!dead.available);
+        assert_eq!(dead.total, 0);
     }
 }

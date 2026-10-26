@@ -19,6 +19,7 @@ import {
   clipboardCopy,
   clipboardPaste,
   dragOut,
+  driveEject,
   drives,
   explorerOpen,
   layoutLoad,
@@ -86,6 +87,12 @@ import {
   uid,
 } from './workspace'
 import type { DropMode, Node, PaneState, TabState, Workspace } from './workspace'
+
+/** Error code of a rejected IPC call; `ApiError` is `{ code, detail }`. */
+const errorCode = (err: unknown): string =>
+  err && typeof err === 'object' && 'code' in err && typeof err.code === 'string'
+    ? err.code
+    : String(err)
 
 /** Folders whose full change list stays cached; older ones refetch on demand. */
 const GIT_CACHE_LIMIT = 64
@@ -373,7 +380,7 @@ export default function App() {
   const openExternalPreview = useCallback(
     (target: string) => {
       void previewExternal(target).catch((err: unknown) => {
-        const code = err && typeof err === 'object' && 'code' in err ? String(err.code) : ''
+        const code = errorCode(err)
         showToast(t(code === 'NO_RULE' ? 'preview.externalMissing' : 'preview.externalFailed', { code }))
       })
     },
@@ -1170,6 +1177,24 @@ export default function App() {
     [listData, lang, showToast],
   )
 
+  /** Re-reads the drive overview; volumes appear and vanish outside the app's control. */
+  const refreshDrives = useCallback(() => {
+    void drives().then(setDriveList).catch(() => undefined)
+  }, [])
+
+  // Plugging in a USB stick sends no event the webview sees; re-reading on focus is the
+  // cheap approximation Explorer uses for the drive list.
+  useEffect(() => {
+    const onFocus = () => {
+      const current = wsRef.current
+      const pane = current?.panes[current.activePaneId]
+      const tab = pane && current ? current.tabs[pane.activeTabId] : undefined
+      if (tab && !tab.path) refreshDrives()
+    }
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [refreshDrives])
+
   const refreshPanes = useCallback(() => {
     const current = wsRef.current
     if (!current) return
@@ -1185,8 +1210,8 @@ export default function App() {
         invalidateGit(tab.path)
       }
     }
-    if (overview) void drives().then(setDriveList).catch(() => undefined)
-  }, [invalidateGit, invalidateTree, startScan])
+    if (overview) refreshDrives()
+  }, [invalidateGit, invalidateTree, refreshDrives, startScan])
 
   const runOp = useCallback(
     (
@@ -1478,10 +1503,9 @@ export default function App() {
     (paneId: string, names: string[]) => {
       const paths = pathsFor(paneId, names)
       for (const path of paths)
-        void shellProperties(path).catch((e: unknown) => {
-          const code = e && typeof e === 'object' && 'code' in e ? String((e as { code: unknown }).code) : String(e)
-          showToast(t('op.failed', { code }))
-        })
+        void shellProperties(path).catch((e: unknown) =>
+          showToast(t('op.failed', { code: errorCode(e) })),
+        )
     },
     [pathsFor, showToast, t],
   )
@@ -2048,6 +2072,52 @@ export default function App() {
     [activeTab, navigate, removePlace, t],
   )
 
+  const openDriveRowMenu = useCallback(
+    (drive: Drive, point: MenuPoint) => {
+      const current = wsRef.current
+      const pane = current?.panes[current.activePaneId]
+      const tab = pane && current ? current.tabs[pane.activeTabId] : undefined
+      const items: MenuItem[] = [
+        {
+          kind: 'item',
+          label: t('menu.open'),
+          disabled: !tab,
+          onSelect: () => {
+            if (!tab) return
+            if (isFsPath(drive.root)) navigate(tab.id, drive.root)
+            else void openPath(drive.root).catch(() => undefined)
+          },
+        },
+        {
+          kind: 'item',
+          label: t('menu.properties'),
+          onSelect: () =>
+            void shellProperties(drive.root).catch((e: unknown) =>
+              showToast(t('op.failed', { code: errorCode(e) })),
+            ),
+        },
+      ]
+      // Only media the shell can remove expose the Eject verb; fixed disks do not.
+      if (drive.kind === 'removable' || drive.kind === 'cdrom') {
+        items.push(
+          { kind: 'sep' },
+          {
+            kind: 'item',
+            label: t('menu.eject'),
+            onSelect: () => {
+              void driveEject(drive.root)
+                // Removal is asynchronous: give the device a moment to disappear.
+                .then(() => window.setTimeout(refreshDrives, 1200))
+                .catch((e: unknown) => showToast(t('op.failed', { code: errorCode(e) })))
+            },
+          },
+        )
+      }
+      setMenu({ x: point.clientX, y: point.clientY, items })
+    },
+    [navigate, refreshDrives, showToast, t],
+  )
+
   const openDriveMenu = useCallback(
     (paneId: string, point: MenuPoint) => {
       const current = wsRef.current
@@ -2113,6 +2183,7 @@ export default function App() {
               onTabContextMenu={(tabId, point) => openTabMenu(pane.id, tabId, point)}
               drives={driveList}
               onDriveMenu={(point) => openDriveMenu(pane.id, point)}
+              onDriveRowMenu={openDriveRowMenu}
               onProperties={(names) => openProperties(pane.id, names)}
               onRename={(name) => startRename(pane.id, name)}
               onDelete={(names, permanent) => deleteEntries(pane.id, names, permanent)}
@@ -2159,6 +2230,7 @@ export default function App() {
       gitByDir,
       driveList,
       openDriveMenu,
+      openDriveRowMenu,
       settings.tabFontSize,
       settings.listFontSize,
       settings.navFontSize,

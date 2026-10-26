@@ -6,13 +6,13 @@
 //! forwarded to `IContextMenu2::HandleMenuMsg` or the entries show up blank.
 
 use std::cell::RefCell;
-use std::ffi::c_void;
+use std::ffi::{c_void, CString};
 use std::sync::mpsc;
 use std::time::Duration;
 
 use serde::Serialize;
-use windows::core::{w, Interface, HSTRING, PCSTR, PCWSTR};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::core::{w, Interface, HSTRING, PCSTR, PCWSTR, PSTR};
+use windows::Win32::Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::Com::{
     CoInitializeEx, CoTaskMemFree, CoUninitialize, IBindCtx, COINIT_APARTMENTTHREADED,
 };
@@ -24,12 +24,14 @@ use windows::Win32::UI::Shell::{
     BHID_SFUIObject, IContextMenu, IContextMenu2, IContextMenu3, IShellFolder,
     SHBindToParent, SHCreateShellItemArrayFromIDLists, SHParseDisplayName, CMF_EXPLORE,
     CMF_EXTENDEDVERBS, CMF_NORMAL, CMIC_MASK_PTINVOKE, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX,
+    GCS_VERBW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    PostMessageW, RegisterClassW, SetForegroundWindow, TrackPopupMenuEx, HMENU, MF_SEPARATOR,
-    MF_STRING, TPM_RETURNCMD, TPM_RIGHTBUTTON, TPM_WORKAREA, WM_DRAWITEM, WM_INITMENUPOPUP,
-    WM_MEASUREITEM, WM_MENUCHAR, WM_NULL, WNDCLASSW, WS_POPUP,
+    GetMenuItemCount, GetMenuItemID, PostMessageW, RegisterClassW, SetForegroundWindow,
+    TrackPopupMenuEx, HMENU, MF_SEPARATOR, MF_STRING, SW_SHOWNORMAL, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, TPM_WORKAREA, WM_DRAWITEM, WM_INITMENUPOPUP, WM_MEASUREITEM, WM_MENUCHAR,
+    WM_NULL, WNDCLASSW, WS_POPUP,
 };
 
 use crate::error::ApiError;
@@ -119,15 +121,24 @@ pub fn show_background(
 fn run_on_menu_thread(
     work: impl FnOnce() -> Result<Outcome, ApiError> + Send + 'static,
 ) -> Result<Outcome, ApiError> {
+    run_offthread("flowdir-shell-menu", Duration::from_secs(900), work)?
+}
+
+/// Runs a blocking shell call off the IPC thread and waits for its result.
+fn run_offthread<T: Send + 'static>(
+    name: &str,
+    timeout: Duration,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, ApiError> {
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
-        .name("flowdir-shell-menu".into())
+        .name(name.to_string())
         .spawn(move || {
             let _ = tx.send(work());
         })
         .map_err(|e| ApiError::new("THREAD", e.to_string()))?;
-    rx.recv_timeout(Duration::from_secs(900))
-        .map_err(|_| ApiError::new("MENU_TIMEOUT", "shell menu did not return"))?
+    rx.recv_timeout(timeout)
+        .map_err(|_| ApiError::new("TIMEOUT", "shell call did not return"))
 }
 
 unsafe fn run_items(paths: &[String], x: i32, y: i32, extended: bool) -> Result<Outcome, ApiError> {
@@ -377,6 +388,129 @@ pub fn properties(hwnd: Option<isize>, path: &str) -> Result<(), ApiError> {
         }
     }
     Ok(())
+}
+
+/// Invokes a shell verb by name on a drive root; used for `Eject` on removable media.
+/// The canonical verb is locale-independent, unlike the menu text.
+pub fn eject(path: String) -> Result<(), ApiError> {
+    if path.is_empty() {
+        return Err(ApiError::new("EMPTY", "no drive"));
+    }
+    run_offthread("flowdir-eject", Duration::from_secs(30), move || unsafe {
+        run_eject(&path)
+    })?
+}
+
+unsafe fn run_eject(path: &str) -> Result<(), ApiError> {
+    unsafe {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+            .ok()
+            .map_err(|e| ApiError::new("COM", e.to_string()))?;
+        let result = invoke_verb(path, "Eject");
+        CoUninitialize();
+        result
+    }
+}
+
+unsafe fn invoke_verb(path: &str, verb: &str) -> Result<(), ApiError> {
+    unsafe {
+        let hwnd = create_owner().map_err(|e| ApiError::new("SHELL_MENU", e.to_string()))?;
+        let result = invoke_verb_on(hwnd, path, verb);
+        let _ = DestroyWindow(hwnd);
+        result
+    }
+}
+
+unsafe fn invoke_verb_on(hwnd: HWND, path: &str, verb: &str) -> Result<(), ApiError> {
+    unsafe {
+        let wide = HSTRING::from(path);
+        let mut pidl: *mut windows::Win32::UI::Shell::Common::ITEMIDLIST = std::ptr::null_mut();
+        SHParseDisplayName(&wide, None::<&IBindCtx>, &mut pidl, 0, None)
+            .map_err(|e| ApiError::from_windows(path, e.code().0))?;
+        let cleanup = PidlGuard(vec![pidl as *const _]);
+        let mut child: *mut windows::Win32::UI::Shell::Common::ITEMIDLIST = std::ptr::null_mut();
+        let parent: IShellFolder = SHBindToParent(pidl, Some(&mut child))
+            .map_err(|e| ApiError::from_windows(path, e.code().0))?;
+        if child.is_null() {
+            return Err(ApiError::new("SHELL_MENU", "no shell item for the drive"));
+        }
+        let context: IContextMenu = parent
+            .GetUIObjectOf(hwnd, &[child as *const _], None)
+            .map_err(|e| ApiError::new("SHELL_MENU", e.to_string()))?;
+        let menu = CreatePopupMenu().map_err(|e| ApiError::new("SHELL_MENU", e.to_string()))?;
+        let outcome = invoke_from_menu(hwnd, &context, menu, verb);
+        let _ = DestroyMenu(menu);
+        drop(context);
+        drop(cleanup);
+        outcome
+    }
+}
+
+unsafe fn invoke_from_menu(
+    hwnd: HWND,
+    context: &IContextMenu,
+    menu: HMENU,
+    verb: &str,
+) -> Result<(), ApiError> {
+    unsafe {
+        // Verb discovery needs a built menu: handlers populate their verbs in QueryContextMenu.
+        let query = context.QueryContextMenu(menu, 0, ID_CMD_FIRST, ID_CMD_LAST, CMF_NORMAL);
+        if query.is_err() {
+            return Err(ApiError::new("SHELL_MENU", "the drive exposes no context menu"));
+        }
+        let count = GetMenuItemCount(Some(menu));
+        let mut found: Option<u32> = None;
+        for index in 0..count {
+            let id = GetMenuItemID(menu, index);
+            if !(ID_CMD_FIRST..=ID_CMD_LAST).contains(&id) {
+                continue;
+            }
+            let mut buffer = [0u16; 64];
+            if context
+                .GetCommandString(
+                    (id - ID_CMD_FIRST) as usize,
+                    GCS_VERBW,
+                    None,
+                    PSTR(buffer.as_mut_ptr() as *mut u8),
+                    buffer.len() as u32,
+                )
+                .is_err()
+            {
+                continue;
+            }
+            let len = buffer.iter().position(|c| *c == 0).unwrap_or(buffer.len());
+            if String::from_utf16_lossy(&buffer[..len]).eq_ignore_ascii_case(verb) {
+                found = Some(id);
+                break;
+            }
+        }
+        if found.is_none() {
+            return Err(ApiError::new("NO_VERB", format!("no {verb} verb for this drive")));
+        }
+        // Both spellings name the verb: the shell accepts a string instead of an offset.
+        let ansi = CString::new(verb).map_err(|_| ApiError::new("BAD_VERB", verb))?;
+        let wide = HSTRING::from(verb);
+        let info = CMINVOKECOMMANDINFOEX {
+            cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
+            fMask: CMIC_MASK_UNICODE,
+            hwnd,
+            lpVerb: PCSTR(ansi.as_ptr() as *const u8),
+            lpParameters: PCSTR::null(),
+            lpDirectory: PCSTR::null(),
+            nShow: SW_SHOWNORMAL.0,
+            dwHotKey: 0,
+            hIcon: HANDLE::default(),
+            lpTitle: PCSTR::null(),
+            lpVerbW: PCWSTR(wide.as_ptr()),
+            lpParametersW: PCWSTR::null(),
+            lpDirectoryW: PCWSTR::null(),
+            lpTitleW: PCWSTR::null(),
+            ptInvoke: POINT { x: 0, y: 0 },
+        };
+        context
+            .InvokeCommand(&info as *const _ as *const CMINVOKECOMMANDINFO)
+            .map_err(|e| ApiError::new("SHELL_MENU", e.to_string()))
+    }
 }
 
 struct PidlGuard(Vec<*const windows::Win32::UI::Shell::Common::ITEMIDLIST>);

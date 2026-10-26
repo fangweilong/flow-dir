@@ -492,6 +492,12 @@ fn shell_properties(app: tauri::AppHandle, path: String) -> Result<(), ApiError>
     shell_menu::properties(hwnd.map(|h| h.0 as isize), &path)
 }
 
+/// Invokes the shell's `Eject` verb; media removal itself is asynchronous.
+#[tauri::command]
+fn drive_eject(root: String) -> Result<(), ApiError> {
+    shell_menu::eject(root)
+}
+
 #[tauri::command]
 fn search_cancel(state: tauri::State<'_, search::SearchState>) {
     state.cancel();
@@ -736,6 +742,7 @@ fn main() {
             search_cancel,
             everything_status,
             shell_properties,
+            drive_eject,
             app_info,
             update_check,
             update_install

@@ -112,6 +112,8 @@ type Props = {
   onTabContextMenu: (tabId: string, point: MenuPoint) => void
   drives: Drive[]
   onDriveMenu: (point: MenuPoint) => void
+  /** Right-click on one overview row: properties, and eject for removable media. */
+  onDriveRowMenu: (drive: Drive, point: MenuPoint) => void
   onProperties: (names: string[]) => void
   onRename: (name: string) => void
   onDelete: (names: string[], permanent: boolean) => void
@@ -162,6 +164,7 @@ export function PaneView({
   onTabContextMenu,
   drives,
   onDriveMenu,
+  onDriveRowMenu,
   onProperties,
   onRename,
   onDelete,
@@ -252,6 +255,16 @@ export function PaneView({
       ? wantTime
       : Math.min(wantTime, Math.max(minTimeCol, width - nameMin - wantSize))
   const showFilter = width === 0 || width >= Math.round(MIN_WIDTH_FILTER * listScale)
+  // The overview drops the label column first, then the capacity pair, the same way the
+  // file list drops size and modified time on a narrow pane.
+  const showDriveLabel = width === 0 || width >= 300
+  const showDriveCapacity = width === 0 || width >= 420
+  const driveGrid = [
+    'minmax(0,2fr)',
+    ...(showDriveLabel ? ['minmax(0,1fr)'] : []),
+    '4.5rem',
+    ...(showDriveCapacity ? ['minmax(6rem,1fr)', '4.5rem'] : []),
+  ].join(' ')
   const grid = showTime
     ? `minmax(0,1fr) ${sizeCol}px ${timeCol}px`
     : showSize
@@ -926,6 +939,29 @@ export function PaneView({
         </div>
       )}
 
+      {root && (
+        <div
+          className="typo-list grid shrink-0 items-center border-b border-line bg-surface-2 text-muted"
+          style={{ height: headerHeight, gridTemplateColumns: driveGrid }}
+        >
+          <span className="truncate px-1.5 text-[0.84em] font-medium tracking-wide">{t('list.name')}</span>
+          {showDriveLabel && (
+            <span className="truncate px-1.5 text-[0.84em] font-medium tracking-wide">{t('list.volumeLabel')}</span>
+          )}
+          <span className="truncate px-1.5 text-[0.84em] font-medium tracking-wide">{t('list.type')}</span>
+          {showDriveCapacity && (
+            <>
+              <span className="truncate px-1.5 text-right text-[0.84em] font-medium tracking-wide">
+                {t('list.capacity')}
+              </span>
+              <span className="truncate px-1.5 text-right text-[0.84em] font-medium tracking-wide">
+                {t('list.free')}
+              </span>
+            </>
+          )}
+        </div>
+      )}
+
       <div
         ref={scrollRef}
         tabIndex={0}
@@ -982,26 +1018,68 @@ export function PaneView({
 
         {root && (
           <div className="py-0.5">
-            {drives.map((drive) => (
-              <div
-                key={`${drive.kind}:${drive.name}`}
-                data-drive={drive.root}
-                onDoubleClick={() =>
-                  tab &&
-                  (isFsPath(drive.root)
-                    ? onNavigate(tab.id, drive.root)
-                    : void openPath(drive.root).catch(() => undefined))
-                }
-                onContextMenu={(ev) => ev.preventDefault()}
-                title={drive.root}
-                style={{ height: rowHeight }}
-                className="flex cursor-default items-center gap-1.5 border-b border-line/60 px-1.5 hover:bg-surface-3"
-              >
-                <FileIcon name={drive.name} dir path={drive.root} scale={listScale} />
-                <span className="truncate font-medium text-fg-strong">{drive.name}</span>
-                <span className="shrink-0 text-[0.88em] text-muted-2">{driveKindLabel(t, drive.kind)}</span>
-              </div>
-            ))}
+            {drives.map((drive) => {
+              const sized = drive.available && drive.total > 0
+              const used = sized ? Math.max(0, drive.total - drive.free) : 0
+              const usedRatio = sized ? Math.min(1, used / drive.total) : 0
+              const low = sized && drive.free / drive.total < 0.1
+              return (
+                <div
+                  key={`${drive.kind}:${drive.name}`}
+                  data-drive={drive.root}
+                  onDoubleClick={() =>
+                    tab &&
+                    (isFsPath(drive.root)
+                      ? onNavigate(tab.id, drive.root)
+                      : void openPath(drive.root).catch(() => undefined))
+                  }
+                  onContextMenu={(ev) => {
+                    ev.preventDefault()
+                    onDriveRowMenu(drive, pointOf(ev))
+                  }}
+                  title={drive.available ? drive.root : `${drive.root} · ${t('drive.unavailable')}`}
+                  style={{ height: rowHeight, gridTemplateColumns: driveGrid }}
+                  className={`grid cursor-default items-center gap-2 border-b border-line/60 px-1.5 hover:bg-surface-3 ${
+                    drive.available ? '' : 'text-muted-2'
+                  }`}
+                >
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <FileIcon name={drive.name} dir path={drive.root} scale={listScale} />
+                    <span className={`truncate font-medium ${drive.available ? 'text-fg-strong' : 'text-muted'}`}>
+                      {drive.name}
+                    </span>
+                  </div>
+                  {showDriveLabel && (
+                    <span className="truncate text-[0.88em] text-muted">
+                      {drive.label || (drive.kind === 'location' ? '' : '—')}
+                    </span>
+                  )}
+                  <span className="truncate text-[0.88em] text-muted-2">{driveKindLabel(t, drive.kind)}</span>
+                  {showDriveCapacity && (
+                    <>
+                      <div className="flex min-w-0 flex-col gap-0.5">
+                        <span className="truncate text-right text-[0.8em] text-muted">
+                          {sized ? `${formatSize(used, false)} / ${formatSize(drive.total, false)}` : '—'}
+                        </span>
+                        {sized && (
+                          <div className="h-0.5 overflow-hidden rounded-full bg-surface-3">
+                            <div
+                              className={`h-full rounded-full ${low ? 'bg-red-500' : 'bg-blue-500'}`}
+                              style={{ width: `${Math.round(usedRatio * 100)}%` }}
+                            />
+                          </div>
+                        )}
+                      </div>
+                      <span
+                        className={`truncate text-right text-[0.8em] ${low ? 'text-red-500' : 'text-muted'}`}
+                      >
+                        {sized ? formatSize(drive.free, false) : '—'}
+                      </span>
+                    </>
+                  )}
+                </div>
+              )
+            })}
           </div>
         )}
 

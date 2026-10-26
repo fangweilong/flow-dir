@@ -105,6 +105,8 @@ export function searchStart(
 export type EverythingStatus = { usable: boolean; version: string | null; reason: string | null }
 export const everythingStatus = () => invoke<EverythingStatus>('everything_status')
 export const shellProperties = (path: string) => invoke<void>('shell_properties', { path })
+/** Invokes the shell's Eject verb on a drive root; removal itself is asynchronous. */
+export const driveEject = (root: string) => invoke<void>('drive_eject', { root })
 
 export const searchCancel = () => invoke<void>('search_cancel')
 export const previewInfo = (path: string, width: number, bg: string) =>
