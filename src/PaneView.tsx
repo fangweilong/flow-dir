@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { FileIcon } from './icons'
-import { crumbs, crumbTarget, formatSize, formatTime, isDir, isFsPath, joinPath, parentPath, pathKey, underPath } from './paths'
+import { crumbs, formatSize, formatTime, isDir, isFsPath, joinPath, parentPath, pathKey, underPath } from './paths'
 import { buildGitBadges } from './git'
 import type { GitBadges } from './git'
 import { openPath, pathIsDir } from './api'
@@ -88,7 +88,7 @@ type Props = {
   onClipboard: (cut: boolean) => void
   /** Copies the tab's folder path verbatim; the breadcrumb button calls this. */
   onCopyPath: (path: string) => void
-  /** Reports a breadcrumb edit that did not resolve to a folder, so the hint is visible. */
+  /** Reports an address-bar edit that did not resolve to a folder, so the hint is visible. */
   onPathInvalid: (path: string) => void
   onRowContextMenu: (entry: Entry, point: MenuPoint) => void
   onBlankContextMenu: (point: MenuPoint) => void
@@ -165,16 +165,12 @@ export function PaneView({
   const [width, setWidth] = useState(0)
   /** Live column widths while a header divider is dragged; committed once on release. */
   const [draft, setDraft] = useState<{ size: number; time: number } | null>(null)
+  /** Full-path editor: the draft text, whether the last Enter missed, and its request token. */
   const [addressDraft, setAddressDraft] = useState<string | null>(null)
+  const [addressBad, setAddressBad] = useState(false)
   const addressRef = useRef<HTMLInputElement>(null)
-  /**
-   * Inline breadcrumb edit: the crumb being replaced, its pending text, and whether the
-   * last target failed to resolve. Only one crumb is editable; the others keep their buttons.
-   */
-  const [crumbEdit, setCrumbEdit] = useState<{ base: string; value: string; bad: boolean } | null>(null)
-  const crumbRef = useRef<HTMLInputElement>(null)
-  /** Invalidates in-flight existence checks once the edit closes or moves to another crumb. */
-  const crumbSeq = useRef(0)
+  /** Invalidates an in-flight existence check once the editor closes or commits again. */
+  const addressSeq = useRef(0)
 
   useEffect(() => {
     if (addressDraft === null) return
@@ -183,13 +179,6 @@ export function PaneView({
     input.focus()
     input.select()
   }, [addressDraft])
-
-  // Same focus/select contract as the address bar: typing replaces the segment.
-  useEffect(() => {
-    if (!crumbEdit) return
-    crumbRef.current?.focus()
-    crumbRef.current?.select()
-  }, [crumbEdit?.base])
 
   useEffect(() => {
     const el = sectionRef.current
@@ -318,43 +307,47 @@ export function PaneView({
     )
   }
 
-  /** Opens the inline editor on one crumb. Enter commits it, Escape restores the label. */
-  const startCrumbEdit = (base: string, label: string) => {
-    crumbSeq.current += 1
-    setCrumbEdit({ base, value: label, bad: false })
+  /** Opens the full-path editor; Ctrl+L uses it even at the drive overview. */
+  const startAddressEdit = () => {
+    addressSeq.current += 1
+    setAddressBad(false)
+    setAddressDraft(tab?.path ?? '')
   }
 
-  const closeCrumbEdit = () => {
-    crumbSeq.current += 1
-    setCrumbEdit(null)
+  const closeAddressEdit = () => {
+    addressSeq.current += 1
+    setAddressBad(false)
+    setAddressDraft(null)
   }
 
   /**
-   * Resolves the edited segment and navigates only once the backend confirms a folder, so a
-   * typo keeps the current directory, its history, and the editor (now marked invalid).
+   * Leaves only for a folder the backend confirms, so a typo keeps the current directory
+   * and the editor (now marked invalid) instead of navigating into an error.
    */
-  const commitCrumb = () => {
-    if (!crumbEdit || !tab) return
-    const next = crumbTarget(crumbEdit.base, crumbEdit.value)
-    if (!next) {
-      setCrumbEdit({ ...crumbEdit, bad: true })
+  const commitAddress = () => {
+    if (addressDraft === null || !tab) return
+    const raw = addressDraft.trim()
+    if (!raw) {
+      closeAddressEdit()
       return
     }
+    // "c:" (no slash) must land on the drive root, not on a relative path.
+    const next = /^[a-zA-Z]:$/.test(raw) ? `${raw}\\` : raw
     if (pathKey(next) === pathKey(tab.path)) {
-      closeCrumbEdit()
+      closeAddressEdit()
       return
     }
-    const seq = ++crumbSeq.current
+    const seq = ++addressSeq.current
     void pathIsDir(next)
       .catch(() => false)
       .then((ok) => {
-        if (seq !== crumbSeq.current) return
+        if (seq !== addressSeq.current) return
         if (!ok) {
-          setCrumbEdit((cur) => (cur ? { ...cur, bad: true } : cur))
+          setAddressBad(true)
           onPathInvalid(next)
           return
         }
-        closeCrumbEdit()
+        closeAddressEdit()
         onNavigate(tab.id, next)
       })
   }
@@ -407,7 +400,7 @@ export function PaneView({
     }
     if (matchBinding(ev, keys.addressBar)) {
       ev.preventDefault()
-      setAddressDraft(tab.path)
+      startAddressEdit()
       return
     }
     // The drive overview holds no entries: skip selection, clipboard, and rename actions.
@@ -662,24 +655,35 @@ export function PaneView({
             ref={addressRef}
             data-address-input
             value={addressDraft}
-            onChange={(ev) => setAddressDraft(ev.target.value)}
-            onBlur={() => setAddressDraft(null)}
+            spellCheck={false}
+            onChange={(ev) => {
+              setAddressDraft(ev.target.value)
+              setAddressBad(false)
+            }}
+            onBlur={closeAddressEdit}
             onKeyDown={(ev) => {
               if (ev.key === 'Enter') {
                 ev.preventDefault()
-                const next = addressDraft.trim()
-                setAddressDraft(null)
-                // "c:" (no slash) must land on the drive root, not on a relative path.
-                if (next && tab) onNavigate(tab.id, /^[a-zA-Z]:$/.test(next) ? `${next}\\` : next)
+                commitAddress()
               } else if (ev.key === 'Escape') {
                 ev.preventDefault()
-                setAddressDraft(null)
+                closeAddressEdit()
               }
             }}
-            className="mx-0.5 h-6 min-w-0 flex-1 rounded border border-blue-400 bg-surface px-1.5 text-[0.71875rem] outline-none"
+            title={addressBad ? t('address.invalidPath') : undefined}
+            className={`mx-0.5 h-6 min-w-0 flex-1 rounded border bg-surface px-1.5 text-[0.71875rem] outline-none ${
+              addressBad ? 'border-red-400 text-red-500' : 'border-blue-400'
+            }`}
           />
         ) : (
-        <div className="mx-0.5 flex h-6 min-w-0 flex-1 items-center rounded border border-line bg-surface-2 text-[0.71875rem] leading-none">
+        <div
+          className="mx-0.5 flex h-6 min-w-0 flex-1 items-center rounded border border-line bg-surface-2 text-[0.71875rem] leading-none"
+          // Blank space opens the full-path editor; crumbs and the copy button keep their clicks.
+          onClick={(ev) => {
+            if (!tab?.path || (ev.target as HTMLElement).closest('button')) return
+            startAddressEdit()
+          }}
+        >
           <div className="no-bar flex h-full min-w-0 flex-1 items-center overflow-x-auto overflow-y-hidden px-1">
             {root && (
               <span className="shrink-0 px-1 py-1 text-[0.71875rem] font-medium leading-none text-fg-strong">
@@ -689,42 +693,18 @@ export function PaneView({
             {parts.map((part, i) => (
               <div key={part.path} className="flex shrink-0 items-center">
                 {i > 0 && <span className="px-0.5 text-muted-2">›</span>}
-                {crumbEdit?.base === part.path ? (
-                  <input
-                    ref={crumbRef}
-                    data-crumb-input
-                    value={crumbEdit.value}
-                    spellCheck={false}
-                    onChange={(ev) => setCrumbEdit({ ...crumbEdit, value: ev.target.value, bad: false })}
-                    onBlur={closeCrumbEdit}
-                    onKeyDown={(ev) => {
-                      if (ev.key === 'Enter') {
-                        ev.preventDefault()
-                        commitCrumb()
-                      } else if (ev.key === 'Escape') {
-                        ev.preventDefault()
-                        closeCrumbEdit()
-                      }
-                    }}
-                    title={crumbEdit.bad ? t('address.invalidPath') : part.path}
-                    className={`h-5 w-[10rem] min-w-0 rounded border bg-surface px-1 text-[0.71875rem] leading-none outline-none ${
-                      crumbEdit.bad ? 'border-red-400 text-red-500' : 'border-blue-400'
-                    }`}
-                  />
-                ) : (
-                  <button
-                    type="button"
-                    data-crumb={part.path}
-                    // Click edits that level in place; Enter on the unchanged label goes there.
-                    onClick={() => startCrumbEdit(part.path, part.label)}
-                    title={part.path}
-                    className={`max-w-[10rem] truncate rounded px-1 py-1 leading-none hover:bg-surface-3 ${
-                      i === parts.length - 1 ? 'font-medium text-fg-strong' : 'text-muted'
-                    }`}
-                  >
-                    {part.label}
-                  </button>
-                )}
+                <button
+                  type="button"
+                  data-crumb={part.path}
+                  // A crumb jumps straight to that folder, like Explorer's breadcrumbs.
+                  onClick={() => tab && pathKey(part.path) !== pathKey(tab.path) && onNavigate(tab.id, part.path)}
+                  title={part.path}
+                  className={`max-w-[10rem] truncate rounded px-1 py-1 leading-none hover:bg-surface-3 ${
+                    i === parts.length - 1 ? 'font-medium text-fg-strong' : 'text-muted'
+                  }`}
+                >
+                  {part.label}
+                </button>
               </div>
             ))}
           </div>

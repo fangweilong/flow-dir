@@ -240,7 +240,7 @@ async fn tree_dirs(path: String, hidden: bool) -> Result<Vec<String>, ApiError> 
     .map_err(|e| ApiError::new("TREE_TASK", e.to_string()))?
 }
 
-/// Whether the path is an existing folder. The breadcrumb editor checks a target before
+/// Whether the path is an existing folder. The address bar checks a target before
 /// leaving the current directory, so a typo cannot replace a working folder with an error.
 #[tauri::command]
 async fn path_is_dir(path: String) -> bool {

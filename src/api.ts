@@ -21,7 +21,7 @@ export const cancelDir = (tabId: string) => invoke<void>('cancel_dir', { tabId }
 export const drives = () => invoke<Drive[]>('drives')
 /** Subdirectory names, for the sidebar tree. */
 export const treeDirs = (path: string, hidden: boolean) => invoke<string[]>('tree_dirs', { path, hidden })
-/** True when the path is an existing folder; validates a breadcrumb edit before navigating. */
+/** True when the path is an existing folder; validates an address-bar edit before navigating. */
 export const pathIsDir = (path: string) => invoke<boolean>('path_is_dir', { path })
 /** Repository status for the folder; empty when it is not a work tree. */
 export const gitStatus = (path: string) => invoke<GitStatus>('git_status', { path })

@@ -53,21 +53,6 @@ export function crumbs(p: string): { label: string; path: string }[] {
   return out
 }
 
-/**
- * Navigate target for an inline breadcrumb edit. A grounded path (drive letter or UNC)
- * is taken as typed; a bare name renames that level under its parent. Blank input returns
- * an empty string so the editor can stay open instead of jumping somewhere unintended.
- */
-export function crumbTarget(base: string, text: string): string {
-  const raw = text.trim()
-  if (!raw) return ''
-  // "c:" must land on the drive root, matching the Ctrl+L address bar.
-  if (/^[a-zA-Z]:$/.test(raw)) return `${raw}\\`
-  if (/^[a-zA-Z]:/.test(raw) || raw.startsWith('\\\\') || raw.startsWith('//')) return raw
-  const parent = parentPath(base)
-  return parent ? joinPath(parent, raw) : raw
-}
-
 /** Paths the built-in list can open; network locations may point at URLs the shell handles. */
 export const isFsPath = (path: string) => /^[a-zA-Z]:/.test(path) || path.startsWith('\\\\')
 
