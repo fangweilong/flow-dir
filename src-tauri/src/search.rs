@@ -1,15 +1,18 @@
+use std::os::windows::fs::MetadataExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
 use everything_ipc::wm::{EverythingClient, RequestFlags};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 
 use crate::error::ApiError;
 
 const BATCH: usize = 50;
+const ATTR_HIDDEN: u32 = 0x2;
+const ATTR_SYSTEM: u32 = 0x4;
 
 #[derive(Default)]
 pub struct SearchState {
@@ -34,7 +37,7 @@ impl SearchState {
     }
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchItem {
     pub path: String,
@@ -44,7 +47,7 @@ pub struct SearchItem {
     pub mtime: u64,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchBatch {
     pub gen: u64,
@@ -60,6 +63,7 @@ pub fn run(
     gen: u64,
     limit: u32,
     prefer_everything: bool,
+    hidden: bool,
     cancel: Arc<AtomicBool>,
     on_batch: Channel<SearchBatch>,
 ) {
@@ -89,9 +93,28 @@ pub fn run(
         }
     }
     let root_path = PathBuf::from(&root);
+    // jwalk's own `skip_hidden` only understands dot-prefixed names; Windows hides files
+    // through file attributes, so the filter lives in `process_read_dir` and also prunes
+    // hidden directories before they are entered.
     let walker = jwalk::WalkDir::new(&root_path)
-        .skip_hidden(true)
-        .follow_links(false);
+        .skip_hidden(false)
+        .follow_links(false)
+        .process_read_dir(move |_depth, _path, _state, children| {
+            if hidden {
+                return;
+            }
+            children.retain(|child| {
+                child
+                    .as_ref()
+                    .map(|entry| {
+                        entry
+                            .metadata()
+                            .map(|meta| meta.file_attributes() & (ATTR_HIDDEN | ATTR_SYSTEM) == 0)
+                            .unwrap_or(true)
+                    })
+                    .unwrap_or(true)
+            });
+        });
 
     let mut batch: Vec<SearchItem> = Vec::with_capacity(BATCH);
     let mut total = 0usize;
@@ -102,9 +125,9 @@ pub fn run(
         let Ok(entry) = entry else {
             continue;
         };
-        if entry.file_type().is_dir() {
-            continue;
-        }
+        // Folders are search hits too: Everything returns them, so the built-in provider
+        // must as well or the same query gives different results per provider.
+        let is_dir = entry.file_type().is_dir();
         let name = entry.file_name().to_string_lossy().into_owned();
         if !name.to_lowercase().contains(&needle) {
             continue;
@@ -113,8 +136,12 @@ pub fn run(
         batch.push(SearchItem {
             path: entry.path().to_string_lossy().into_owned(),
             name,
-            is_dir: false,
-            size: metadata.as_ref().map(|m| m.len()).unwrap_or(0),
+            is_dir,
+            size: if is_dir {
+                0
+            } else {
+                metadata.as_ref().map(|m| m.len()).unwrap_or(0)
+            },
             mtime: metadata
                 .and_then(|m| m.modified().ok())
                 .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
@@ -262,4 +289,81 @@ fn everything_search(root: &str, needle: &str, limit: usize) -> Result<Vec<Searc
         }
     }
     Ok(items)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL,
+        FILE_FLAGS_AND_ATTRIBUTES,
+    };
+
+    fn collect(root: &str, query: &str, hidden: bool) -> Vec<SearchItem> {
+        let batches: Arc<Mutex<Vec<SearchBatch>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = batches.clone();
+        let channel = Channel::new(move |body| {
+            if let tauri::ipc::InvokeResponseBody::Json(text) = body {
+                if let Ok(batch) = serde_json::from_str::<SearchBatch>(&text) {
+                    sink.lock().unwrap().push(batch);
+                }
+            }
+            Ok(())
+        });
+        run(
+            root.to_string(),
+            query.to_string(),
+            1,
+            500,
+            false,
+            hidden,
+            Arc::new(AtomicBool::new(false)),
+            channel,
+        );
+        let batches = batches.lock().unwrap();
+        batches.iter().flat_map(|batch| batch.items.clone()).collect()
+    }
+
+    /// Folders are hits in both providers, and the built-in scan follows show-hidden.
+    #[test]
+    fn builtin_scan_finds_folders_and_respects_hidden() {
+        let root = std::env::temp_dir().join(format!("flowdir-search-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("report-folder")).unwrap();
+        std::fs::write(root.join("report.txt"), b"x").unwrap();
+        let hidden = root.join("report-hidden.txt");
+        std::fs::write(&hidden, b"x").unwrap();
+        let wide: Vec<u16> = hidden
+            .to_string_lossy()
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        unsafe {
+            SetFileAttributesW(
+                PCWSTR(wide.as_ptr()),
+                FILE_FLAGS_AND_ATTRIBUTES(FILE_ATTRIBUTE_HIDDEN.0),
+            )
+            .unwrap();
+        }
+
+        let items = collect(&root.to_string_lossy(), "report", false);
+        let folder = items.iter().find(|item| item.name == "report-folder");
+        assert!(folder.is_some_and(|item| item.is_dir && item.size == 0), "folders are hits");
+        assert!(items.iter().any(|item| item.name == "report.txt"));
+        assert!(!items.iter().any(|item| item.name == "report-hidden.txt"));
+
+        let items = collect(&root.to_string_lossy(), "report", true);
+        assert!(items.iter().any(|item| item.name == "report-hidden.txt"));
+
+        unsafe {
+            SetFileAttributesW(
+                PCWSTR(wide.as_ptr()),
+                FILE_FLAGS_AND_ATTRIBUTES(FILE_ATTRIBUTE_NORMAL.0),
+            )
+            .unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

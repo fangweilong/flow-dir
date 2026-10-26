@@ -463,11 +463,12 @@ fn search_start(
     gen: u64,
     limit: u32,
     prefer_everything: bool,
+    hidden: bool,
     on_batch: Channel<search::SearchBatch>,
 ) -> Result<(), ApiError> {
     let cancel = state.begin();
     let _ = tauri::async_runtime::spawn_blocking(move || {
-        search::run(root, query, gen, limit, prefer_everything, cancel, on_batch);
+        search::run(root, query, gen, limit, prefer_everything, hidden, cancel, on_batch);
     });
     Ok(())
 }

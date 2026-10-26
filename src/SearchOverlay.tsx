@@ -13,11 +13,25 @@ type Props = {
   /** Base UI text size; icons request their raster at the same scale. */
   fontSize: number
   preferEverything: boolean
+  /** Built-in scan follows the pane's show-hidden setting. */
+  showHidden: boolean
   onClose: () => void
+  /** Opens the hit itself: a folder navigates, a file goes to its default program. */
+  onActivate: (item: SearchItem) => void
+  /** Reveals the containing folder (Alt+Enter). */
   onOpen: (folder: string) => void
 }
 
-export function SearchOverlay({ root, lang, fontSize, preferEverything, onClose, onOpen }: Props) {
+export function SearchOverlay({
+  root,
+  lang,
+  fontSize,
+  preferEverything,
+  showHidden,
+  onClose,
+  onActivate,
+  onOpen,
+}: Props) {
   const t = makeT(lang)
   const iconScale = clampFontSize(fontSize) / BASE_FONT_SIZE
   const [query, setQuery] = useState('')
@@ -47,7 +61,7 @@ export function SearchOverlay({ root, lang, fontSize, preferEverything, onClose,
     setError(null)
     const timer = window.setTimeout(() => {
       const acc: SearchItem[] = []
-      searchStart(root, value, id, 500, preferEverything, (batch) => {
+      searchStart(root, value, id, 500, preferEverything, showHidden, (batch) => {
         if (batch.gen !== gen.current) return
         if (batch.error) {
           setError(batch.error)
@@ -69,7 +83,7 @@ export function SearchOverlay({ root, lang, fontSize, preferEverything, onClose,
     }, 200)
 
     return () => window.clearTimeout(timer)
-  }, [query, root, preferEverything])
+  }, [query, root, preferEverything, showHidden])
 
   useEffect(() => {
     return () => {
@@ -105,7 +119,10 @@ export function SearchOverlay({ root, lang, fontSize, preferEverything, onClose,
                 setActive((prev) => Math.max(0, Math.min(items.length - 1, prev + step)))
               }
               if (e.key === 'Enter' && current) {
-                onOpen(parentPath(current.path))
+                // Alt+Enter is the "open containing folder" escape hatch; plain Enter
+                // opens the hit itself, matching Explorer's search results.
+                if (e.altKey) onOpen(parentPath(current.path))
+                else onActivate(current)
                 onClose()
               }
             }}
@@ -139,7 +156,7 @@ export function SearchOverlay({ root, lang, fontSize, preferEverything, onClose,
               data-result={index}
               onMouseEnter={() => setActive(index)}
               onClick={() => {
-                onOpen(parentPath(item.path))
+                onActivate(item)
                 onClose()
               }}
               className={`flex w-full items-center gap-2 border-b border-line/60 px-3 py-1.5 text-left ${

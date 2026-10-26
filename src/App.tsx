@@ -2617,7 +2617,12 @@ export default function App() {
           lang={lang}
           fontSize={settings.fontSize}
           preferEverything={settings.useEverything}
+          showHidden={settings.showHidden}
           onClose={() => setSearchOpen(false)}
+          onActivate={(item) => {
+            if (item.isDir) navigate(activeTab.id, item.path)
+            else void openPath(item.path).catch((e: unknown) => showToast(t('op.failed', { code: errorCode(e) })))
+          }}
           onOpen={(folder) => navigate(activeTab.id, folder)}
         />
       )}

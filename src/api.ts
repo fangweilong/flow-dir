@@ -101,11 +101,20 @@ export function searchStart(
   gen: number,
   limit: number,
   preferEverything: boolean,
+  hidden: boolean,
   onBatch: (batch: SearchBatch) => void,
 ) {
   const channel = new Channel<SearchBatch>()
   channel.onmessage = onBatch
-  return invoke<void>('search_start', { root, query, gen, limit, preferEverything, onBatch: channel })
+  return invoke<void>('search_start', {
+    root,
+    query,
+    gen,
+    limit,
+    preferEverything,
+    hidden,
+    onBatch: channel,
+  })
 }
 
 export type EverythingStatus = { usable: boolean; version: string | null; reason: string | null }
