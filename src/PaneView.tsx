@@ -32,7 +32,7 @@ const gitTone = (code: string) =>
         : 'text-amber-500'
 
 /** Metrics at the default 13 px text size; every pane scales them by the settings font size. */
-const ROW_H = 28
+const ROW_H = 26
 /** Column bounds in px at the default font size; the stored widths are clamped to them. */
 const MIN_COL_SIZE = 56
 const MIN_COL_TIME = 84
@@ -528,7 +528,7 @@ export function PaneView({
           if ((ev.target as HTMLElement).closest('[data-tab]')) return
           onNewTab()
         }}
-        className="flex h-8 shrink-0 items-stretch gap-0.5 border-b border-line bg-surface-2 px-1 pt-1"
+        className="flex h-7 shrink-0 items-stretch gap-0.5 border-b border-line bg-surface-2 px-1 pt-0.5"
       >
         <div className="no-bar flex min-w-0 flex-1 items-stretch gap-0.5 overflow-x-auto">
           {pane.tabIds.map((id) => {
@@ -550,7 +550,7 @@ export function PaneView({
                   onActivateTab(id)
                   onTabContextMenu(id, pointOf(ev))
                 }}
-                className={`group flex h-7 max-w-[13.75rem] shrink-0 cursor-default items-center gap-1 rounded-t-md border border-b-0 px-2 text-[0.71875rem] ${
+                className={`group flex h-[1.625rem] max-w-[13.75rem] shrink-0 cursor-default items-center gap-1 rounded-t-md border border-b-0 px-1.5 text-[0.71875rem] ${
                   selected
                     ? 'border-line bg-surface font-medium text-fg-strong'
                     : 'border-transparent text-muted hover:bg-surface-3'
@@ -588,7 +588,7 @@ export function PaneView({
         <button
           type="button"
           onClick={onNewTab}
-          className="mb-0.5 grid h-6 w-6 shrink-0 place-items-center self-center rounded text-muted hover:bg-surface-3 hover:text-fg"
+          className="grid h-5 w-5 shrink-0 place-items-center self-center rounded text-muted hover:bg-surface-3 hover:text-fg"
           title={t('tab.new')}
         >
           <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.6">
@@ -597,7 +597,7 @@ export function PaneView({
         </button>
       </div>
 
-      <div className="flex h-9 shrink-0 items-center gap-0.5 border-b border-line bg-surface px-1.5">
+      <div className="flex h-7 shrink-0 items-center gap-0.5 border-b border-line bg-surface px-1">
         <button
           type="button"
           title={t('nav.back')}
@@ -770,7 +770,7 @@ export function PaneView({
 
       {!root && (
         <div
-          className="grid h-7 shrink-0 items-center border-b border-line bg-surface-2 text-muted"
+          className="grid h-6 shrink-0 items-center border-b border-line bg-surface-2 text-muted"
           style={{ gridTemplateColumns: grid }}
         >
           <HeaderCell label={t('list.name')} k="name" sort={pane.sort} onSort={changeSort} align="left" />

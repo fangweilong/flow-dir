@@ -94,7 +94,7 @@ type SplitNode = Extract<Node, { t: 'split' }>
 const SIDEBAR_MIN = 140
 const PREVIEW_MIN = 220
 /** Splitter width; the centre-pane half-width cap must account for it. */
-const GUTTER = 3
+const GUTTER = 2
 
 export default function App() {
   const [ws, setWs] = useState<Workspace | null>(null)
@@ -1792,16 +1792,16 @@ export default function App() {
           const dpr = window.devicePixelRatio || 1
           void titlebarMenu(Math.round(ev.screenX * dpr), Math.round(ev.screenY * dpr))
         }}
-        className="flex h-10 shrink-0 items-center gap-2 border-b border-line bg-surface/90 pl-2.5"
+        className="flex h-8 shrink-0 items-center gap-2 border-b border-line bg-surface/90 pl-2"
       >
         <div className="flex items-center gap-2" data-tauri-drag-region>
-          <img src={iconUrl} alt="" className="h-6 w-6 select-none" draggable={false} />
+          <img src={iconUrl} alt="" className="h-5 w-5 select-none" draggable={false} />
           <span data-tauri-drag-region className="text-[0.8125rem] font-semibold tracking-tight">
             {t('app.name')}
           </span>
         </div>
 
-        <div className="mx-2 h-5 w-px bg-line" />
+        <div className="mx-1.5 h-4 w-px bg-line" />
 
         <div className="flex items-center gap-0.5 rounded-md bg-surface-3 p-0.5">
           <LayoutButton title={t('layout.single')} active={layoutInfo.count === 1} onClick={() => applyLayout(1, 'h')} kind={1} />
@@ -1833,7 +1833,7 @@ export default function App() {
           type="button"
           onClick={toggleSidebar}
           title={t('sidebar.toggle')}
-          className={`grid h-7 w-7 shrink-0 place-items-center rounded-md hover:bg-surface-3 ${
+          className={`grid h-6 w-6 shrink-0 place-items-center rounded-md hover:bg-surface-3 ${
             settings.sidebarOpen ? 'text-muted' : 'text-muted-2'
           }`}
         >
@@ -1846,7 +1846,7 @@ export default function App() {
           type="button"
           onClick={() => setSearchOpen(true)}
           title="Ctrl+F"
-          className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-muted hover:bg-surface-3 hover:text-fg"
+          className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-muted hover:bg-surface-3 hover:text-fg"
         >
           <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5">
             <circle cx="7" cy="7" r="4.2" />
@@ -1857,7 +1857,7 @@ export default function App() {
           type="button"
           onClick={() => setPreviewOpen((open) => !open)}
           title="Ctrl+P"
-          className={`grid h-7 w-7 shrink-0 place-items-center rounded-md hover:bg-surface-3 ${
+          className={`grid h-6 w-6 shrink-0 place-items-center rounded-md hover:bg-surface-3 ${
             previewOpen ? 'text-blue-500' : 'text-muted'
           }`}
         >
@@ -1870,7 +1870,7 @@ export default function App() {
           type="button"
           onClick={() => setSettingsOpen(true)}
           title={t('app.settings')}
-          className="relative grid h-7 w-7 shrink-0 place-items-center rounded-md text-muted hover:bg-surface-3 hover:text-fg"
+          className="relative grid h-6 w-6 shrink-0 place-items-center rounded-md text-muted hover:bg-surface-3 hover:text-fg"
         >
           <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5">
             <path d="M2 4h7M12.2 4H14M2 8h3M7.8 8H14M2 12h7M12.2 12H14" strokeLinecap="round" />
@@ -1924,7 +1924,7 @@ export default function App() {
                   ? `calc(50% - ${GUTTER * 2}px - ${previewWidth}px)`
                   : `calc(50% - ${GUTTER}px)`,
               }}
-              className="flex shrink-0 flex-col gap-4 overflow-y-auto overflow-x-hidden border-r border-line bg-surface-2 px-2 py-3"
+              className="flex shrink-0 flex-col gap-2.5 overflow-y-auto overflow-x-hidden border-r border-line bg-surface-2 px-1.5 py-2"
             >
               <section>
                 <h2 className="px-2 pb-1 text-[0.625rem] font-semibold tracking-wider text-muted-2">
@@ -1965,7 +1965,7 @@ export default function App() {
           </>
         ) : null}
 
-        <main className="flex min-h-0 min-w-0 flex-1 gap-1 p-1">{ws && renderNode(ws.root)}</main>
+        <main className="flex min-h-0 min-w-0 flex-1 gap-0.5 p-0.5">{ws && renderNode(ws.root)}</main>
         {previewOpen && (
           <>
             <ResizeHandle onPointerDown={startPreviewResize} />
@@ -2093,7 +2093,7 @@ function SplitView({
           window.addEventListener('pointerup', up)
         }}
         className={`shrink-0 bg-line-strong hover:bg-blue-400 ${
-          node.dir === 'row' ? 'w-[3px] cursor-col-resize' : 'h-[3px] cursor-row-resize'
+          node.dir === 'row' ? 'w-0.5 cursor-col-resize' : 'h-0.5 cursor-row-resize'
         }`}
       />
       <div className="flex min-h-0 min-w-0" style={{ flexGrow: 1 - node.ratio, flexBasis: 0 }}>
@@ -2140,11 +2140,11 @@ function LayoutButton({
       type="button"
       title={title}
       onClick={onClick}
-      className={`grid h-6 w-7 place-items-center rounded ${
+      className={`grid h-5 w-6 place-items-center rounded ${
         active ? 'bg-surface text-blue-500 shadow-sm' : 'text-muted-2 hover:text-fg'
       }`}
     >
-      <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="currentColor">
+      <svg viewBox="0 0 16 16" className="h-3 w-3" fill="currentColor">
         {rects}
       </svg>
     </button>
@@ -2171,7 +2171,7 @@ function SidebarItem({
       type="button"
       onClick={onClick}
       onContextMenu={onContextMenu}
-      className={`flex w-full items-center gap-2 rounded-md px-2 py-[0.3125rem] text-left text-[0.75rem] ${
+      className={`flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[0.75rem] ${
         active ? 'bg-sel font-medium text-fg-strong' : 'text-fg hover:bg-surface-3'
       }`}
     >

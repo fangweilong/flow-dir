@@ -57,7 +57,7 @@ export function PreviewPanel({
       style={{ width, maxWidth }}
       className="flex shrink-0 flex-col overflow-x-hidden border-l border-line bg-surface"
     >
-      <header className="flex h-8 shrink-0 items-center gap-2 border-b border-line px-2.5">
+      <header className="flex h-7 shrink-0 items-center gap-2 border-b border-line px-2">
         <span className="text-[0.625rem] font-semibold tracking-wider text-muted-2">{t('preview.title')}</span>
         <span className="min-w-0 flex-1 truncate text-[0.71875rem] font-medium text-fg-strong" title={name}>
           {name}
@@ -72,7 +72,7 @@ export function PreviewPanel({
         </button>
       </header>
 
-      <div className="relative min-h-0 flex-1 overflow-auto p-3">
+      <div className="relative min-h-0 flex-1 overflow-auto p-2">
         {loading && (
           <div className="grid h-full place-items-center text-[0.71875rem] text-muted-2">{t('preview.loading')}</div>
         )}
