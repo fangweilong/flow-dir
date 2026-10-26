@@ -276,6 +276,7 @@ fn settings_save(
     cache: tauri::State<'_, settings::SettingsCache>,
     settings: settings::Settings,
 ) -> Result<(), ApiError> {
+    let settings = settings.normalize();
     settings::save(&app, &settings)?;
     cache.set(settings);
     Ok(())

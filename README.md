@@ -18,7 +18,7 @@ Windows 文件管理器：多窗格 + 标签、原生 Shell 集成、低内存�
 - **预览**：WIC 缩放解码图片、PDF 首页、视频首帧、文本（BOM / UTF-8 / GBK 回退，未知扩展名按内容嗅探）、ZIP 目录、EXE/DLL 版本信息；超过 64 MB 不生成预览；Word/Excel 等内置不支持的类型可在设置里按扩展名绑定外部预览程序，选中文件按 `F3`（可改）直接调用。
 - **文件操作**：复制、移动、回收站删除、重命名、新建文件夹，全部走 `IFileOperation`，带进度与取消；文件/文件夹右键为系统原生菜单（含第三方扩展）。
 - **系统集成**：单实例、托盘、原生窗口阴影与深色菜单、`Alt+Enter` 属性页。
-- **外观与语言**：深浅色/跟随系统、中英双语。
+- **外观与语言**：深浅色/跟随系统、中英双语；界面字体可选常见系统字体或自定义已安装字体，字号 12–20 px 实时生效，行高、列宽、图标与设置页整体按字号缩放。
 - **快捷键**：设置内置快捷键总表，可逐项重新绑定（含新建/关闭标签），冲突即时提示。
 - **资源占用**：WebView2 GPU 加速可在设置中关闭以省内存，最小化自动挂起渲染进程。
 - **自动更新**：按可配置间隔检查 GitHub Release，单文件版原地替换，安装版静默升级。
@@ -85,7 +85,7 @@ cd src-tauri && cargo test
 
 | 路径 | 内容 |
 | --- | --- |
-| `%APPDATA%\FlowDir\settings.toml` | 语言、主题、GPU、快速访问、更新间隔等（带注释，手工改也安全） |
+| `%APPDATA%\FlowDir\settings.toml` | 语言、主题、界面字体与字号（`font_family` / `font_size`）、GPU、快速访问、更新间隔等（带注释，手工改也安全；非法字号回退 13） |
 | `%APPDATA%\FlowDir\layout.json` | 窗格/标签/窗口几何，启动恢复；损坏时降级并保留 `.rejected.json` |
 | `%APPDATA%\FlowDir\update.json` | 上次更新检查时间与最近一次发现的版本 |
 | `%LOCALAPPDATA%\FlowDir\EBWebView` | WebView2 浏览器配置 |
@@ -114,7 +114,6 @@ screenshots/      README 与文档截图
 
 - 标签路径可自由复制，并支持直接在路径上修改层级（[#1](https://github.com/fangweilong/flow-dir/issues/1)）。
 - 「名称 / 大小 / 修改时间」列宽度可拖拽调整（[#2](https://github.com/fangweilong/flow-dir/issues/2)）。
-- 界面字体与字号可调，方便高分辨率用户（[#3](https://github.com/fangweilong/flow-dir/issues/3)）。
 
 ## 已知限制
 

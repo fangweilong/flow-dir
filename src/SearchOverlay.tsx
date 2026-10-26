@@ -3,19 +3,23 @@ import { searchCancel, searchStart } from './api'
 import { makeT } from './i18n'
 import { formatSize, parentPath } from './paths'
 import { FileIcon } from './icons'
+import { BASE_FONT_SIZE, clampFontSize } from './fonts'
 import type { ApiError, Lang } from './types'
 import type { SearchItem } from './types'
 
 type Props = {
   root: string
   lang: Lang
+  /** Base UI text size; icons request their raster at the same scale. */
+  fontSize: number
   preferEverything: boolean
   onClose: () => void
   onOpen: (folder: string) => void
 }
 
-export function SearchOverlay({ root, lang, preferEverything, onClose, onOpen }: Props) {
+export function SearchOverlay({ root, lang, fontSize, preferEverything, onClose, onOpen }: Props) {
   const t = makeT(lang)
+  const iconScale = clampFontSize(fontSize) / BASE_FONT_SIZE
   const [query, setQuery] = useState('')
   const [items, setItems] = useState<SearchItem[]>([])
   const [provider, setProvider] = useState('')
@@ -82,7 +86,7 @@ export function SearchOverlay({ root, lang, preferEverything, onClose, onOpen }:
         if (ev.target === ev.currentTarget) onClose()
       }}
     >
-      <div className="flex max-h-[64vh] w-[640px] flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-2xl">
+      <div className="flex max-h-[64vh] w-[40rem] max-w-[calc(100vw-1.5rem)] flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-2xl">
         <div className="flex items-center gap-2 border-b border-line px-3 py-2">
           <svg viewBox="0 0 16 16" className="h-4 w-4 shrink-0 text-muted-2" fill="none" stroke="currentColor" strokeWidth="1.5">
             <circle cx="7" cy="7" r="4.2" />
@@ -106,10 +110,10 @@ export function SearchOverlay({ root, lang, preferEverything, onClose, onOpen }:
               }
             }}
             placeholder={t('search.placeholder')}
-            className="h-7 min-w-0 flex-1 bg-transparent text-[13px] outline-none placeholder:text-muted-2"
+            className="h-7 min-w-0 flex-1 bg-transparent text-[0.8125rem] outline-none placeholder:text-muted-2"
           />
           {provider && (
-            <span className="shrink-0 rounded bg-surface-3 px-1.5 py-0.5 text-[10px] text-muted">
+            <span className="shrink-0 rounded bg-surface-3 px-1.5 py-0.5 text-[0.625rem] text-muted">
               {provider === 'everything' ? t('search.everything') : t('search.jwalk')}
             </span>
           )}
@@ -117,13 +121,13 @@ export function SearchOverlay({ root, lang, preferEverything, onClose, onOpen }:
 
         <div className="min-h-0 flex-1 overflow-auto">
           {loading && !items.length && (
-            <div className="px-3 py-6 text-center text-[11.5px] text-muted-2">{t('search.searching')}</div>
+            <div className="px-3 py-6 text-center text-[0.71875rem] text-muted-2">{t('search.searching')}</div>
           )}
           {!loading && !items.length && query.trim() && !error && (
-            <div className="px-3 py-6 text-center text-[11.5px] text-muted-2">{t('search.empty')}</div>
+            <div className="px-3 py-6 text-center text-[0.71875rem] text-muted-2">{t('search.empty')}</div>
           )}
           {error && (
-            <div className="m-3 rounded border border-red-300 bg-red-50 p-2 text-[11px] text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200">
+            <div className="m-3 rounded border border-red-300 bg-red-50 p-2 text-[0.6875rem] text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200">
               {error.code} {error.detail}
             </div>
           )}
@@ -142,19 +146,19 @@ export function SearchOverlay({ root, lang, preferEverything, onClose, onOpen }:
                 index === active ? 'bg-sel' : 'hover:bg-surface-3'
               }`}
             >
-              <FileIcon name={item.name} dir={item.isDir} path={item.path} />
-              <span className="min-w-0 flex-1 truncate text-[12px] text-fg-strong">{item.name}</span>
-              <span className="max-w-[58%] truncate font-mono text-[10px] text-muted-2" dir="rtl">
+              <FileIcon name={item.name} dir={item.isDir} path={item.path} scale={iconScale} />
+              <span className="min-w-0 flex-1 truncate text-[0.75rem] text-fg-strong">{item.name}</span>
+              <span className="max-w-[58%] truncate font-mono text-[0.625rem] text-muted-2" dir="rtl">
                 {parentPath(item.path)}
               </span>
-              <span className="w-14 shrink-0 text-right text-[10px] text-muted-2">
+              <span className="w-14 shrink-0 text-right text-[0.625rem] text-muted-2">
                 {formatSize(item.size, item.isDir)}
               </span>
             </button>
           ))}
         </div>
 
-        <div className="flex h-7 items-center justify-between border-t border-line px-3 text-[10.5px] text-muted-2">
+        <div className="flex h-7 items-center justify-between border-t border-line px-3 text-[0.65625rem] text-muted-2">
           <span>{t('search.results', { count: items.length })}</span>
           <span>{t('search.hint')}</span>
         </div>

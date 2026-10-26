@@ -46,7 +46,7 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
     <div
       ref={ref}
       data-context-menu
-      className="fixed z-[60] min-w-[184px] rounded-lg border border-line bg-surface py-1 shadow-xl"
+      className="fixed z-[60] min-w-[11.5rem] rounded-lg border border-line bg-surface py-1 shadow-xl"
       style={{ left: pos.x, top: pos.y }}
       onContextMenu={(ev) => ev.preventDefault()}
     >
@@ -62,12 +62,12 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
               onClose()
               item.onSelect()
             }}
-            className={`flex w-full items-center justify-between gap-6 px-3 py-1 text-left text-[12px] disabled:opacity-40 ${
+            className={`flex w-full items-center justify-between gap-6 px-3 py-1 text-left text-[0.75rem] disabled:opacity-40 ${
               item.danger ? 'text-red-600 hover:bg-red-500/10 dark:text-red-400' : 'text-fg hover:bg-surface-3'
             }`}
           >
             <span className="truncate">{item.label}</span>
-            {item.hint && <span className="shrink-0 font-mono text-[10px] text-muted-2">{item.hint}</span>}
+            {item.hint && <span className="shrink-0 font-mono text-[0.625rem] text-muted-2">{item.hint}</span>}
           </button>
         ),
       )}

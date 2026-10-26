@@ -6,6 +6,13 @@ import { DEFAULT_BINDINGS, SHORTCUTS, bindingFromEvent, formatBinding, resolveSh
 import type { ShortcutId } from './shortcuts'
 import type { AppInfo, EverythingStatus, Lang, Theme, UpdateStatus } from './types'
 import type { Settings } from './persist'
+import {
+  DEFAULT_FONT_FAMILY,
+  FONT_FAMILIES,
+  FONT_SIZE_MAX,
+  FONT_SIZE_MIN,
+  clampFontSize,
+} from './fonts'
 
 type Props = {
   settings: Settings
@@ -53,8 +60,8 @@ function ToggleRow({
   return (
     <div className="flex items-center justify-between rounded-lg border border-line px-3 py-2">
       <div className="min-w-0">
-        <div className="text-[12px] text-fg">{label}</div>
-        {hint && <div className="truncate text-[10.5px] text-muted-2">{hint}</div>}
+        <div className="text-[0.75rem] text-fg">{label}</div>
+        {hint && <div className="truncate text-[0.65625rem] text-muted-2">{hint}</div>}
       </div>
       <button
         type="button"
@@ -65,7 +72,7 @@ function ToggleRow({
         className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${value ? 'bg-blue-600' : 'bg-surface-3'}`}
       >
         <span
-          className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-[left] ${value ? 'left-[18px]' : 'left-0.5'}`}
+          className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-[left] ${value ? 'left-[1.125rem]' : 'left-0.5'}`}
         />
       </button>
     </div>
@@ -89,6 +96,13 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
   const [checking, setChecking] = useState(false)
   const [installing, setInstalling] = useState(false)
   const [updateError, setUpdateError] = useState<string | null>(null)
+  // The select only holds the listed families; arbitrary installed families keep the
+  // custom row open with the typed value, which is what `fontFamily` stores.
+  const [customFont, setCustomFont] = useState(!FONT_FAMILIES.includes(settings.fontFamily))
+  const [customDraft, setCustomDraft] = useState(
+    FONT_FAMILIES.includes(settings.fontFamily) ? '' : settings.fontFamily,
+  )
+  const fontSize = clampFontSize(settings.fontSize)
 
   const keys = useMemo(() => resolveShortcuts(settings.shortcuts), [settings.shortcuts])
   const needle = query.trim().toLowerCase()
@@ -103,6 +117,9 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
       t('settings.themeSystem'),
       t('settings.themeLight'),
       t('settings.themeDark'),
+      t('settings.font'),
+      t('settings.fontSize'),
+      t('settings.fontCustom'),
       t('settings.language'),
       t('settings.behavior'),
       t('settings.previewOpen'),
@@ -249,15 +266,15 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
         if (ev.target === ev.currentTarget) onClose()
       }}
     >
-      <div className="flex h-[600px] max-h-[85vh] w-[760px] flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-2xl">
+      <div className="flex h-[37.5rem] max-h-[85vh] w-[47.5rem] max-w-full flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-2xl">
         <header className="flex items-center gap-3 border-b border-line px-4 py-3">
-          <h1 className="text-[13px] font-semibold text-fg-strong">{t('settings.title')}</h1>
+          <h1 className="text-[0.8125rem] font-semibold text-fg-strong">{t('settings.title')}</h1>
           <input
             value={query}
             onChange={(ev) => setQuery(ev.target.value)}
             placeholder={t('settings.searchPh')}
             data-settings-search
-            className="ml-auto h-6 w-[200px] rounded border border-line bg-surface-2 px-2 text-[11px] outline-none placeholder:text-muted-2 focus:border-blue-400 focus:bg-surface"
+            className="ml-auto h-6 w-[12.5rem] rounded border border-line bg-surface-2 px-2 text-[0.6875rem] outline-none placeholder:text-muted-2 focus:border-blue-400 focus:bg-surface"
           />
           <button
             type="button"
@@ -271,13 +288,13 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
 
         <div className="flex min-h-0 flex-1">
           {!needle && (
-            <nav className="w-[136px] shrink-0 space-y-0.5 overflow-y-auto border-r border-line bg-surface-2 p-1.5" data-settings-nav>
+            <nav className="w-[8.5rem] shrink-0 space-y-0.5 overflow-y-auto border-r border-line bg-surface-2 p-1.5" data-settings-nav>
               {SECTIONS.map((entry) => (
                 <button
                   key={entry.id}
                   type="button"
                   onClick={() => setSection(entry.id)}
-                  className={`w-full rounded px-2 py-1.5 text-left text-[11.5px] ${
+                  className={`w-full rounded px-2 py-1.5 text-left text-[0.71875rem] ${
                     section === entry.id
                       ? 'bg-surface font-medium text-fg-strong shadow-sm'
                       : 'text-muted hover:bg-surface-3 hover:text-fg'
@@ -290,18 +307,18 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
           )}
 
           <div className="min-w-0 flex-1 space-y-5 overflow-y-auto px-4 py-4">
-            {noMatch && <div className="text-[11.5px] text-muted-2">{t('settings.noMatch')}</div>}
+            {noMatch && <div className="text-[0.71875rem] text-muted-2">{t('settings.noMatch')}</div>}
           <section className={sectionClass('general')}>
-            <h2 className="pb-2 text-[11px] font-semibold tracking-wide text-muted-2">{t('settings.appearance')}</h2>
+            <h2 className="pb-2 text-[0.6875rem] font-semibold tracking-wide text-muted-2">{t('settings.appearance')}</h2>
             <div className="flex items-center justify-between rounded-lg border border-line px-3 py-2">
-              <span className="text-[12px] text-fg">{t('settings.theme')}</span>
+              <span className="text-[0.75rem] text-fg">{t('settings.theme')}</span>
               <div className="flex gap-0.5 rounded-md bg-surface-3 p-0.5">
                 {THEMES.map((theme) => (
                   <button
                     key={theme}
                     type="button"
                     onClick={() => onChange({ ...settings, theme })}
-                    className={`rounded px-2.5 py-1 text-[11.5px] ${
+                    className={`rounded px-2.5 py-1 text-[0.71875rem] ${
                       settings.theme === theme
                         ? 'bg-surface font-medium text-fg-strong shadow-sm'
                         : 'text-muted hover:text-fg'
@@ -315,16 +332,83 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
           </section>
 
           <section className={sectionClass('general')}>
-            <h2 className="pb-2 text-[11px] font-semibold tracking-wide text-muted-2">{t('settings.language')}</h2>
+            <h2 className="pb-2 text-[0.6875rem] font-semibold tracking-wide text-muted-2">{t('settings.typography')}</h2>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-3 rounded-lg border border-line px-3 py-2">
+                <div className="min-w-0">
+                  <div className="text-[0.75rem] text-fg">{t('settings.font')}</div>
+                  <div className="text-[0.65625rem] text-muted-2">{t('settings.fontHint')}</div>
+                </div>
+                <div className="flex shrink-0 items-center gap-1">
+                  <select
+                    value={customFont ? '__custom' : settings.fontFamily}
+                    onChange={(ev) => {
+                      const value = ev.target.value
+                      if (value === '__custom') {
+                        setCustomFont(true)
+                        setCustomDraft('')
+                        return
+                      }
+                      setCustomFont(false)
+                      onChange({ ...settings, fontFamily: value })
+                    }}
+                    aria-label={t('settings.font')}
+                    className="h-6 w-[9.5rem] rounded border border-line bg-surface-2 px-1.5 text-[0.71875rem] text-fg outline-none focus:border-blue-400 focus:bg-surface"
+                  >
+                    {FONT_FAMILIES.map((family) => (
+                      <option key={family} value={family}>
+                        {family}
+                      </option>
+                    ))}
+                    <option value="__custom">{t('settings.fontCustom')}</option>
+                  </select>
+                  {customFont && (
+                    <input
+                      value={customDraft}
+                      onChange={(ev) => {
+                        setCustomDraft(ev.target.value)
+                        onChange({ ...settings, fontFamily: ev.target.value.trim() || DEFAULT_FONT_FAMILY })
+                      }}
+                      placeholder={t('settings.fontCustomPh')}
+                      aria-label={t('settings.fontCustomPh')}
+                      className="h-6 w-[9.5rem] rounded border border-line bg-surface-2 px-1.5 text-[0.71875rem] outline-none placeholder:text-muted-2 focus:border-blue-400 focus:bg-surface"
+                    />
+                  )}
+                </div>
+              </div>
+              <div className="flex items-center justify-between gap-3 rounded-lg border border-line px-3 py-2">
+                <div className="min-w-0">
+                  <div className="text-[0.75rem] text-fg">{t('settings.fontSize')}</div>
+                  <div className="text-[0.65625rem] text-muted-2">{t('settings.fontSizeHint')}</div>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <input
+                    type="range"
+                    min={FONT_SIZE_MIN}
+                    max={FONT_SIZE_MAX}
+                    step={1}
+                    value={fontSize}
+                    onChange={(ev) => onChange({ ...settings, fontSize: Number(ev.target.value) })}
+                    aria-label={t('settings.fontSize')}
+                    className="h-4 w-[7rem] cursor-pointer accent-blue-600"
+                  />
+                  <span className="tabular w-9 text-right text-[0.71875rem] text-muted">{fontSize} px</span>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section className={sectionClass('general')}>
+            <h2 className="pb-2 text-[0.6875rem] font-semibold tracking-wide text-muted-2">{t('settings.language')}</h2>
             <div className="flex items-center justify-between rounded-lg border border-line px-3 py-2">
-              <span className="text-[12px] text-fg">Language / 语言</span>
+              <span className="text-[0.75rem] text-fg">Language / 语言</span>
               <div className="flex gap-0.5 rounded-md bg-surface-3 p-0.5">
                 {(['zh-CN', 'en'] as Lang[]).map((code) => (
                   <button
                     key={code}
                     type="button"
                     onClick={() => onChange({ ...settings, language: code })}
-                    className={`rounded px-2.5 py-1 text-[11.5px] ${
+                    className={`rounded px-2.5 py-1 text-[0.71875rem] ${
                       settings.language === code
                         ? 'bg-surface font-medium text-fg-strong shadow-sm'
                         : 'text-muted hover:text-fg'
@@ -338,7 +422,7 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
           </section>
 
           <section className={sectionClass('general')}>
-            <h2 className="pb-2 text-[11px] font-semibold tracking-wide text-muted-2">{t('settings.behavior')}</h2>
+            <h2 className="pb-2 text-[0.6875rem] font-semibold tracking-wide text-muted-2">{t('settings.behavior')}</h2>
             <div className="space-y-2">
               <ToggleRow
                 label={t('settings.previewOpen')}
@@ -371,12 +455,12 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
           </section>
 
           <section className={sectionClass('shortcuts')}>
-            <h2 className="pb-2 text-[11px] font-semibold tracking-wide text-muted-2">{t('settings.shortcuts')}</h2>
+            <h2 className="pb-2 text-[0.6875rem] font-semibold tracking-wide text-muted-2">{t('settings.shortcuts')}</h2>
             <div className="space-y-2" data-shortcuts>
-              <div className="text-[10.5px] text-muted-2">{t('settings.shortcutsHint')}</div>
+              <div className="text-[0.65625rem] text-muted-2">{t('settings.shortcutsHint')}</div>
               {(['app', 'pane'] as const).map((scope) => (
                 <div key={scope} className="overflow-hidden rounded-lg border border-line">
-                  <div className="border-b border-line bg-surface-2 px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted-2">
+                  <div className="border-b border-line bg-surface-2 px-3 py-1 text-[0.625rem] font-semibold uppercase tracking-wider text-muted-2">
                     {scope === 'app' ? t('settings.shortcutApp') : t('settings.shortcutPane')}
                   </div>
                   {SHORTCUTS.filter((shortcut) => shortcut.scope === scope).map((shortcut) => {
@@ -384,7 +468,7 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
                     return (
                       <div
                         key={shortcut.id}
-                        className="flex items-center justify-between gap-2 border-b border-line px-3 py-1.5 text-[11.5px] last:border-b-0"
+                        className="flex items-center justify-between gap-2 border-b border-line px-3 py-1.5 text-[0.71875rem] last:border-b-0"
                       >
                         <span className="min-w-0 truncate text-fg">{t(shortcut.label)}</span>
                         <span className="flex shrink-0 items-center gap-1">
@@ -395,7 +479,7 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
                               setConflict(null)
                             }}
                             data-shortcut={shortcut.id}
-                            className={`min-w-[92px] rounded border px-2 py-0.5 font-mono text-[11px] ${
+                            className={`min-w-[5.75rem] rounded border px-2 py-0.5 font-mono text-[0.6875rem] ${
                               capturing === shortcut.id
                                 ? 'border-blue-400 bg-blue-500/10 text-blue-500'
                                 : 'border-line bg-surface-2 text-fg hover:bg-surface-3'
@@ -414,7 +498,7 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
                                   shortcuts: settings.shortcuts.filter((entry) => entry.id !== shortcut.id),
                                 })
                               }
-                              className="rounded px-1 py-0.5 text-[10.5px] text-muted-2 hover:bg-surface-3 hover:text-fg"
+                              className="rounded px-1 py-0.5 text-[0.65625rem] text-muted-2 hover:bg-surface-3 hover:text-fg"
                             >
                               {t('settings.shortcutReset')}
                             </button>
@@ -426,12 +510,12 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
                 </div>
               ))}
               <div className="flex items-center justify-between gap-2 pt-0.5">
-                <span className="min-h-[14px] text-[10.5px] text-red-500">{conflict ?? ''}</span>
+                <span className="min-h-[0.875rem] text-[0.65625rem] text-red-500">{conflict ?? ''}</span>
                 <button
                   type="button"
                   onClick={() => onChange({ ...settings, shortcuts: [] })}
                   disabled={!settings.shortcuts.length}
-                  className="shrink-0 rounded border border-line px-2 py-0.5 text-[11px] text-fg hover:bg-surface-3 disabled:opacity-40"
+                  className="shrink-0 rounded border border-line px-2 py-0.5 text-[0.6875rem] text-fg hover:bg-surface-3 disabled:opacity-40"
                 >
                   {t('settings.shortcutResetAll')}
                 </button>
@@ -440,7 +524,7 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
           </section>
 
           <section className={sectionClass('graphics')}>
-            <h2 className="pb-2 text-[11px] font-semibold tracking-wide text-muted-2">{t('settings.graphics')}</h2>
+            <h2 className="pb-2 text-[0.6875rem] font-semibold tracking-wide text-muted-2">{t('settings.graphics')}</h2>
             <div data-gpu-section>
               <ToggleRow
                 label={t('settings.gpuAccel')}
@@ -449,11 +533,11 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
                 onChange={(value) => onChange({ ...settings, gpuAccel: value })}
               />
               <div className="mt-1.5 flex items-center justify-between gap-2 rounded-lg border border-line px-3 py-2">
-                <span className="text-[10.5px] text-muted-2">{t('settings.gpuRestartHint')}</span>
+                <span className="text-[0.65625rem] text-muted-2">{t('settings.gpuRestartHint')}</span>
                 <button
                   type="button"
                   onClick={() => void restartApp().catch(() => undefined)}
-                  className="shrink-0 rounded-md border border-line px-2 py-1 text-[11px] text-fg hover:bg-surface-3"
+                  className="shrink-0 rounded-md border border-line px-2 py-1 text-[0.6875rem] text-fg hover:bg-surface-3"
                 >
                   {t('settings.restartNow')}
                 </button>
@@ -462,14 +546,14 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
           </section>
 
           <section className={sectionClass('quickAccess')}>
-            <h2 className="pb-2 text-[11px] font-semibold tracking-wide text-muted-2">{t('settings.quickAccess')}</h2>
+            <h2 className="pb-2 text-[0.6875rem] font-semibold tracking-wide text-muted-2">{t('settings.quickAccess')}</h2>
             <div className="space-y-1.5 rounded-lg border border-line px-3 py-2" data-quick-access>
-              <div className="pb-1 text-[10.5px] text-muted-2">{t('settings.quickAccessHint')}</div>
+              <div className="pb-1 text-[0.65625rem] text-muted-2">{t('settings.quickAccessHint')}</div>
               {visibleBuiltins.map((place) => (
-                <div key={place.key} className="flex items-center justify-between gap-2 text-[11.5px]">
+                <div key={place.key} className="flex items-center justify-between gap-2 text-[0.71875rem]">
                   <span className="truncate text-fg">{place.label}</span>
                   <div className="flex shrink-0 items-center gap-2">
-                    <span className="text-[10px] uppercase tracking-wide text-muted-2">
+                    <span className="text-[0.625rem] uppercase tracking-wide text-muted-2">
                       {t('settings.placeBuiltin')}
                     </span>
                     <button
@@ -477,7 +561,7 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
                       onClick={() =>
                         onChange({ ...settings, hiddenPlaces: [...settings.hiddenPlaces, place.key] })
                       }
-                      className="rounded px-1.5 py-0.5 text-[11px] text-muted hover:bg-surface-3 hover:text-red-500"
+                      className="rounded px-1.5 py-0.5 text-[0.6875rem] text-muted hover:bg-surface-3 hover:text-red-500"
                     >
                       {t('settings.placeDelete')}
                     </button>
@@ -485,10 +569,10 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
                 </div>
               ))}
               {settings.customPlaces.map((place) => (
-                <div key={place.path} className="flex items-center justify-between gap-2 text-[11.5px]">
+                <div key={place.path} className="flex items-center justify-between gap-2 text-[0.71875rem]">
                   <span className="min-w-0">
                     <span className="text-fg">{place.name}</span>
-                    <span className="ml-2 truncate text-[10.5px] text-muted-2" title={place.path}>
+                    <span className="ml-2 truncate text-[0.65625rem] text-muted-2" title={place.path}>
                       {place.path}
                     </span>
                   </span>
@@ -500,7 +584,7 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
                         customPlaces: settings.customPlaces.filter((entry) => entry.path !== place.path),
                       })
                     }
-                    className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-muted hover:bg-surface-3 hover:text-red-500"
+                    className="shrink-0 rounded px-1.5 py-0.5 text-[0.6875rem] text-muted hover:bg-surface-3 hover:text-red-500"
                   >
                     {t('settings.placeDelete')}
                   </button>
@@ -510,7 +594,7 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
                 <button
                   type="button"
                   onClick={() => onChange({ ...settings, hiddenPlaces: [] })}
-                  className="rounded px-1.5 py-0.5 text-[11px] text-blue-500 hover:bg-surface-3"
+                  className="rounded px-1.5 py-0.5 text-[0.6875rem] text-blue-500 hover:bg-surface-3"
                 >
                   {t('settings.placeRestore')}
                 </button>
@@ -521,7 +605,7 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
                   onChange={(ev) => setPlaceName(ev.target.value)}
                   placeholder={t('settings.placeNamePh')}
                   data-place-name
-                  className="h-6 w-[96px] rounded border border-line bg-surface-2 px-1.5 text-[11px] outline-none placeholder:text-muted-2 focus:border-blue-400 focus:bg-surface"
+                  className="h-6 w-[6rem] rounded border border-line bg-surface-2 px-1.5 text-[0.6875rem] outline-none placeholder:text-muted-2 focus:border-blue-400 focus:bg-surface"
                 />
                 <input
                   value={placePath}
@@ -531,7 +615,7 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
                   }}
                   placeholder={t('settings.placePathPh')}
                   data-place-path
-                  className="h-6 min-w-0 flex-1 rounded border border-line bg-surface-2 px-1.5 text-[11px] outline-none placeholder:text-muted-2 focus:border-blue-400 focus:bg-surface"
+                  className="h-6 min-w-0 flex-1 rounded border border-line bg-surface-2 px-1.5 text-[0.6875rem] outline-none placeholder:text-muted-2 focus:border-blue-400 focus:bg-surface"
                 />
                 <button
                   type="button"
@@ -542,7 +626,7 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
                       })
                       .catch(() => undefined)
                   }}
-                  className="h-6 shrink-0 rounded border border-line px-1.5 text-[11px] text-fg hover:bg-surface-3"
+                  className="h-6 shrink-0 rounded border border-line px-1.5 text-[0.6875rem] text-fg hover:bg-surface-3"
                 >
                   {t('settings.placeBrowse')}
                 </button>
@@ -550,7 +634,7 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
                   type="button"
                   onClick={addPlace}
                   disabled={!placePath.trim()}
-                  className="h-6 shrink-0 rounded bg-blue-600 px-2 text-[11px] text-white hover:bg-blue-500 disabled:opacity-40"
+                  className="h-6 shrink-0 rounded bg-blue-600 px-2 text-[0.6875rem] text-white hover:bg-blue-500 disabled:opacity-40"
                 >
                   {t('settings.placeAdd')}
                 </button>
@@ -559,19 +643,19 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
           </section>
 
           <section className={sectionClass('preview')}>
-            <h2 className="pb-2 text-[11px] font-semibold tracking-wide text-muted-2">
+            <h2 className="pb-2 text-[0.6875rem] font-semibold tracking-wide text-muted-2">
               {t('settings.externalPreview')}
             </h2>
             <div className="space-y-1.5 rounded-lg border border-line px-3 py-2" data-external-preview>
-              <div className="pb-1 text-[10.5px] text-muted-2">{t('settings.externalPreviewHint')}</div>
-              <div className="pb-1 text-[10.5px] text-muted-2">
+              <div className="pb-1 text-[0.65625rem] text-muted-2">{t('settings.externalPreviewHint')}</div>
+              <div className="pb-1 text-[0.65625rem] text-muted-2">
                 {t('settings.externalKey', { keys: formatBinding(keys.externalPreview) })}
               </div>
               {settings.externalPreview.map((rule) => (
-                <div key={rule.ext} className="flex items-center justify-between gap-2 text-[11.5px]">
+                <div key={rule.ext} className="flex items-center justify-between gap-2 text-[0.71875rem]">
                   <span className="min-w-0">
                     <span className="font-mono text-fg">.{rule.ext}</span>
-                    <span className="ml-2 truncate font-mono text-[10.5px] text-muted-2" title={rule.command}>
+                    <span className="ml-2 truncate font-mono text-[0.65625rem] text-muted-2" title={rule.command}>
                       {rule.command}
                     </span>
                   </span>
@@ -583,7 +667,7 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
                         externalPreview: settings.externalPreview.filter((entry) => entry.ext !== rule.ext),
                       })
                     }
-                    className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-muted hover:bg-surface-3 hover:text-red-500"
+                    className="shrink-0 rounded px-1.5 py-0.5 text-[0.6875rem] text-muted hover:bg-surface-3 hover:text-red-500"
                   >
                     {t('settings.placeDelete')}
                   </button>
@@ -595,7 +679,7 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
                   onChange={(ev) => setExternalExt(ev.target.value)}
                   placeholder={t('settings.externalExtPh')}
                   data-external-ext
-                  className="h-6 w-[72px] shrink-0 rounded border border-line bg-surface-2 px-1.5 text-[11px] outline-none placeholder:text-muted-2 focus:border-blue-400 focus:bg-surface"
+                  className="h-6 w-[4.5rem] shrink-0 rounded border border-line bg-surface-2 px-1.5 text-[0.6875rem] outline-none placeholder:text-muted-2 focus:border-blue-400 focus:bg-surface"
                 />
                 <input
                   value={externalCommand}
@@ -606,13 +690,13 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
                   placeholder={t('settings.externalCommandPh')}
                   title={t('settings.externalCommand')}
                   data-external-command
-                  className="h-6 min-w-0 flex-1 rounded border border-line bg-surface-2 px-1.5 text-[11px] outline-none placeholder:text-muted-2 focus:border-blue-400 focus:bg-surface"
+                  className="h-6 min-w-0 flex-1 rounded border border-line bg-surface-2 px-1.5 text-[0.6875rem] outline-none placeholder:text-muted-2 focus:border-blue-400 focus:bg-surface"
                 />
                 <button
                   type="button"
                   onClick={addExternal}
                   disabled={!externalExt.trim() || !externalCommand.trim()}
-                  className="h-6 shrink-0 rounded bg-blue-600 px-2 text-[11px] text-white hover:bg-blue-500 disabled:opacity-40"
+                  className="h-6 shrink-0 rounded bg-blue-600 px-2 text-[0.6875rem] text-white hover:bg-blue-500 disabled:opacity-40"
                 >
                   {t('settings.placeAdd')}
                 </button>
@@ -621,16 +705,16 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
           </section>
 
           <section className={sectionClass('config')}>
-            <h2 className="pb-2 text-[11px] font-semibold tracking-wide text-muted-2">{t('settings.configDir')}</h2>
+            <h2 className="pb-2 text-[0.6875rem] font-semibold tracking-wide text-muted-2">{t('settings.configDir')}</h2>
             <div className="flex items-center gap-2 rounded-lg border border-line px-3 py-2">
-              <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted" title={configDir} data-config-dir>
+              <span className="min-w-0 flex-1 truncate font-mono text-[0.6875rem] text-muted" title={configDir} data-config-dir>
                 {configDir || '…'}
               </span>
               <button
                 type="button"
                 disabled={!configDir}
                 onClick={() => void explorerOpen(configDir).catch(() => undefined)}
-                className="shrink-0 rounded-md border border-line px-2 py-1 text-[11px] text-fg hover:bg-surface-3 disabled:opacity-40"
+                className="shrink-0 rounded-md border border-line px-2 py-1 text-[0.6875rem] text-fg hover:bg-surface-3 disabled:opacity-40"
               >
                 {t('settings.configOpen')}
               </button>
@@ -638,19 +722,19 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
           </section>
 
           <section className={sectionClass('updates')}>
-            <h2 className="pb-2 text-[11px] font-semibold tracking-wide text-muted-2">{t('settings.updates')}</h2>
+            <h2 className="pb-2 text-[0.6875rem] font-semibold tracking-wide text-muted-2">{t('settings.updates')}</h2>
             <div className="space-y-2 rounded-lg border border-line px-3 py-2" data-update-section>
               <div className="flex items-center justify-between gap-2">
                 <div className="min-w-0">
-                  <div className="text-[12px] text-fg">
+                  <div className="text-[0.75rem] text-fg">
                     v{info?.version ?? update?.current ?? '…'}
-                    <span className="ml-2 text-[10.5px] text-muted-2">
+                    <span className="ml-2 text-[0.65625rem] text-muted-2">
                       {update?.flavor === 'installer'
                         ? t('settings.updateFlavorInstaller')
                         : t('settings.updateFlavorPortable')}
                     </span>
                   </div>
-                  <div className="truncate text-[10.5px] text-muted-2" title={updateDetail} data-update-status>
+                  <div className="truncate text-[0.65625rem] text-muted-2" title={updateDetail} data-update-status>
                     {updateMessage}
                     {checkedAt && <span className="ml-1 text-muted-2">· {t('settings.updateLastCheck', { time: checkedAt })}</span>}
                   </div>
@@ -660,7 +744,7 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
                   onClick={runUpdateCheck}
                   disabled={checking || installing}
                   data-update-check
-                  className="shrink-0 rounded-md border border-line px-2 py-1 text-[11px] text-fg hover:bg-surface-3 disabled:opacity-40"
+                  className="shrink-0 rounded-md border border-line px-2 py-1 text-[0.6875rem] text-fg hover:bg-surface-3 disabled:opacity-40"
                 >
                   {t('settings.updateCheck')}
                 </button>
@@ -671,19 +755,19 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
                   onClick={runUpdateInstall}
                   disabled={installing}
                   data-update-install
-                  className="w-full rounded-md bg-blue-600 px-2 py-1 text-[11.5px] text-white hover:bg-blue-500 disabled:opacity-50"
+                  className="w-full rounded-md bg-blue-600 px-2 py-1 text-[0.71875rem] text-white hover:bg-blue-500 disabled:opacity-50"
                 >
                   {installing ? t('settings.updateInstalling') : t('settings.updateInstall')}
                 </button>
               )}
-              {updateError && <div className="text-[10.5px] text-red-500">{updateError}</div>}
+              {updateError && <div className="text-[0.65625rem] text-red-500">{updateError}</div>}
               <div className="flex items-center justify-between gap-2 border-t border-line pt-2">
-                <span className="text-[12px] text-fg">{t('settings.updateInterval')}</span>
+                <span className="text-[0.75rem] text-fg">{t('settings.updateInterval')}</span>
                 <select
                   value={settings.updateIntervalHours}
                   onChange={(ev) => onChange({ ...settings, updateIntervalHours: Number(ev.target.value) })}
                   data-update-interval
-                  className="h-6 rounded border border-line bg-surface-2 px-1 text-[11px] text-fg outline-none focus:border-blue-400"
+                  className="h-6 rounded border border-line bg-surface-2 px-1 text-[0.6875rem] text-fg outline-none focus:border-blue-400"
                 >
                   {UPDATE_INTERVALS.map((hours) => (
                     <option key={hours} value={hours}>
@@ -698,32 +782,32 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
           </section>
 
           <section className={sectionClass('about')}>
-            <h2 className="pb-2 text-[11px] font-semibold tracking-wide text-muted-2">{t('settings.about')}</h2>
-            <div className="rounded-lg border border-line px-3 py-2 text-[11.5px]">
+            <h2 className="pb-2 text-[0.6875rem] font-semibold tracking-wide text-muted-2">{t('settings.about')}</h2>
+            <div className="rounded-lg border border-line px-3 py-2 text-[0.71875rem]">
               <div className="flex justify-between py-0.5">
                 <span className="text-muted">{t('settings.version')}</span>
                 <span className="font-mono text-fg">{info?.version ?? '…'}</span>
               </div>
               <div className="mt-2 border-t border-line pt-2">
-                <div className="pb-1 text-[10.5px] text-muted-2">{t('settings.dependencies')}</div>
+                <div className="pb-1 text-[0.65625rem] text-muted-2">{t('settings.dependencies')}</div>
                 {(['rust', 'npm'] as const).map((kind) => {
                   const rows = (info?.dependencies ?? []).filter((dep) => dep.kind === kind)
                   if (!rows.length) return null
                   return (
                     <div key={kind} className="mb-2 last:mb-0">
-                      <div className="pb-0.5 text-[9.5px] font-semibold uppercase tracking-wider text-muted-2">
+                      <div className="pb-0.5 text-[0.59375rem] font-semibold uppercase tracking-wider text-muted-2">
                         {kind}
                       </div>
-                      <div className="grid grid-cols-[minmax(0,1fr)_72px_128px] items-baseline gap-x-3 gap-y-1">
+                      <div className="grid grid-cols-[minmax(0,1fr)_4.5rem_8rem] items-baseline gap-x-3 gap-y-1">
                         {rows.map((dep) => (
                           <div key={dep.name} className="contents">
-                            <span className="truncate font-mono text-[11px] text-fg" title={dep.name}>
+                            <span className="truncate font-mono text-[0.6875rem] text-fg" title={dep.name}>
                               {dep.name}
                             </span>
-                            <span className="text-right font-mono text-[11px] tabular text-muted">
+                            <span className="text-right font-mono text-[0.6875rem] tabular text-muted">
                               {dep.version}
                             </span>
-                            <span className="truncate text-right text-[10.5px] text-muted-2" title={dep.license}>
+                            <span className="truncate text-right text-[0.65625rem] text-muted-2" title={dep.license}>
                               {dep.license}
                             </span>
                           </div>
@@ -742,7 +826,7 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
           <button
             type="button"
             onClick={onClose}
-            className="rounded-md border border-line px-3 py-1 text-[11.5px] text-fg hover:bg-surface-3"
+            className="rounded-md border border-line px-3 py-1 text-[0.71875rem] text-fg hover:bg-surface-3"
           >
             {t('settings.close')}
           </button>

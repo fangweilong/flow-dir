@@ -41,8 +41,8 @@ export function PromptDialog({ title, initial, lang, onConfirm, onClose }: Props
         if (ev.target === ev.currentTarget) onClose()
       }}
     >
-      <div className="w-[380px] rounded-lg border border-line bg-surface p-3 shadow-2xl">
-        <div className="pb-2 text-[12px] font-semibold text-fg-strong">{title}</div>
+      <div className="w-[23.75rem] rounded-lg border border-line bg-surface p-3 shadow-2xl">
+        <div className="pb-2 text-[0.75rem] font-semibold text-fg-strong">{title}</div>
         <input
           data-prompt-input
           ref={inputRef}
@@ -57,20 +57,20 @@ export function PromptDialog({ title, initial, lang, onConfirm, onClose }: Props
               onClose()
             }
           }}
-          className="h-8 w-full rounded border border-line bg-surface-2 px-2 text-[12px] outline-none focus:border-blue-400"
+          className="h-8 w-full rounded border border-line bg-surface-2 px-2 text-[0.75rem] outline-none focus:border-blue-400"
         />
         <div className="flex justify-end gap-2 pt-3">
           <button
             type="button"
             onClick={onClose}
-            className="rounded-md border border-line px-3 py-1 text-[11.5px] text-fg hover:bg-surface-3"
+            className="rounded-md border border-line px-3 py-1 text-[0.71875rem] text-fg hover:bg-surface-3"
           >
             {t('dialog.cancel')}
           </button>
           <button
             type="button"
             onClick={submit}
-            className="rounded-md bg-blue-600 px-3 py-1 text-[11.5px] font-medium text-white hover:bg-blue-500"
+            className="rounded-md bg-blue-600 px-3 py-1 text-[0.71875rem] font-medium text-white hover:bg-blue-500"
           >
             {t('dialog.ok')}
           </button>

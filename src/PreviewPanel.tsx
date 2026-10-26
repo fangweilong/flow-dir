@@ -58,8 +58,8 @@ export function PreviewPanel({
       className="flex shrink-0 flex-col overflow-x-hidden border-l border-line bg-surface"
     >
       <header className="flex h-8 shrink-0 items-center gap-2 border-b border-line px-2.5">
-        <span className="text-[10px] font-semibold tracking-wider text-muted-2">{t('preview.title')}</span>
-        <span className="min-w-0 flex-1 truncate text-[11.5px] font-medium text-fg-strong" title={name}>
+        <span className="text-[0.625rem] font-semibold tracking-wider text-muted-2">{t('preview.title')}</span>
+        <span className="min-w-0 flex-1 truncate text-[0.71875rem] font-medium text-fg-strong" title={name}>
           {name}
         </span>
         <button
@@ -74,20 +74,20 @@ export function PreviewPanel({
 
       <div className="relative min-h-0 flex-1 overflow-auto p-3">
         {loading && (
-          <div className="grid h-full place-items-center text-[11.5px] text-muted-2">{t('preview.loading')}</div>
+          <div className="grid h-full place-items-center text-[0.71875rem] text-muted-2">{t('preview.loading')}</div>
         )}
 
         {!loading && error && (
           <div className="grid h-full place-items-center px-4 text-center">
             <div>
-              <div className="text-[12px] text-fg">{friendlyError(error, t)}</div>
-              <div className="mt-1 font-mono text-[10px] text-muted-2">{error.code}</div>
+              <div className="text-[0.75rem] text-fg">{friendlyError(error, t)}</div>
+              <div className="mt-1 font-mono text-[0.625rem] text-muted-2">{error.code}</div>
             </div>
           </div>
         )}
 
         {!loading && !error && !info && (
-          <div className="grid h-full place-items-center text-center text-[11.5px] text-muted-2">
+          <div className="grid h-full place-items-center text-center text-[0.71875rem] text-muted-2">
             {t('preview.empty')}
           </div>
         )}
@@ -110,22 +110,22 @@ export function PreviewPanel({
                   <svg viewBox="0 0 48 48" className="mx-auto h-12 w-12 text-amber-400" fill="currentColor" aria-hidden>
                     <path d="M4 12a4 4 0 0 1 4-4h11l4 5h17a4 4 0 0 1 4 4v19a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4V12Z" />
                   </svg>
-                  <div className="mt-2 text-[12px] font-medium text-fg-strong">{t('preview.folder')}</div>
-                  <div className="mt-1 text-[11px] text-muted-2">{t('preview.folderHint')}</div>
+                  <div className="mt-2 text-[0.75rem] font-medium text-fg-strong">{t('preview.folder')}</div>
+                  <div className="mt-1 text-[0.6875rem] text-muted-2">{t('preview.folderHint')}</div>
                 </div>
               </div>
             )}
 
             {info.kind === 'text' && (
-              <pre className="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-fg">
+              <pre className="whitespace-pre-wrap break-words font-mono text-[0.6875rem] leading-relaxed text-fg">
                 {info.text}
               </pre>
             )}
 
             {info.kind === 'archive' && (
               <div>
-                <div className="pb-1.5 text-[10.5px] text-muted-2">{t('preview.archive')}</div>
-                <div className="space-y-0.5 font-mono text-[11px]">
+                <div className="pb-1.5 text-[0.65625rem] text-muted-2">{t('preview.archive')}</div>
+                <div className="space-y-0.5 font-mono text-[0.6875rem]">
                   {(info.entries ?? []).map((entry) => (
                     <div key={entry.name} className="flex justify-between gap-3">
                       <span className="min-w-0 truncate text-fg">{entry.name}</span>
@@ -139,8 +139,8 @@ export function PreviewPanel({
 
             {info.kind === 'binary' && (
               <div>
-                <div className="pb-1.5 text-[10.5px] text-muted-2">{t('preview.version')}</div>
-                <div className="space-y-1 text-[11.5px]">
+                <div className="pb-1.5 text-[0.65625rem] text-muted-2">{t('preview.version')}</div>
+                <div className="space-y-1 text-[0.71875rem]">
                   {(info.meta ?? []).map((row) => (
                     <div key={row.label} className="flex justify-between gap-3">
                       <span className="shrink-0 text-muted-2">{row.label}</span>
@@ -159,8 +159,8 @@ export function PreviewPanel({
                     <path d="M12 6h16l8 8v28a2 2 0 0 1-2 2H12a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2Z" />
                     <path d="M28 6v8h8" />
                   </svg>
-                  <div className="mt-2 text-[12px] text-fg">{t('preview.unsupported')}</div>
-                  <div className="mt-1 text-[11px] text-muted-2">
+                  <div className="mt-2 text-[0.75rem] text-fg">{t('preview.unsupported')}</div>
+                  <div className="mt-1 text-[0.6875rem] text-muted-2">
                     {info.reason === 'too-large' ? t('preview.tooLarge') : t('preview.noPreview')}
                   </div>
                   {info.external && (
@@ -168,7 +168,7 @@ export function PreviewPanel({
                       type="button"
                       onClick={() => onOpenExternal(path)}
                       title={externalKey}
-                      className="mt-3 rounded-md border border-line bg-surface-2 px-2.5 py-1 text-[11px] text-fg hover:bg-surface-3"
+                      className="mt-3 rounded-md border border-line bg-surface-2 px-2.5 py-1 text-[0.6875rem] text-fg hover:bg-surface-3"
                     >
                       {t('preview.external', { name: info.external })}
                     </button>
@@ -181,7 +181,7 @@ export function PreviewPanel({
       </div>
 
       {info && (
-        <footer className="flex h-7 shrink-0 items-center justify-between border-t border-line px-2.5 text-[10.5px] text-muted-2">
+        <footer className="flex h-7 shrink-0 items-center justify-between border-t border-line px-2.5 text-[0.65625rem] text-muted-2">
           <span>{info.kind === 'folder' ? '' : `${t('preview.size')} ${formatSize(info.size, false)}`}</span>
           <span>{formatTime(info.mtime)}</span>
         </footer>

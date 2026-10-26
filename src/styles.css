@@ -28,6 +28,15 @@
   --color-sel: #1e3a8a;
 }
 
+/*
+ * Rem stays Tailwind's 16 px at the default 13 px text size, so every rem-based utility
+ * (spacing, icons, controls) keeps its original pixel size while the text scales with
+ * `--font-size-base`. Arbitrary px utilities were converted to rem for the same reason.
+ */
+html {
+  font-size: calc(var(--font-size-base, 13px) * 16 / 13);
+}
+
 html,
 body,
 #root {
@@ -36,16 +45,16 @@ body,
 }
 
 body {
-  font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
-  font-size: 13px;
+  font-family: var(--font-ui, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif);
+  font-size: var(--font-size-base, 13px);
   -webkit-font-smoothing: antialiased;
   user-select: none;
   overflow: hidden;
 }
 
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 0.625rem;
+  height: 0.625rem;
 }
 ::-webkit-scrollbar-thumb {
   background: rgb(0 0 0 / 0.18);
