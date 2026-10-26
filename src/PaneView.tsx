@@ -7,6 +7,7 @@ import type { GitBadges } from './git'
 import { openPath, pathIsDir } from './api'
 import { matchBinding } from './shortcuts'
 import type { ShortcutId } from './shortcuts'
+import { matchTypeAhead } from './typeahead'
 import { EMPTY_LIST, filterList, filterMatches } from './types'
 import { DEFAULT_SETTINGS } from './persist'
 import type { Drive, Entry, GitStatus, Lang, ListData, SortKey, SortState } from './types'
@@ -188,6 +189,17 @@ export function PaneView({
   const addressRef = useRef<HTMLInputElement>(null)
   /** Invalidates an in-flight existence check once the editor closes or commits again. */
   const addressSeq = useRef(0)
+  /** Type-ahead buffer plus the hidden input that receives IME composition. */
+  const [typed, setTyped] = useState('')
+  const typeAheadRef = useRef<HTMLInputElement>(null)
+  const typeAheadTimer = useRef<number | null>(null)
+
+  useEffect(
+    () => () => {
+      if (typeAheadTimer.current) window.clearTimeout(typeAheadTimer.current)
+    },
+    [],
+  )
 
   useEffect(() => {
     if (addressDraft === null) return
@@ -297,6 +309,32 @@ export function PaneView({
     const full = joinPath(tab.path, entry.name)
     if (isDir(entry.attrs)) onNavigate(tab.id, full)
     else void openPath(full).catch(() => undefined)
+  }
+
+  /** Row names only; rebuilt when the view changes, not on every keystroke. */
+  const viewNames = useMemo(() => view.map((entry) => entry.name), [view])
+
+  /**
+   * Appends to the type-ahead buffer and selects the first match. The highlight is a real
+   * selection, so Enter opens the match through the regular path and no filter changes.
+   */
+  const typeAhead = (text: string) => {
+    if (!tab) return
+    const buffer = typed + text
+    setTyped(buffer)
+    if (typeAheadTimer.current) window.clearTimeout(typeAheadTimer.current)
+    typeAheadTimer.current = window.setTimeout(() => setTyped(''), 800)
+    const index = matchTypeAhead(viewNames, buffer)
+    if (index < 0) return
+    const name = view[index].name
+    update(tab.id, (d) => ({ ...d, selected: new Set([name]), anchor: name }))
+    virtualizer.scrollToIndex(index, { align: 'auto' })
+  }
+
+  const clearTypeAhead = () => {
+    if (typeAheadTimer.current) window.clearTimeout(typeAheadTimer.current)
+    typeAheadTimer.current = null
+    setTyped('')
   }
 
   const changeSort = (key: SortKey) => {
@@ -450,6 +488,34 @@ export function PaneView({
     }
     // The drive overview holds no entries: skip selection, clipboard, and rename actions.
     if (!tab.path) return
+    // An IME owns the keystrokes until it commits; shortcuts must not fire mid-composition.
+    if (ev.nativeEvent.isComposing) return
+    if (typed) {
+      if (ev.key === 'Backspace') {
+        ev.preventDefault()
+        setTyped(typed.slice(0, -1))
+        return
+      }
+      if (ev.key === 'Escape') {
+        ev.preventDefault()
+        clearTypeAhead()
+        return
+      }
+      if (ev.key === 'Enter') {
+        ev.preventDefault()
+        const entry = view[anchorIdx]
+        clearTypeAhead()
+        if (entry) activate(entry)
+        return
+      }
+      // Any other navigation ends the run, so the buffer cannot leak into the next action.
+      clearTypeAhead()
+    }
+    if (!ev.ctrlKey && !ev.altKey && !ev.metaKey && ev.key.length === 1) {
+      ev.preventDefault()
+      typeAhead(ev.key)
+      return
+    }
     if (matchBinding(ev, keys.copy) || matchBinding(ev, keys.cut)) {
       ev.preventDefault()
       onClipboard(matchBinding(ev, keys.cut))
@@ -861,6 +927,11 @@ export function PaneView({
         ref={scrollRef}
         tabIndex={0}
         onKeyDown={onKeyDown}
+        onFocus={(ev) => {
+          // IME composition needs an editable target, so the list hands focus to a hidden
+          // input. Keys still bubble back to this container, so every handler is unchanged.
+          if (ev.target === scrollRef.current) typeAheadRef.current?.focus({ preventScroll: true })
+        }}
         onClick={(e) => {
           if (e.target === e.currentTarget && tab) {
             update(tab.id, (d) => ({ ...d, selected: new Set(), anchor: '' }))
@@ -874,6 +945,21 @@ export function PaneView({
         }}
         className="typo-list relative min-h-0 flex-1 overflow-auto outline-none"
       >
+        <input
+          ref={typeAheadRef}
+          data-typeahead-input
+          tabIndex={-1}
+          aria-label={t('list.typeAhead')}
+          autoComplete="off"
+          spellCheck={false}
+          onCompositionEnd={(ev) => {
+            const text = ev.data
+            // Stay empty: printable keys are handled by the pane, only IME text lands here.
+            ev.currentTarget.value = ''
+            if (text) typeAhead(text)
+          }}
+          className="pointer-events-none absolute left-0 top-0 h-px w-px border-0 p-0 opacity-0"
+        />
         {list.error && !root && (
           <div className="m-3 flex items-start gap-2 rounded-md border border-red-300 bg-red-50 p-2 text-red-800 dark:border-red-900 dark:bg-red-950/50 dark:text-red-200">
             <div className="font-mono text-[0.8em] font-semibold">{list.error.code}</div>
@@ -1001,6 +1087,15 @@ export function PaneView({
         </div>
         <span className="max-w-[45%] truncate font-mono text-[0.59375rem] text-muted-2">{tab?.path}</span>
       </div>
+
+      {typed && (
+        <div
+          data-typeahead-hint
+          className="pointer-events-none absolute bottom-8 left-1/2 z-20 -translate-x-1/2 rounded border border-line bg-surface-3/95 px-2 py-0.5 text-[0.75em] font-medium text-fg-strong shadow"
+        >
+          {typed}
+        </div>
+      )}
 
       {dropHint && (
         <div className="pointer-events-none absolute inset-0 z-20">
