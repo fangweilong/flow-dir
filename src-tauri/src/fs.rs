@@ -1,3 +1,4 @@
+use std::ffi::c_void;
 use std::mem::offset_of;
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::fs::OpenOptionsExt;
@@ -12,10 +13,13 @@ use windows::Win32::Storage::FileSystem::{
     FILE_ID_BOTH_DIR_INFO,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, IPersistFile, CLSCTX_INPROC_SERVER,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, IPersistFile, CLSCTX_INPROC_SERVER,
     COINIT_MULTITHREADED, STGM_READ,
 };
-use windows::Win32::UI::Shell::{IShellLinkW, SLGP_RAWPATH, ShellLink};
+use windows::Win32::UI::Shell::{
+    IShellLinkW, SLGP_RAWPATH, ShellLink, FOLDERID_Desktop, FOLDERID_Documents,
+    FOLDERID_Downloads, FOLDERID_Profile,
+};
 
 use crate::error::ApiError;
 
@@ -453,25 +457,51 @@ pub struct Place {
     pub path: String,
 }
 
-pub fn quick_access() -> Vec<Place> {
-    let home = std::env::var("USERPROFILE").unwrap_or_default();
-    if home.is_empty() {
-        return Vec::new();
+/// Resolves a known folder, freeing the shell-allocated string. Empty results are dropped.
+fn known_folder(id: &windows::core::GUID) -> Option<String> {
+    use windows::Win32::UI::Shell::{SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+
+    unsafe {
+        let raw = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None).ok()?;
+        let path = raw.to_string().ok();
+        CoTaskMemFree(Some(raw.0 as *const c_void));
+        path.filter(|path| !path.is_empty())
     }
+}
+
+pub fn quick_access() -> Vec<Place> {
+    // OneDrive and enterprise redirection move Desktop/Documents out of `%USERPROFILE%`,
+    // so the shell's known folders are authoritative; the env var stays as the fallback
+    // for environments where the lookup itself fails.
+    let home = known_folder(&FOLDERID_Profile)
+        .or_else(|| std::env::var("USERPROFILE").ok().filter(|home| !home.is_empty()));
+    let Some(home) = home else {
+        return Vec::new();
+    };
     let mut out = vec![Place {
         key: "home".to_string(),
         path: home.clone(),
     }];
-    for (key, sub) in [
-        ("desktop", "Desktop"),
-        ("downloads", "Downloads"),
-        ("documents", "Documents"),
+    let mut seen = std::collections::HashSet::from([home.to_lowercase()]);
+    for (key, folder, sub) in [
+        ("desktop", &FOLDERID_Desktop, "Desktop"),
+        ("downloads", &FOLDERID_Downloads, "Downloads"),
+        ("documents", &FOLDERID_Documents, "Documents"),
     ] {
-        let path = Path::new(&home).join(sub);
-        if path.exists() {
+        let path = known_folder(folder).unwrap_or_else(|| {
+            Path::new(&home)
+                .join(sub)
+                .to_string_lossy()
+                .into_owned()
+        });
+        // A redirected folder may coincide with another entry; one row per path is enough.
+        if !seen.insert(path.to_lowercase()) {
+            continue;
+        }
+        if Path::new(&path).exists() {
             out.push(Place {
                 key: key.to_string(),
-                path: path.to_string_lossy().into_owned(),
+                path,
             });
         }
     }
@@ -521,5 +551,35 @@ mod tests {
         let dead = volume_info("\\\\localhost\\flowdir-no-such-share");
         assert!(!dead.available);
         assert_eq!(dead.total, 0);
+    }
+
+    /// Known folders are resolved by the shell, so a redirected Desktop is the one that
+    /// appears; every row must be a real folder and no two rows may share a path.
+    #[test]
+    fn quick_access_uses_known_folders() {
+        let places = quick_access();
+        let home = known_folder(&FOLDERID_Profile).expect("profile folder");
+        assert_eq!(places[0].key, "home");
+        assert!(places[0].path.eq_ignore_ascii_case(&home));
+
+        let mut seen = std::collections::HashSet::new();
+        for place in &places {
+            assert!(!place.path.is_empty(), "empty path for {}", place.key);
+            assert!(Path::new(&place.path).exists(), "missing {}", place.path);
+            assert!(seen.insert(place.path.to_lowercase()), "duplicate {}", place.path);
+        }
+        for (key, folder) in [
+            ("desktop", &FOLDERID_Desktop),
+            ("downloads", &FOLDERID_Downloads),
+            ("documents", &FOLDERID_Documents),
+        ] {
+            let Some(path) = known_folder(folder) else {
+                continue;
+            };
+            assert!(
+                places.iter().any(|place| place.key == key && place.path.eq_ignore_ascii_case(&path)),
+                "{key} must use {path}"
+            );
+        }
     }
 }
