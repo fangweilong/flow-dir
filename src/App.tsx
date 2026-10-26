@@ -41,7 +41,7 @@ import {
   watchClear,
   watchSet,
 } from './api'
-import { EMPTY_LIST, emptyList } from './types'
+import { EMPTY_GIT, EMPTY_LIST, emptyList } from './types'
 import type {
   Drive,
   Entry,
@@ -276,7 +276,7 @@ export default function App() {
       })
     gitStatus(dir)
       .then(store)
-      .catch(() => store({ root: '', files: [], dirs: [] }))
+      .catch(() => store(EMPTY_GIT))
       .finally(() => {
         if (gitSeq.current.get(key) === seq) gitPending.current.delete(key)
       })
@@ -518,6 +518,9 @@ export default function App() {
     }
     for (const [paneId, path] of current) {
       if (watched.current.get(paneId) !== path) {
+        // Re-entering a folder must not reuse the status cached on an earlier visit; the
+        // cache only exists to keep tab switches and rendering cheap within one visit.
+        invalidateGit(path)
         void watchSet(paneId, path).catch(() => undefined)
       }
     }
@@ -525,7 +528,7 @@ export default function App() {
       if (!current.has(paneId)) void watchClear(paneId).catch(() => undefined)
     }
     watched.current = current
-  }, [ws])
+  }, [ws, invalidateGit])
 
   useEffect(() => {
     let disposed = false
@@ -560,6 +563,26 @@ export default function App() {
       rescanTimers.current.clear()
     }
   }, [invalidateGit, invalidateTree, startScan])
+
+  // `git add`/`git commit` touch only repository metadata, so badges go stale while the
+  // listing stays valid; invalidating the status cache is enough.
+  useEffect(() => {
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    void listen<{ paneId: string }>('flowdir:git-changed', (event) => {
+      const current = wsRef.current
+      const pane = current?.panes[event.payload.paneId]
+      const tab = pane && current ? current.tabs[pane.activeTabId] : undefined
+      if (tab?.path) invalidateGit(tab.path)
+    }).then((fn) => {
+      if (disposed) fn()
+      else unlisten = fn
+    })
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [invalidateGit])
 
   const updateSettings = useCallback((next: Settings) => {
     setSettings(next)

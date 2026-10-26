@@ -84,12 +84,46 @@ export type PreviewInfo = {
   mtime: number
 }
 export type GitFile = { path: string; code: string }
+/** Status summary of one direct child repository, shown on its folder icon. */
+export type GitRepo = {
+  name: string
+  /** False when the probe failed or the folder exceeded the probe limit. */
+  checked: boolean
+  dirty: boolean
+  ahead: number
+  behind: number
+  upstream: boolean
+  conflict: boolean
+}
 /** Work-tree status of one folder; `root` is empty outside a repository. */
 export type GitStatus = {
   root: string
   files: GitFile[]
   /** Child folders with changes deeper down. */
   dirs: string[]
+  /** Checked-out branch; empty when HEAD is detached. */
+  branch: string
+  ahead: number
+  behind: number
+  /** Whether the branch has an upstream, so the counts mean anything. */
+  upstream: boolean
+  /** Any change anywhere in the work tree, not only below the listed folder. */
+  dirty: boolean
+  /** Child folders that are repository roots, with their own summary. */
+  repos: GitRepo[]
+}
+
+/** Not a repository, or a lookup that failed; also the cache entry for both. */
+export const EMPTY_GIT: GitStatus = {
+  root: '',
+  files: [],
+  dirs: [],
+  branch: '',
+  ahead: 0,
+  behind: 0,
+  upstream: false,
+  dirty: false,
+  repos: [],
 }
 export type SearchItem = { path: string; name: string; isDir: boolean; size: number; mtime: number }
 export type SearchBatch = {
