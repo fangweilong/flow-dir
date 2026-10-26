@@ -76,6 +76,26 @@ export const taskbarProgress = (state: string, completed: number, total: number)
 /** System toast plus a taskbar flash, for an operation that finished in the background. */
 export const notifyOp = (title: string, body: string) => invoke<void>('notify_op', { title, body })
 
+/** Reports seen in the last few seconds, so a render loop cannot flood the log file. */
+const reported = new Map<string, number>()
+
+/** Writes a frontend error/crash report to the same log the backend uses. */
+export function logFrontend(level: 'error' | 'warn' | 'info' | 'debug', message: string, detail: string) {
+  const key = `${level}|${message}|${detail.slice(0, 200)}`
+  const now = Date.now()
+  const last = reported.get(key)
+  if (last !== undefined && now - last < 5000) return
+  reported.set(key, now)
+  if (reported.size > 200) reported.clear()
+  void invoke<void>('log_frontend', { level, message, detail }).catch(() => undefined)
+}
+
+/** Absolute path of the log folder, or null before the logger is initialised. */
+export const logDirPath = () => invoke<string | null>('log_dir_path')
+
+/** Writes a diagnostics zip into `dir` and returns its path. */
+export const diagnosticsExport = (dir: string) => invoke<string>('diagnostics_export', { dir })
+
 export const shellMenuShow = (paths: string[], x: number, y: number, extended: boolean) =>
   invoke<MenuOutcome>('shell_menu_show', { paths, x, y, extended })
 export const shellMenuBackgroundShow = (

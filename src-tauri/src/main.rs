@@ -8,6 +8,7 @@ mod fs;
 mod git;
 mod icons;
 mod layout;
+mod logging;
 mod ops;
 mod preview;
 mod restore;
@@ -121,6 +122,13 @@ fn list_dir(
 
     let _ = tauri::async_runtime::spawn_blocking(move || {
         let _guard = guard;
+        let started = std::time::Instant::now();
+        log::info!(
+            target: "flowdir::fs",
+            "list_dir start tab={tab_id} sort={sort}/{dir} hidden={hidden}"
+        );
+        // Full paths are opt-in: enable the debug level when a report needs them.
+        log::debug!(target: "flowdir::fs", "list_dir path={path}");
         // Progress-only batches go out while the directory is still being read, so a slow
         // share grows the counter instead of leaving the pane on a spinner.
         let mut reported = 0usize;
@@ -141,6 +149,16 @@ fn list_dir(
         let (mut entries, truncated) = match outcome {
             Ok(outcome) => (outcome.entries, outcome.truncated),
             Err(err) => {
+                logging::error_once(
+                    &format!("list_dir:{}:{}", err.code, path),
+                    &format!("list_dir failed code={}", err.code),
+                );
+                log::debug!(
+                    target: "flowdir::fs",
+                    "list_dir error path={path}: {} {}",
+                    err.code,
+                    err.detail
+                );
                 let _ = on_batch.send(DirBatch {
                     gen,
                     scanned: 0,
@@ -189,6 +207,13 @@ fn list_dir(
             }
         }
         scanned += batch.len() as u32;
+        log::info!(
+            target: "flowdir::fs",
+            "list_dir done rows={} truncated={truncated} in {}ms",
+            (reported as u32).max(scanned),
+            started.elapsed().as_millis(),
+        );
+        log::debug!(target: "flowdir::fs", "list_dir done path={path}");
         let _ = on_batch.send(DirBatch {
             gen,
             scanned: (reported as u32).max(scanned),
@@ -247,9 +272,17 @@ async fn drives() -> Vec<fs::Drive> {
 /// Repository status for the folder, empty when it is not a work tree or git is absent.
 #[tauri::command]
 async fn git_status(path: String) -> Result<git::GitStatus, ApiError> {
-    tauri::async_runtime::spawn_blocking(move || git::status(&path))
+    let started = std::time::Instant::now();
+    let status = tauri::async_runtime::spawn_blocking(move || git::status(&path))
         .await
-        .map_err(|e| ApiError::new("GIT_TASK", e.to_string()))
+        .map_err(|e| ApiError::new("GIT_TASK", e.to_string()))?;
+    log::debug!(
+        target: "flowdir::git",
+        "git_status root={} in {}ms",
+        status.root,
+        started.elapsed().as_millis()
+    );
+    Ok(status)
 }
 
 /// Subdirectory names of one folder, plus whether the caps cut them short.
@@ -328,6 +361,7 @@ fn settings_save(
 ) -> Result<(), ApiError> {
     let settings = settings.normalize();
     settings::save(&app, &settings)?;
+    crate::logging::set_level(&settings.log_level);
     cache.set(settings);
     Ok(())
 }
@@ -382,6 +416,12 @@ fn op_start(
         .get_webview_window("main")
         .and_then(|window| window.hwnd().ok())
         .map(|hwnd| hwnd.0 as isize);
+    log::info!(
+        target: "flowdir::ops",
+        "op_start kind={kind} items={} permanent={permanent}",
+        sources.len(),
+    );
+    log::debug!(target: "flowdir::ops", "op target={target_dir:?}");
     ops::start(
         &state,
         ops::Request {
@@ -505,8 +545,18 @@ fn search_start(
     on_batch: Channel<search::SearchBatch>,
 ) -> Result<(), ApiError> {
     let cancel = state.begin();
+    let started = std::time::Instant::now();
+    let log_root = root.clone();
+    log::info!(target: "flowdir::search", "search_start gen={gen} limit={limit}");
+    log::debug!(target: "flowdir::search", "search root={root}");
     let _ = tauri::async_runtime::spawn_blocking(move || {
         search::run(root, query, gen, limit, prefer_everything, hidden, cancel, on_batch);
+        log::info!(
+            target: "flowdir::search",
+            "search done gen={gen} in {}ms",
+            started.elapsed().as_millis()
+        );
+        log::debug!(target: "flowdir::search", "search root={log_root}");
     });
     Ok(())
 }
@@ -580,6 +630,30 @@ fn notify_op(app: tauri::AppHandle, title: String, body: String) -> Result<(), A
         .map_err(|e| ApiError::new("NOTIFY", e.to_string()))
 }
 
+/// Frontend exceptions, unhandled rejections and render errors land in the same file.
+#[tauri::command]
+fn log_frontend(level: String, message: String, detail: String) {
+    logging::frontend(&level, &message, &detail);
+}
+
+#[tauri::command]
+fn log_dir_path() -> Option<String> {
+    logging::dir().map(|dir| dir.to_string_lossy().into_owned())
+}
+
+/// Writes logs, version facts and a redacted settings snapshot into `dir`.
+#[tauri::command]
+async fn diagnostics_export(
+    app: tauri::AppHandle,
+    cache: tauri::State<'_, settings::SettingsCache>,
+    dir: String,
+) -> Result<String, ApiError> {
+    let settings = cache.get(&app);
+    tauri::async_runtime::spawn_blocking(move || logging::export(&app, &settings, &dir))
+        .await
+        .map_err(|e| ApiError::new("EXPORT_TASK", e.to_string()))?
+}
+
 #[tauri::command]
 fn search_cancel(state: tauri::State<'_, search::SearchState>) {
     state.cancel();
@@ -590,13 +664,32 @@ async fn update_check(
     app: tauri::AppHandle,
     force: bool,
 ) -> Result<update::UpdateStatus, ApiError> {
-    tauri::async_runtime::spawn_blocking(move || update::check(&app, force))
+    let started = std::time::Instant::now();
+    let status = tauri::async_runtime::spawn_blocking(move || update::check(&app, force))
         .await
-        .map_err(|e| ApiError::new("UPDATE_TASK", e.to_string()))
+        .map_err(|e| ApiError::new("UPDATE_TASK", e.to_string()))?;
+    match &status.error {
+        Some(err) => log::warn!(
+            target: "flowdir::update",
+            "update_check failed: {} {}",
+            err.code,
+            err.detail
+        ),
+        None => log::info!(
+            target: "flowdir::update",
+            "update_check latest={:?} available={} checked={} in {}ms",
+            status.latest,
+            status.available,
+            status.checked,
+            started.elapsed().as_millis(),
+        ),
+    }
+    Ok(status)
 }
 
 #[tauri::command]
 async fn update_install(app: tauri::AppHandle) -> Result<(), ApiError> {
+    log::info!(target: "flowdir::update", "update_install start");
     tauri::async_runtime::spawn_blocking(move || update::install(&app))
         .await
         .map_err(|e| ApiError::new("UPDATE_TASK", e.to_string()))?
@@ -729,6 +822,12 @@ fn main() {
             store::migrate_legacy(app.handle());
             update::cleanup_leftovers();
             let saved = settings::load(app.handle());
+            // The logger starts before the window so every later failure has somewhere to go.
+            if let Ok(cache) = store::cache_dir(app.handle()) {
+                let _ = logging::init(cache.join("logs"), &saved.log_level);
+            }
+            logging::install_panic_hook();
+            logging::log_startup(app.handle());
             app.state::<settings::SettingsCache>().set(saved.clone());
             // The window is built here instead of in tauri.conf.json because the WebView2
             // browser arguments (GPU on/off) are fixed when the browser process starts.
@@ -829,6 +928,9 @@ fn main() {
             restore_recycle,
             taskbar_progress,
             notify_op,
+            log_frontend,
+            log_dir_path,
+            diagnostics_export,
             app_info,
             update_check,
             update_install

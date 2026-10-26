@@ -96,6 +96,11 @@ enum Flavor {
     Installer,
 }
 
+/// Build shape for logs and the update manifest.
+pub fn flavor_name() -> &'static str {
+    Flavor::detect().as_str()
+}
+
 impl Flavor {
     fn as_str(&self) -> &'static str {
         match self {

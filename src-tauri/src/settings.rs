@@ -82,6 +82,8 @@ pub struct Settings {
     pub update_interval_hours: u32,
     /// System notification when a long operation finishes in the background.
     pub notify_ops: bool,
+    /// Diagnostic log verbosity: error | warn | info | debug.
+    pub log_level: String,
     /// Single UI font family, assembled into a stack by the frontend.
     pub font_family: String,
     /// Base UI font size in px; drives the rem scale of the whole interface.
@@ -223,6 +225,7 @@ impl Default for Settings {
             gpu_accel: true,
             update_interval_hours: 24,
             notify_ops: true,
+            log_level: "info".to_string(),
             font_family: default_font_family(),
             font_size: default_font_size(),
             tab_font_family: String::new(),
@@ -240,6 +243,10 @@ impl Default for Settings {
 impl Settings {
     /// Repairs values that a hand-edited file or an older build may carry.
     pub fn normalize(mut self) -> Self {
+        self.log_level = match self.log_level.as_str() {
+            "error" | "warn" | "info" | "debug" => self.log_level,
+            _ => "info".to_string(),
+        };
         self.font_family = sanitize_font_family(&self.font_family);
         self.font_size = sanitize_font_size(self.font_size);
         self.tab_font_family = sanitize_region_font_family(&self.tab_font_family);
@@ -318,6 +325,9 @@ update_interval_hours = 24
 # 长任务在后台完成时发系统通知 / system notification when a long operation finishes
 notify_ops = true
 
+# 诊断日志级别 / diagnostic log level: "error" | "warn" | "info" | "debug"
+log_level = "info"
+
 # 额外的快速访问项 / extra quick-access entries
 # custom_places = [{ name = "项目", path = 'D:\Codes' }]
 custom_places = []
@@ -351,6 +361,7 @@ struct FileSettings {
     gpu_accel: bool,
     update_interval_hours: u32,
     notify_ops: bool,
+    log_level: String,
     font_family: String,
     font_size: u32,
     tab_font_family: String,
@@ -382,6 +393,7 @@ impl Default for FileSettings {
             gpu_accel: base.gpu_accel,
             update_interval_hours: base.update_interval_hours,
             notify_ops: base.notify_ops,
+            log_level: base.log_level,
             font_family: base.font_family,
             font_size: base.font_size,
             tab_font_family: base.tab_font_family,
@@ -414,6 +426,7 @@ impl From<FileSettings> for Settings {
             gpu_accel: file.gpu_accel,
             update_interval_hours: file.update_interval_hours,
             notify_ops: file.notify_ops,
+            log_level: file.log_level,
             font_family: file.font_family,
             font_size: file.font_size,
             tab_font_family: file.tab_font_family,

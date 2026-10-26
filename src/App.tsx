@@ -725,9 +725,10 @@ export default function App() {
         void watchSet(paneId, path).catch(() => undefined)
       }
       // Only the active tab of a pane is watched, so a tab that was in the background
-      // missed every event; rescan it on activation. `has` skips the very first mount,
-      // where the bootstrap effect owns the initial scan.
-      if ((switched || rewatching) && lastScan.current.has(tab.id)) {
+      // missed every event; rescan it on activation. Navigation is deliberately excluded:
+      // `navigate` already started a fresh scan, and a keep-scan here would race it.
+      // Tabs without data are left to the bootstrap effect, which streams the first batch.
+      if (switched && listData[tab.id] && lastScan.current.has(tab.id)) {
         startScan(tab.id, path, pane.sort, pane.hidden, true)
       }
     }
@@ -735,7 +736,7 @@ export default function App() {
       if (!current.has(paneId)) void watchClear(paneId).catch(() => undefined)
     }
     watched.current = current
-  }, [ws, invalidateGit, startScan])
+  }, [ws, listData, invalidateGit, startScan])
 
   useEffect(() => {
     let disposed = false

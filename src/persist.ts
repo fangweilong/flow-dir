@@ -7,6 +7,9 @@ export type QuickPlace = { name: string; path: string }
 /** Program used for extensions the built-in previewer cannot render. */
 export type ExternalPreviewRule = { ext: string; command: string }
 
+/** Backend diagnostic log verbosity. */
+export type LogLevel = 'error' | 'warn' | 'info' | 'debug'
+
 export type Settings = {
   language: Lang
   theme: Theme
@@ -26,6 +29,8 @@ export type Settings = {
   updateIntervalHours: number
   /** System notification when a long operation finishes while the window is unfocused. */
   notifyOps: boolean
+  /** Diagnostic log verbosity; the backend log follows it immediately. */
+  logLevel: LogLevel
   /** Single UI font family; the frontend appends fallbacks. */
   fontFamily: string
   /** Base UI font size in px (12–20); drives the whole rem scale. */
@@ -64,6 +69,7 @@ export const DEFAULT_SETTINGS: Settings = {
   gpuAccel: true,
   updateIntervalHours: 24,
   notifyOps: true,
+  logLevel: 'info',
   fontFamily: 'Segoe UI Variable Text',
   fontSize: 13,
   tabFontFamily: '',

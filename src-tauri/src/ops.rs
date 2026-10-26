@@ -185,6 +185,31 @@ pub fn start(
         .spawn(move || {
             let total = request.sources.len() as u32;
             let outcome = run(&request, kind, hwnd, token, progress.clone());
+            match (&outcome.error, outcome.aborted, outcome.failed_total) {
+                (Some(err), _, _) => log::error!(
+                    target: "flowdir::ops",
+                    "op {} failed: {} {}",
+                    request.kind,
+                    err.code,
+                    err.detail
+                ),
+                (None, true, _) => log::warn!(
+                    target: "flowdir::ops",
+                    "op {} canceled after {} items",
+                    request.kind,
+                    total
+                ),
+                (None, false, failed) if failed > 0 => log::warn!(
+                    target: "flowdir::ops",
+                    "op {} partial: {failed} of {total} items failed",
+                    request.kind
+                ),
+                (None, false, _) => log::info!(
+                    target: "flowdir::ops",
+                    "op {} done: {total} items",
+                    request.kind
+                ),
+            }
             let _ = progress.send(OpProgress {
                 op_id: op_id.clone(),
                 phase: "done".into(),

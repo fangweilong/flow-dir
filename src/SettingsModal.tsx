@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
-import { appInfo, configPath, everythingStatus, explorerOpen, pickFolder, restartApp, updateCheck, updateInstall } from './api'
+import { appInfo, configPath, diagnosticsExport, everythingStatus, explorerOpen, logDirPath, openPath, pickFolder, restartApp, updateCheck, updateInstall } from './api'
 import { makeT } from './i18n'
 import type { Key } from './i18n'
 import { DEFAULT_BINDINGS, SHORTCUTS, bindingFromEvent, formatBinding, resolveShortcuts, sameBinding } from './shortcuts'
 import type { ShortcutId } from './shortcuts'
 import type { AppInfo, EverythingStatus, Lang, Theme, UpdateStatus } from './types'
-import type { Settings } from './persist'
+import type { LogLevel, Settings } from './persist'
 import {
   DEFAULT_FONT_FAMILY,
   DEFAULT_LIST_FONT_SIZE,
@@ -26,7 +26,7 @@ type Props = {
   onClose: () => void
 }
 
-type SectionId = 'general' | 'shortcuts' | 'graphics' | 'quickAccess' | 'preview' | 'config' | 'updates' | 'about'
+type SectionId = 'general' | 'shortcuts' | 'graphics' | 'quickAccess' | 'preview' | 'config' | 'updates' | 'diagnostics' | 'about'
 
 const SECTIONS: { id: SectionId; label: Key }[] = [
   { id: 'general', label: 'settings.general' },
@@ -36,11 +36,13 @@ const SECTIONS: { id: SectionId; label: Key }[] = [
   { id: 'preview', label: 'settings.previewSection' },
   { id: 'config', label: 'settings.configDir' },
   { id: 'updates', label: 'settings.updates' },
+  { id: 'diagnostics', label: 'settings.diagnostics' },
   { id: 'about', label: 'settings.about' },
 ]
 
 const THEMES: Theme[] = ['system', 'light', 'dark']
 const UPDATE_INTERVALS = [0, 6, 12, 24, 72]
+const LOG_LEVELS: LogLevel[] = ['error', 'warn', 'info', 'debug']
 
 /** IPC failures arrive as the serialized ApiError, so `String(err)` would say `[object Object]`. */
 const ipcErrorText = (err: unknown) => {
@@ -143,6 +145,8 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
   const [checking, setChecking] = useState(false)
   const [installing, setInstalling] = useState(false)
   const [updateError, setUpdateError] = useState<string | null>(null)
+  const [exporting, setExporting] = useState(false)
+  const [exportNote, setExportNote] = useState('')
   // The select only holds the listed families; arbitrary installed families keep the
   // custom row open with the typed value, which is what `fontFamily` stores.
   const [customFont, setCustomFont] = useState(!FONT_FAMILIES.includes(settings.fontFamily))
@@ -187,6 +191,12 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
     preview: [t('settings.previewSection'), t('settings.externalPreview'), ...settings.externalPreview.map((rule) => rule.ext)].join(' '),
     config: [t('settings.configDir'), t('settings.configOpen')].join(' '),
     updates: [t('settings.updates'), t('settings.updateInterval'), t('settings.updateCheck')].join(' '),
+    diagnostics: [
+      t('settings.diagnostics'),
+      t('settings.logLevel'),
+      t('settings.logOpen'),
+      t('settings.logExport'),
+    ].join(' '),
     about: [t('settings.about'), t('settings.version'), t('settings.dependencies')].join(' '),
   }
   const sectionClass = (id: SectionId) => {
@@ -869,6 +879,71 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
                     </option>
                   ))}
                 </select>
+              </div>
+            </div>
+          </section>
+
+          <section className={sectionClass('diagnostics')}>
+            <h2 className="pb-2 text-[0.6875rem] font-semibold tracking-wide text-muted-2">
+              {t('settings.diagnostics')}
+            </h2>
+            <div className="space-y-2 rounded-lg border border-line px-3 py-2" data-diagnostics>
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-[0.71875rem] text-fg">{t('settings.logLevel')}</div>
+                  <div className="text-[0.625rem] text-muted-2">{t('settings.logLevelHint')}</div>
+                </div>
+                <select
+                  value={settings.logLevel}
+                  onChange={(ev) => onChange({ ...settings, logLevel: ev.target.value as LogLevel })}
+                  data-log-level
+                  className="h-6 shrink-0 rounded border border-line bg-surface-2 px-1 text-[0.6875rem] text-fg outline-none focus:border-blue-400"
+                >
+                  {LOG_LEVELS.map((level) => (
+                    <option key={level} value={level}>
+                      {t(('settings.logLevel.' + level) as Key)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex items-center gap-2 border-t border-line pt-2">
+                <button
+                  type="button"
+                  onClick={() =>
+                    void logDirPath()
+                      .then((dir) => (dir ? openPath(dir) : undefined))
+                      .catch(() => undefined)
+                  }
+                  className="shrink-0 rounded border border-line px-2 py-0.5 text-[0.6875rem] text-fg hover:bg-surface-3"
+                >
+                  {t('settings.logOpen')}
+                </button>
+                <button
+                  type="button"
+                  disabled={exporting}
+                  onClick={() => {
+                    setExporting(true)
+                    setExportNote('')
+                    void pickFolder(t('settings.logExportPick'), '')
+                      .then((dir) => (dir ? diagnosticsExport(dir) : null))
+                      .then((path) => {
+                        if (path) setExportNote(t('settings.logExported', { path }))
+                      })
+                      .catch((err: unknown) => {
+                        setExportNote(`${t('settings.logExportFailed')}: ${ipcErrorText(err)}`)
+                      })
+                      .finally(() => setExporting(false))
+                  }}
+                  className="shrink-0 rounded border border-line px-2 py-0.5 text-[0.6875rem] text-fg hover:bg-surface-3 disabled:opacity-40"
+                >
+                  {t('settings.logExport')}
+                </button>
+                <span
+                  className="min-w-0 flex-1 truncate text-[0.625rem] text-muted-2"
+                  title={exportNote}
+                >
+                  {exportNote}
+                </span>
               </div>
             </div>
           </section>
