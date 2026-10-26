@@ -598,6 +598,14 @@ export default function App() {
     void settingsSave(next).catch(() => undefined)
   }, [])
 
+  /** File-list column widths are global: every pane and tab shares them. */
+  const setColWidths = useCallback(
+    (listSizeWidth: number, listTimeWidth: number) => {
+      updateSettings({ ...settingsRef.current, listSizeWidth, listTimeWidth })
+    },
+    [updateSettings],
+  )
+
   /** Ctrl+B and the caption button share this so a collapsed drag reopens at a usable width. */
   const toggleSidebar = useCallback(() => {
     const current = settingsRef.current
@@ -1654,6 +1662,9 @@ export default function App() {
               active={ws.activePaneId === pane.id}
               lang={lang}
               fontSize={settings.fontSize}
+              colSize={settings.listSizeWidth}
+              colTime={settings.listTimeWidth}
+              onColWidths={setColWidths}
               dropHint={drag?.target?.paneId === pane.id ? drag.target.mode : null}
               draggingTabId={drag?.tabId ?? null}
               onFocusPane={() => focusPane(pane.id)}
@@ -1713,6 +1724,9 @@ export default function App() {
       driveList,
       openDriveMenu,
       settings.fontSize,
+      settings.listSizeWidth,
+      settings.listTimeWidth,
+      setColWidths,
     ],
   )
 
