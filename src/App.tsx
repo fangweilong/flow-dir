@@ -197,6 +197,8 @@ export default function App() {
   /** Sidebar tree: expanded folders (key → display path) and their cached children. */
   const [treeOpen, setTreeOpen] = useState<Record<string, string>>({})
   const [treeNodes, setTreeNodes] = useState<Record<string, string[]>>({})
+  /** Folders whose child list hit the scan/row cap; the tree marks them instead of hiding the cut. */
+  const [treeTruncated, setTreeTruncated] = useState<Record<string, boolean>>({})
   /** `git status` per folder, keyed by {@link pathKey}; empty repo = no badges. */
   const [gitByDir, setGitByDir] = useState<Record<string, GitStatus>>({})
   /** Bumped by invalidation so the fetch effect re-arms even if nothing was cached yet. */
@@ -265,14 +267,17 @@ export default function App() {
     treePending.current.add(key)
     const generation = ++treeCounter.current
     treeGeneration.current.set(key, generation)
-    const reply = (names: string[]) => {
+    const reply = (names: string[], truncated: boolean) => {
       if (treeGeneration.current.get(key) !== generation) return
       treeNodesRef.current = { ...treeNodesRef.current, [key]: names }
       setTreeNodes(treeNodesRef.current)
+      setTreeTruncated((prev) =>
+        prev[key] === truncated ? prev : { ...prev, [key]: truncated },
+      )
     }
     treeDirs(path, settingsRef.current.showHidden)
-      .then(reply)
-      .catch(() => reply([]))
+      .then((listing) => reply(listing.names, listing.truncated))
+      .catch(() => reply([], false))
       .finally(() => {
         if (treeGeneration.current.get(key) === generation) treePending.current.delete(key)
       })
@@ -286,6 +291,12 @@ export default function App() {
     delete next[key]
     treeNodesRef.current = next
     setTreeNodes(next)
+    setTreeTruncated((prev) => {
+      if (!(key in prev)) return prev
+      const rest = { ...prev }
+      delete rest[key]
+      return rest
+    })
   }, [])
 
   /**
@@ -327,6 +338,7 @@ export default function App() {
     treeNodesRef.current = {}
     treePending.current.clear()
     setTreeNodes({})
+    setTreeTruncated({})
   }, [settings.showHidden])
 
   /** One `git status` per visited folder; failures cache as "no repository". */
@@ -491,11 +503,14 @@ export default function App() {
                 entries: batch.items.length ? acc.slice() : old.entries,
                 scanned: batch.scanned,
                 loading: !batch.done,
+                truncated: batch.truncated,
                 error: null,
               },
             }
           }
-          if (!old.loading && sameEntries(old.entries, acc)) return prev
+          if (!old.loading && sameEntries(old.entries, acc) && old.truncated === batch.truncated) {
+            return prev
+          }
           // Rows that vanished while the pane was idle must not stay selected: the next
           // action targets names, so a stale set would act on something no longer there.
           const names = new Set(acc.map((entry) => entry.name))
@@ -508,6 +523,7 @@ export default function App() {
               entries: acc,
               scanned: batch.scanned,
               loading: false,
+              truncated: batch.truncated,
               error: null,
               selected,
               anchor: names.has(old.anchor) ? old.anchor : '',
@@ -2558,6 +2574,8 @@ export default function App() {
                   drives={driveList}
                   open={treeOpen}
                   nodes={treeNodes}
+                  truncated={treeTruncated}
+                  truncatedLabel={t('tree.truncated')}
                   selectedPath={treeSelected}
                   currentPath={activeTab?.path ?? ''}
                   onToggle={toggleTree}

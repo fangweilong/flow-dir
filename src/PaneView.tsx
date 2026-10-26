@@ -962,6 +962,15 @@ export function PaneView({
         </div>
       )}
 
+      {!root && list.truncated && (
+        <div
+          data-truncated
+          className="flex shrink-0 items-center gap-1 border-b border-amber-300 bg-amber-50 px-2 py-1 text-[0.75em] text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200"
+        >
+          {t('list.truncated', { count: list.entries.length })}
+        </div>
+      )}
+
       <div
         ref={scrollRef}
         tabIndex={0}

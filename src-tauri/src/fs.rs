@@ -99,12 +99,21 @@ fn natural_key(name: &str) -> Vec<u8> {
     out
 }
 
-pub fn enumerate(
+/// One directory read: the rows plus whether `limit` cut the enumeration short.
+pub struct ScanOutcome {
+    pub entries: Vec<Entry>,
+    pub truncated: bool,
+}
+
+/// Reads a folder, reporting how many rows have been read so a slow volume can show
+/// progress before the sort, and whether the entry cap was reached.
+pub fn enumerate_reporting(
     path: &str,
     show_hidden: bool,
     cancel: &AtomicBool,
-) -> Result<Vec<Entry>, ApiError> {
-    scan(path, show_hidden, false, MAX_ENTRIES, cancel)
+    progress: &mut dyn FnMut(usize),
+) -> Result<ScanOutcome, ApiError> {
+    scan(path, show_hidden, false, MAX_ENTRIES, cancel, progress)
 }
 
 /// Subdirectories only, for the sidebar tree: files are dropped before their
@@ -114,8 +123,8 @@ pub fn enumerate_dirs(
     show_hidden: bool,
     limit: usize,
     cancel: &AtomicBool,
-) -> Result<Vec<Entry>, ApiError> {
-    scan(path, show_hidden, true, limit, cancel)
+) -> Result<ScanOutcome, ApiError> {
+    scan(path, show_hidden, true, limit, cancel, &mut |_| {})
 }
 
 fn scan(
@@ -124,7 +133,8 @@ fn scan(
     dirs_only: bool,
     limit: usize,
     cancel: &AtomicBool,
-) -> Result<Vec<Entry>, ApiError> {
+    progress: &mut dyn FnMut(usize),
+) -> Result<ScanOutcome, ApiError> {
     let file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(FLAG_BACKUP_SEMANTICS)
@@ -134,6 +144,7 @@ fn scan(
     let handle = HANDLE(file.as_raw_handle());
     let mut buffer: Vec<u64> = vec![0; 8192];
     let mut entries: Vec<Entry> = Vec::new();
+    let mut truncated = false;
 
     'scan: loop {
         if cancel.load(Ordering::Relaxed) {
@@ -200,12 +211,15 @@ fn scan(
             offset += info.NextEntryOffset as usize;
 
             if entries.len() >= limit {
+                truncated = true;
                 break 'scan;
             }
         }
+        // One call per buffer chunk: enough for a progress readout without flooding IPC.
+        progress(entries.len());
     }
 
-    Ok(entries)
+    Ok(ScanOutcome { entries, truncated })
 }
 
 pub fn sort_entries(entries: &mut [Entry], key: &str, dir: &str) {
@@ -524,14 +538,18 @@ mod tests {
         std::fs::write(root.join("file.txt"), b"x").unwrap();
 
         let cancel = AtomicBool::new(false);
-        let mut dirs = enumerate_dirs(root.to_str().unwrap(), true, 64, &cancel).unwrap();
+        let mut dirs = enumerate_dirs(root.to_str().unwrap(), true, 64, &cancel)
+            .unwrap()
+            .entries;
         sort_entries(&mut dirs, "name", "asc");
         assert_eq!(
             dirs.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(),
             ["alpha", "beta"]
         );
 
-        let mut all = enumerate(root.to_str().unwrap(), true, &cancel).unwrap();
+        let mut all = enumerate_reporting(root.to_str().unwrap(), true, &cancel, &mut |_| {})
+            .unwrap()
+            .entries;
         sort_entries(&mut all, "name", "asc");
         assert_eq!(all.len(), 3);
 
@@ -551,6 +569,32 @@ mod tests {
         let dead = volume_info("\\\\localhost\\flowdir-no-such-share");
         assert!(!dead.available);
         assert_eq!(dead.total, 0);
+    }
+
+    /// The tree cap must be reported, and progress must fire before the sort so a slow
+    /// volume can grow the counter instead of leaving the pane on a spinner.
+    #[test]
+    fn scan_reports_truncation_and_progress() {
+        let root = std::env::temp_dir().join(format!("flowdir-scan-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for name in ["a", "b", "c"] {
+            std::fs::create_dir_all(root.join(name)).unwrap();
+        }
+        let cancel = AtomicBool::new(false);
+        let mut seen = Vec::new();
+        let full = enumerate_reporting(root.to_str().unwrap(), true, &cancel, &mut |count| {
+            seen.push(count)
+        })
+        .unwrap();
+        assert_eq!(full.entries.len(), 3);
+        assert!(!full.truncated);
+        assert_eq!(seen.last().copied(), Some(3), "progress must report the read count");
+
+        let capped = enumerate_dirs(root.to_str().unwrap(), true, 2, &cancel).unwrap();
+        assert!(capped.truncated, "the row cap must be visible to callers");
+        assert_eq!(capped.entries.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Known folders are resolved by the shell, so a redirected Desktop is the one that

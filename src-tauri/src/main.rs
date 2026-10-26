@@ -95,6 +95,8 @@ struct DirBatch {
     gen: u64,
     scanned: u32,
     done: bool,
+    /// True on the final batch when the entry cap cut the listing short.
+    truncated: bool,
     items: Vec<EntryDto>,
     error: Option<ApiError>,
 }
@@ -119,19 +121,38 @@ fn list_dir(
 
     let _ = tauri::async_runtime::spawn_blocking(move || {
         let _guard = guard;
-        let mut entries = match fs::enumerate(&path, hidden, &cancel) {
-            Ok(items) => items,
+        // Progress-only batches go out while the directory is still being read, so a slow
+        // share grows the counter instead of leaving the pane on a spinner.
+        let mut reported = 0usize;
+        let outcome = fs::enumerate_reporting(&path, hidden, &cancel, &mut |count| {
+            if count < reported + 256 {
+                return;
+            }
+            reported = count;
+            let _ = on_batch.send(DirBatch {
+                gen,
+                scanned: count as u32,
+                done: false,
+                truncated: false,
+                items: Vec::new(),
+                error: None,
+            });
+        });
+        let (mut entries, truncated) = match outcome {
+            Ok(outcome) => (outcome.entries, outcome.truncated),
             Err(err) => {
                 let _ = on_batch.send(DirBatch {
                     gen,
                     scanned: 0,
                     done: true,
+                    truncated: false,
                     items: Vec::new(),
                     error: Some(err),
                 });
                 return;
             }
         };
+        reported = entries.len();
         fs::sort_entries(&mut entries, &sort, &dir);
 
         let mut batch: Vec<EntryDto> = Vec::with_capacity(BATCH_SIZE);
@@ -153,8 +174,10 @@ fn list_dir(
                 if on_batch
                     .send(DirBatch {
                         gen,
-                        scanned,
+                        // Keep the readout at the enumeration total while rows stream in.
+                        scanned: (reported as u32).max(scanned),
                         done: false,
+                        truncated: false,
                         items,
                         error: None,
                     })
@@ -168,8 +191,9 @@ fn list_dir(
         scanned += batch.len() as u32;
         let _ = on_batch.send(DirBatch {
             gen,
-            scanned,
+            scanned: (reported as u32).max(scanned),
             done: true,
+            truncated,
             items: batch,
             error: None,
         });
@@ -228,16 +252,30 @@ async fn git_status(path: String) -> Result<git::GitStatus, ApiError> {
         .map_err(|e| ApiError::new("GIT_TASK", e.to_string()))
 }
 
-/// Subdirectory names of one folder, for the sidebar tree. Capped so a pathological
-/// folder cannot flood the panel; the tree only asks for expanded nodes.
-#[tauri::command]
-async fn tree_dirs(path: String, hidden: bool) -> Result<Vec<String>, ApiError> {
+/// Subdirectory names of one folder, plus whether the caps cut them short.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TreeListing {
+    names: Vec<String>,
+    /// True when either the scan cap or the row cap cut the folder's children.
+    truncated: bool,
+}
+
+/// Children for the sidebar tree. Capped so a pathological folder cannot flood the panel;
+/// the tree only asks for expanded nodes.
+#[tauri::command(rename_all = "camelCase")]
+async fn tree_dirs(path: String, hidden: bool) -> Result<TreeListing, ApiError> {
     tauri::async_runtime::spawn_blocking(move || {
         let cancel = AtomicBool::new(false);
-        let mut entries = fs::enumerate_dirs(&path, hidden, TREE_SCAN_LIMIT, &cancel)?;
+        let outcome = fs::enumerate_dirs(&path, hidden, TREE_SCAN_LIMIT, &cancel)?;
+        let mut entries = outcome.entries;
         fs::sort_entries(&mut entries, "name", "asc");
+        let truncated = outcome.truncated || entries.len() > TREE_LIMIT;
         entries.truncate(TREE_LIMIT);
-        Ok(entries.into_iter().map(|entry| entry.name).collect())
+        Ok(TreeListing {
+            names: entries.into_iter().map(|entry| entry.name).collect(),
+            truncated,
+        })
     })
     .await
     .map_err(|e| ApiError::new("TREE_TASK", e.to_string()))?

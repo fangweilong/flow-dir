@@ -12,6 +12,10 @@ type TreeState = {
 
 type Props = TreeState & {
   drives: Drive[]
+  /** Folders whose child list hit the scan cap, keyed by {@link pathKey}. */
+  truncated: Record<string, boolean>
+  /** Row text marking a truncated folder; the sidebar owns no translations itself. */
+  truncatedLabel: string
   /** Highlighted row: the selected folder, or the current one when nothing is selected. */
   selectedPath: string
   /** Folder the active tab is in, drawn bold so orientation survives a file selection. */
@@ -25,7 +29,17 @@ type Props = TreeState & {
  * owns caches and expansion so tab switches and filesystem refreshes never remount
  * the tree, and a cached folder paints on the first frame after expanding.
  */
-export function SidebarTree({ drives, open, nodes, selectedPath, currentPath, onToggle, onOpen }: Props) {
+export function SidebarTree({
+  drives,
+  open,
+  nodes,
+  truncated,
+  truncatedLabel,
+  selectedPath,
+  currentPath,
+  onToggle,
+  onOpen,
+}: Props) {
   const selectedKey = pathKey(selectedPath)
   const currentKey = pathKey(currentPath)
   return (
@@ -39,6 +53,8 @@ export function SidebarTree({ drives, open, nodes, selectedPath, currentPath, on
           glyph={drive.kind === 'location' ? 'network' : 'drive'}
           open={open}
           nodes={nodes}
+          truncated={truncated}
+          truncatedLabel={truncatedLabel}
           selectedKey={selectedKey}
           currentKey={currentKey}
           onToggle={onToggle}
@@ -54,6 +70,8 @@ type RowProps = TreeState & {
   name: string
   depth: number
   glyph: 'drive' | 'network' | 'folder'
+  truncated: Record<string, boolean>
+  truncatedLabel: string
   selectedKey: string
   currentKey: string
   onToggle: (path: string) => void
@@ -71,6 +89,8 @@ const TreeRow = memo(function TreeRow({
   glyph,
   open,
   nodes,
+  truncated,
+  truncatedLabel,
   selectedKey,
   currentKey,
   onToggle,
@@ -138,6 +158,8 @@ const TreeRow = memo(function TreeRow({
               glyph="folder"
               open={open}
               nodes={nodes}
+              truncated={truncated}
+              truncatedLabel={truncatedLabel}
               selectedKey={selectedKey}
               currentKey={currentKey}
               onToggle={onToggle}
@@ -145,6 +167,17 @@ const TreeRow = memo(function TreeRow({
             />
           )
         })}
+      {expanded && truncated[key] && (
+        <div
+          data-tree-truncated={key}
+          title={truncatedLabel}
+          className="flex h-[1.375rem] items-center rounded pr-1 text-[0.6875rem] text-muted-2"
+          style={{ paddingLeft: 2 + Math.min(depth + 1, 8) * 12 }}
+        >
+          <span className="h-4 w-4 shrink-0" />
+          <span className="truncate">{truncatedLabel}</span>
+        </div>
+      )}
     </>
   )
 })

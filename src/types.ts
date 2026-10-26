@@ -4,6 +4,8 @@ export type DirBatch = {
   gen: number
   scanned: number
   done: boolean
+  /** The entry cap cut the listing short; only meaningful on the final batch. */
+  truncated: boolean
   items: RawEntry[]
   error: ApiError | null
 }
@@ -71,6 +73,8 @@ export type ListData = {
   loading: boolean
   scanned: number
   error: ApiError | null
+  /** The directory exceeded the entry cap; the footer explains the cut. */
+  truncated: boolean
   selected: Set<string>
   /** Name of the row Shift-extends from; a name survives sorting and filtering, an index does not. */
   anchor: string
@@ -82,6 +86,7 @@ export const emptyList = (): ListData => ({
   loading: true,
   scanned: 0,
   error: null,
+  truncated: false,
   selected: new Set(),
   anchor: '',
   filter: '',
