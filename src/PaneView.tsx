@@ -646,7 +646,10 @@ export function PaneView({
                 style={{ height: ROW_H, transform: `translateY(${vi.start}px)`, gridTemplateColumns: grid }}
               >
                 <div className="flex min-w-0 items-center gap-1.5 pl-1.5">
-                  <FileIcon name={entry.name} dir={dir} path={joinPath(tab.path, entry.name)} />
+                  <span className="relative shrink-0">
+                    <FileIcon name={entry.name} dir={dir} path={joinPath(tab.path, entry.name)} />
+                    <GitRepoBadge name={entry.name} dir={dir} badges={gitBadges} t={t} />
+                  </span>
                   <span className={`truncate ${dir ? 'font-medium text-fg-strong' : ''}`}>{entry.name}</span>
                   <GitBadge name={entry.name} dir={dir} badges={gitBadges} />
                 </div>
@@ -758,9 +761,94 @@ function GitChip({ git, t }: { git: GitStatus; t: Translate }) {
   )
 }
 
+/** Corner badge on a repository folder icon: conflict, pending, unpushed, or clean. */
+function GitRepoBadge({
+  name,
+  dir,
+  badges,
+  t,
+}: {
+  name: string
+  dir: boolean
+  badges: GitBadges
+  t: Translate
+}) {
+  if (!dir) return null
+  const repo = badges.repos.get(name.toLowerCase())
+  if (!repo) return null
+  if (!repo.checked) {
+    return <GitBranchIcon className="absolute -bottom-0.5 -right-1 h-3 w-3 text-blue-500 drop-shadow" />
+  }
+  const title = [
+    repo.conflict ? t('git.conflict') : repo.dirty ? t('git.dirty') : t('git.clean'),
+    repo.upstream ? '' : t('git.upstreamMissing'),
+    repo.ahead > 0 ? t('git.ahead', { count: repo.ahead }) : '',
+    repo.behind > 0 ? t('git.behind', { count: repo.behind }) : '',
+  ]
+    .filter(Boolean)
+    .join(' · ')
+  const tone = repo.conflict
+    ? 'bg-red-500'
+    : repo.dirty
+      ? 'bg-amber-500'
+      : repo.ahead > 0
+        ? 'bg-blue-500'
+        : repo.behind > 0
+          ? 'bg-violet-500'
+          : 'bg-emerald-500'
+  return (
+    <span
+      title={title}
+      className={`absolute -bottom-0.5 -right-1 grid h-3 w-3 place-items-center rounded-full text-white ring-1 ring-surface ${tone}`}
+    >
+      {repo.conflict ? (
+        <span className="text-[9px] font-bold leading-none">!</span>
+      ) : repo.dirty ? (
+        <svg viewBox="0 0 16 16" className="h-2 w-2" fill="currentColor" aria-hidden>
+          <path d="M4 12.4l.9-3.3 5.9-5.9a1.3 1.3 0 0 1 1.8 0l.2.2a1.3 1.3 0 0 1 0 1.8L6.9 11.1 2.9 12.4Z" />
+        </svg>
+      ) : repo.ahead > 0 ? (
+        <ArrowGlyph up />
+      ) : repo.behind > 0 ? (
+        <ArrowGlyph />
+      ) : (
+        <svg
+          viewBox="0 0 16 16"
+          className="h-2 w-2"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.4"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden
+        >
+          <path d="M3.4 8.6 6.4 11.6 12.6 4.8" />
+        </svg>
+      )}
+    </span>
+  )
+}
+
+function ArrowGlyph({ up = false }: { up?: boolean }) {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      className="h-2 w-2"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d={up ? 'M8 12.5V4M4.6 7.4 8 4l3.4 3.4' : 'M8 3.5V12M4.6 8.6 8 12l3.4-3.4'} />
+    </svg>
+  )
+}
+
 /**
- * Porcelain letter for a changed entry, a dot when a folder holds changes below it, and a
- * branch icon on every repository folder — clean or not.
+ * Porcelain letter for a changed file, and a dot when a folder holds changes below it.
+ * Repository folders carry their state on the icon badge instead.
  */
 function GitBadge({
   name,
@@ -772,22 +860,19 @@ function GitBadge({
   badges: GitBadges
 }) {
   const key = name.toLowerCase()
+  if (dir && badges.repos.has(key)) return null
   const code = badges.changed.get(key)
-  const repo = dir && badges.repos.has(key)
-  const dirty = dir && badges.dirtyDirs.has(key)
-  if (!code && !repo && !dirty) return null
-  return (
-    <span className="flex shrink-0 items-center gap-1">
-      {repo && <GitBranchIcon className="h-3 w-3 text-blue-500/80" />}
-      {code ? (
-        <span title={code} className={`text-[10px] font-semibold ${gitTone(code)}`}>
-          {code}
-        </span>
-      ) : (
-        dirty && <span title="git" className="h-1.5 w-1.5 rounded-full bg-blue-500/70" />
-      )}
-    </span>
-  )
+  if (code) {
+    return (
+      <span title={code} className={`shrink-0 text-[10px] font-semibold ${gitTone(code)}`}>
+        {code}
+      </span>
+    )
+  }
+  if (dir && badges.dirtyDirs.has(key)) {
+    return <span title="git" className="h-1.5 w-1.5 shrink-0 rounded-full bg-blue-500/70" />
+  }
+  return null
 }
 
 function HeaderCell({

@@ -9,7 +9,7 @@
 
 use std::io::Read;
 use std::os::windows::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
@@ -18,6 +18,13 @@ use serde::Serialize;
 
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// The listed folder's own status; also the `rev-parse` probe.
+const STATUS_TIMEOUT: Duration = Duration::from_secs(8);
+/// Child repository summaries: bounded so a stuck folder cannot delay the listed one.
+const CHILD_TIMEOUT: Duration = Duration::from_secs(3);
+/// Folders holding more repositories than this keep the plain marker on the rest.
+const CHILD_REPO_LIMIT: usize = 64;
+const CHILD_WORKERS: usize = 4;
 
 #[derive(Serialize, Clone)]
 pub struct GitFile {
@@ -25,6 +32,20 @@ pub struct GitFile {
     pub path: String,
     /// One display letter: M, A, D, R, C, T, U (untracked) or ! (conflict).
     pub code: String,
+}
+
+#[derive(Serialize, Clone, Default)]
+pub struct GitRepo {
+    /// Direct child folder name.
+    pub name: String,
+    /// False when the per-repository probe timed out or failed; the row then shows no state.
+    pub checked: bool,
+    pub dirty: bool,
+    pub ahead: u32,
+    pub behind: u32,
+    pub upstream: bool,
+    /// Any unmerged record in the index or work tree.
+    pub conflict: bool,
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -44,21 +65,20 @@ pub struct GitStatus {
     pub upstream: bool,
     /// Any change anywhere in the work tree, not only below the listed folder.
     pub dirty: bool,
-    /// Direct child folders that are repository roots; their rows show a git marker even
-    /// when the repository has nothing to report.
-    pub repos: Vec<String>,
+    /// Direct child folders that are repository roots, with their own summary so the row
+    /// badge can show check / pending / unpushed without opening the repository.
+    pub repos: Vec<GitRepo>,
 }
 
 pub fn status(path: &str) -> GitStatus {
-    // Independent of whether the listed folder is itself inside a repository, and cheap:
-    // one metadata probe per child folder, no git process.
-    let repos = child_repos(path);
+    let names = child_repos(path);
     let Some(git) = git_binary() else {
         return GitStatus {
-            repos,
+            repos: unchecked_repos(names),
             ..GitStatus::default()
         };
     };
+    let repos = repo_states(git, path, names);
     let Some(root) = toplevel(git, path) else {
         return GitStatus {
             repos,
@@ -66,26 +86,10 @@ pub fn status(path: &str) -> GitStatus {
         };
     };
     let prefix = relative_to_root(&root, path);
-    let mut command = Command::new(git);
-    command
-        .arg("--no-optional-locks")
-        .args(["-c", "core.quotepath=false"])
-        .arg("-C")
-        .arg(&root)
-        // `normal` collapses a wholly untracked folder into one `dir/` record, which hides
-        // the status of every file inside it once opened. `all` names each file instead;
-        // git still collapses foreign repositories, whose trailing separator marks them as
-        // folders below.
-        .args([
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--branch",
-            "--untracked-files=all",
-        ])
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .creation_flags(CREATE_NO_WINDOW);
-    let Some(output) = output_with_timeout(&mut command) else {
+    // `all` names each untracked file instead of collapsing its folder into one `dir/`
+    // record, which would hide every status inside that folder once opened.
+    let mut command = status_command(git, Path::new(&root), "all");
+    let Some(output) = output_with_timeout(&mut command, STATUS_TIMEOUT) else {
         return GitStatus {
             root,
             repos,
@@ -130,7 +134,7 @@ static GIT: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
     candidates.into_iter().find(|candidate| {
         let mut command = Command::new(candidate);
         command.arg("--version").creation_flags(CREATE_NO_WINDOW);
-        output_with_timeout(&mut command).is_some_and(|out| out.status.success())
+        output_with_timeout(&mut command, STATUS_TIMEOUT).is_some_and(|out| out.status.success())
     })
 });
 
@@ -146,6 +150,7 @@ fn toplevel(git: &PathBuf, dir: &str) -> Option<String> {
             .arg(dir)
             .args(["rev-parse", "--show-toplevel"])
             .creation_flags(CREATE_NO_WINDOW),
+        STATUS_TIMEOUT,
     )?;
     if !output.status.success() {
         return None;
@@ -175,12 +180,97 @@ fn child_repos(dir: &str) -> Vec<String> {
     repos
 }
 
+/// One porcelain status with the branch header; the untracked mode trades detail for speed.
+fn status_command(git: &Path, dir: &Path, untracked: &str) -> Command {
+    let mut command = Command::new(git);
+    command
+        .arg("--no-optional-locks")
+        .args(["-c", "core.quotepath=false"])
+        .arg("-C")
+        .arg(dir)
+        .args(["status", "--porcelain=v1", "-z", "--branch"])
+        // The value must be attached: `--untracked-files all` would treat `all` as a
+        // pathspec and silently report only the branch header.
+        .arg(format!("--untracked-files={untracked}"))
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
+fn unchecked_repos(names: Vec<String>) -> Vec<GitRepo> {
+    names
+        .into_iter()
+        .map(|name| GitRepo {
+            name,
+            ..GitRepo::default()
+        })
+        .collect()
+}
+
+/// Summarises every direct child repository, four at a time so a folder full of projects
+/// still answers quickly. The first `CHILD_REPO_LIMIT` are probed; the rest keep the plain
+/// marker instead of a state badge. Order follows the sorted input.
+fn repo_states(git: &Path, parent: &str, names: Vec<String>) -> Vec<GitRepo> {
+    let mut repos = unchecked_repos(names.clone());
+    let checked = names.len().min(CHILD_REPO_LIMIT);
+    if checked == 0 {
+        return repos;
+    }
+    let parent = Path::new(parent);
+    let workers = CHILD_WORKERS.min(checked);
+    let names = &names;
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|worker| {
+                scope.spawn(move || {
+                    (worker..checked)
+                        .step_by(workers)
+                        .map(|index| (index, repo_state(git, &parent.join(&names[index]))))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        for handle in handles {
+            if let Ok(items) = handle.join() {
+                for (index, state) in items {
+                    repos[index] = state;
+                }
+            }
+        }
+    });
+    repos
+}
+
+fn repo_state(git: &Path, dir: &Path) -> GitRepo {
+    let mut state = GitRepo {
+        name: dir
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        ..GitRepo::default()
+    };
+    let mut command = status_command(git, dir, "normal");
+    let Some(output) = output_with_timeout(&mut command, CHILD_TIMEOUT) else {
+        return state;
+    };
+    if !output.status.success() {
+        return state;
+    }
+    let (_, ahead, behind, upstream) = summary(&output.stdout);
+    state.checked = true;
+    state.dirty = has_changes(&output.stdout);
+    state.conflict = has_conflict(&output.stdout);
+    state.ahead = ahead;
+    state.behind = behind;
+    state.upstream = upstream;
+    state
+}
+
 /// Runs `command` with a hard deadline. A work tree on an unreachable share (or a stuck
 /// `core.fsmonitor` hook) would otherwise pin a blocking thread forever; `None` means the
 /// child was killed. Output is drained on threads because status on a large repository
 /// writes far more than a pipe buffer.
-fn output_with_timeout(command: &mut Command) -> Option<Output> {
-    const TIMEOUT: Duration = Duration::from_secs(8);
+fn output_with_timeout(command: &mut Command, timeout: Duration) -> Option<Output> {
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -199,7 +289,7 @@ fn output_with_timeout(command: &mut Command) -> Option<Output> {
         let _ = stderr.read_to_end(&mut bytes);
         bytes
     });
-    let deadline = Instant::now() + TIMEOUT;
+    let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -294,6 +384,21 @@ fn has_changes(bytes: &[u8]) -> bool {
     bytes
         .split(|byte| *byte == 0)
         .any(|record| !record.is_empty() && !record.starts_with(b"## "))
+}
+
+/// Unmerged porcelain states: `UU`, `AA`, `DD`, or any side marked `U`.
+fn has_conflict(bytes: &[u8]) -> bool {
+    bytes.split(|byte| *byte == 0).any(|record| {
+        if record.len() < 4 || record.starts_with(b"## ") {
+            return false;
+        }
+        let index = record[0] as char;
+        let worktree = record[1] as char;
+        index == 'U'
+            || worktree == 'U'
+            || (index == 'A' && worktree == 'A')
+            || (index == 'D' && worktree == 'D')
+    })
 }
 
 /// Parses `--porcelain=v1 -z`: NUL separated `XY path` records, where renames and copies
@@ -538,6 +643,61 @@ mod tests {
         std::fs::write(root.join("file.txt"), "x").unwrap();
 
         assert_eq!(child_repos(root.to_str().unwrap()), ["repo", "worktree"]);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unmerged_records_are_flagged() {
+        assert!(has_conflict(b"UU merge.txt\0"));
+        assert!(has_conflict(b"AA both-added.txt\0"));
+        assert!(has_conflict(b"## main\0UD gone.txt\0"));
+        assert!(!has_conflict(b"## main\0 M changed.txt\0?? new.txt\0"));
+    }
+
+    #[test]
+    fn repo_states_summarises_each_child_repository() {
+        let Some(git) = git_binary() else {
+            return;
+        };
+        let root = std::env::temp_dir().join(format!("flowdir-git-states-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for name in ["clean", "dirty"] {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("tracked.txt"), "x").unwrap();
+            for args in [
+                vec!["init", "-q"],
+                vec!["add", "tracked.txt"],
+                vec![
+                    "-c",
+                    "user.name=flowdir",
+                    "-c",
+                    "user.email=flowdir@example.com",
+                    "commit",
+                    "-qm",
+                    "init",
+                ],
+            ] {
+                let output = Command::new(git)
+                    .arg("-C")
+                    .arg(&dir)
+                    .args(&args)
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "git {args:?}");
+            }
+        }
+        std::fs::write(root.join("dirty").join("untracked.txt"), "y").unwrap();
+
+        let names = child_repos(root.to_str().unwrap());
+        let repos = repo_states(git, root.to_str().unwrap(), names);
+        assert_eq!(repos.len(), 2);
+        assert_eq!(repos[0].name, "clean");
+        assert!(repos[0].checked && !repos[0].dirty && !repos[0].conflict);
+        assert_eq!(repos[1].name, "dirty");
+        assert!(repos[1].checked && repos[1].dirty);
 
         let _ = std::fs::remove_dir_all(&root);
     }

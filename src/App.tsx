@@ -518,6 +518,9 @@ export default function App() {
     }
     for (const [paneId, path] of current) {
       if (watched.current.get(paneId) !== path) {
+        // Re-entering a folder must not reuse the status cached on an earlier visit; the
+        // cache only exists to keep tab switches and rendering cheap within one visit.
+        invalidateGit(path)
         void watchSet(paneId, path).catch(() => undefined)
       }
     }
@@ -525,7 +528,7 @@ export default function App() {
       if (!current.has(paneId)) void watchClear(paneId).catch(() => undefined)
     }
     watched.current = current
-  }, [ws])
+  }, [ws, invalidateGit])
 
   useEffect(() => {
     let disposed = false
