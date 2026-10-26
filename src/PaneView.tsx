@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { FileIcon } from './icons'
-import { crumbs, formatSize, formatTime, isDir, isFsPath, joinPath, parentPath, underPath } from './paths'
+import { crumbs, crumbTarget, formatSize, formatTime, isDir, isFsPath, joinPath, parentPath, pathKey, underPath } from './paths'
 import { buildGitBadges } from './git'
 import type { GitBadges } from './git'
-import { openPath } from './api'
+import { openPath, pathIsDir } from './api'
 import { matchBinding } from './shortcuts'
 import type { ShortcutId } from './shortcuts'
 import { EMPTY_LIST } from './types'
@@ -86,6 +86,10 @@ type Props = {
   onSortChange: (sort: SortState) => void
   onToggleHidden: () => void
   onClipboard: (cut: boolean) => void
+  /** Copies the tab's folder path verbatim; the breadcrumb button calls this. */
+  onCopyPath: (path: string) => void
+  /** Reports a breadcrumb edit that did not resolve to a folder, so the hint is visible. */
+  onPathInvalid: (path: string) => void
   onRowContextMenu: (entry: Entry, point: MenuPoint) => void
   onBlankContextMenu: (point: MenuPoint) => void
   onTabContextMenu: (tabId: string, point: MenuPoint) => void
@@ -130,6 +134,8 @@ export function PaneView({
   onSortChange,
   onToggleHidden,
   onClipboard,
+  onCopyPath,
+  onPathInvalid,
   onRowContextMenu,
   onBlankContextMenu,
   onTabContextMenu,
@@ -161,6 +167,14 @@ export function PaneView({
   const [draft, setDraft] = useState<{ size: number; time: number } | null>(null)
   const [addressDraft, setAddressDraft] = useState<string | null>(null)
   const addressRef = useRef<HTMLInputElement>(null)
+  /**
+   * Inline breadcrumb edit: the crumb being replaced, its pending text, and whether the
+   * last target failed to resolve. Only one crumb is editable; the others keep their buttons.
+   */
+  const [crumbEdit, setCrumbEdit] = useState<{ base: string; value: string; bad: boolean } | null>(null)
+  const crumbRef = useRef<HTMLInputElement>(null)
+  /** Invalidates in-flight existence checks once the edit closes or moves to another crumb. */
+  const crumbSeq = useRef(0)
 
   useEffect(() => {
     if (addressDraft === null) return
@@ -169,6 +183,13 @@ export function PaneView({
     input.focus()
     input.select()
   }, [addressDraft])
+
+  // Same focus/select contract as the address bar: typing replaces the segment.
+  useEffect(() => {
+    if (!crumbEdit) return
+    crumbRef.current?.focus()
+    crumbRef.current?.select()
+  }, [crumbEdit?.base])
 
   useEffect(() => {
     const el = sectionRef.current
@@ -295,6 +316,47 @@ export function PaneView({
       key === 'size' ? DEFAULT_SETTINGS.listSizeWidth : colSize,
       key === 'time' ? DEFAULT_SETTINGS.listTimeWidth : colTime,
     )
+  }
+
+  /** Opens the inline editor on one crumb. Enter commits it, Escape restores the label. */
+  const startCrumbEdit = (base: string, label: string) => {
+    crumbSeq.current += 1
+    setCrumbEdit({ base, value: label, bad: false })
+  }
+
+  const closeCrumbEdit = () => {
+    crumbSeq.current += 1
+    setCrumbEdit(null)
+  }
+
+  /**
+   * Resolves the edited segment and navigates only once the backend confirms a folder, so a
+   * typo keeps the current directory, its history, and the editor (now marked invalid).
+   */
+  const commitCrumb = () => {
+    if (!crumbEdit || !tab) return
+    const next = crumbTarget(crumbEdit.base, crumbEdit.value)
+    if (!next) {
+      setCrumbEdit({ ...crumbEdit, bad: true })
+      return
+    }
+    if (pathKey(next) === pathKey(tab.path)) {
+      closeCrumbEdit()
+      return
+    }
+    const seq = ++crumbSeq.current
+    void pathIsDir(next)
+      .catch(() => false)
+      .then((ok) => {
+        if (seq !== crumbSeq.current) return
+        if (!ok) {
+          setCrumbEdit((cur) => (cur ? { ...cur, bad: true } : cur))
+          onPathInvalid(next)
+          return
+        }
+        closeCrumbEdit()
+        onNavigate(tab.id, next)
+      })
   }
 
   const selectRow = (index: number, ev: React.MouseEvent) => {
@@ -617,26 +679,69 @@ export function PaneView({
             className="mx-0.5 h-6 min-w-0 flex-1 rounded border border-blue-400 bg-surface px-1.5 text-[0.71875rem] outline-none"
           />
         ) : (
-        <div className="no-bar mx-0.5 flex h-6 min-w-0 flex-1 items-center overflow-x-auto overflow-y-hidden rounded border border-line bg-surface-2 px-1 text-[0.71875rem] leading-none">
-          {root && (
-            <span className="shrink-0 px-1 py-1 text-[0.71875rem] font-medium leading-none text-fg-strong">
-              {t('sidebar.thisPc')}
-            </span>
+        <div className="mx-0.5 flex h-6 min-w-0 flex-1 items-center rounded border border-line bg-surface-2 text-[0.71875rem] leading-none">
+          <div className="no-bar flex h-full min-w-0 flex-1 items-center overflow-x-auto overflow-y-hidden px-1">
+            {root && (
+              <span className="shrink-0 px-1 py-1 text-[0.71875rem] font-medium leading-none text-fg-strong">
+                {t('sidebar.thisPc')}
+              </span>
+            )}
+            {parts.map((part, i) => (
+              <div key={part.path} className="flex shrink-0 items-center">
+                {i > 0 && <span className="px-0.5 text-muted-2">›</span>}
+                {crumbEdit?.base === part.path ? (
+                  <input
+                    ref={crumbRef}
+                    data-crumb-input
+                    value={crumbEdit.value}
+                    spellCheck={false}
+                    onChange={(ev) => setCrumbEdit({ ...crumbEdit, value: ev.target.value, bad: false })}
+                    onBlur={closeCrumbEdit}
+                    onKeyDown={(ev) => {
+                      if (ev.key === 'Enter') {
+                        ev.preventDefault()
+                        commitCrumb()
+                      } else if (ev.key === 'Escape') {
+                        ev.preventDefault()
+                        closeCrumbEdit()
+                      }
+                    }}
+                    title={crumbEdit.bad ? t('address.invalidPath') : part.path}
+                    className={`h-5 w-[10rem] min-w-0 rounded border bg-surface px-1 text-[0.71875rem] leading-none outline-none ${
+                      crumbEdit.bad ? 'border-red-400 text-red-500' : 'border-blue-400'
+                    }`}
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    data-crumb={part.path}
+                    // Click edits that level in place; Enter on the unchanged label goes there.
+                    onClick={() => startCrumbEdit(part.path, part.label)}
+                    title={part.path}
+                    className={`max-w-[10rem] truncate rounded px-1 py-1 leading-none hover:bg-surface-3 ${
+                      i === parts.length - 1 ? 'font-medium text-fg-strong' : 'text-muted'
+                    }`}
+                  >
+                    {part.label}
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+          {tab?.path && (
+            <button
+              type="button"
+              data-copy-path
+              onClick={() => onCopyPath(tab.path)}
+              title={t('address.copyPath')}
+              className="grid h-full w-5 shrink-0 place-items-center border-l border-line text-muted-2 hover:bg-surface-3 hover:text-fg"
+            >
+              <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.4">
+                <rect x="3.5" y="3.5" width="7" height="9" rx="1.2" />
+                <path d="M6 3.5v-.7a1 1 0 0 1 1-1h4.3a1 1 0 0 1 1 1v7.4a1 1 0 0 1-1 1H9.5" />
+              </svg>
+            </button>
           )}
-          {parts.map((part, i) => (
-            <div key={part.path} className="flex shrink-0 items-center">
-              {i > 0 && <span className="px-0.5 text-muted-2">›</span>}
-              <button
-                type="button"
-                onClick={() => tab && onNavigate(tab.id, part.path)}
-                className={`max-w-[10rem] truncate rounded px-1 py-1 leading-none hover:bg-surface-3 ${
-                  i === parts.length - 1 ? 'font-medium text-fg-strong' : 'text-muted'
-                }`}
-              >
-                {part.label}
-              </button>
-            </div>
-          ))}
         </div>
         )}
 

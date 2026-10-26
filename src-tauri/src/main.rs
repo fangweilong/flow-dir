@@ -240,6 +240,15 @@ async fn tree_dirs(path: String, hidden: bool) -> Result<Vec<String>, ApiError> 
     .map_err(|e| ApiError::new("TREE_TASK", e.to_string()))?
 }
 
+/// Whether the path is an existing folder. The breadcrumb editor checks a target before
+/// leaving the current directory, so a typo cannot replace a working folder with an error.
+#[tauri::command]
+async fn path_is_dir(path: String) -> bool {
+    tauri::async_runtime::spawn_blocking(move || std::path::Path::new(&path).is_dir())
+        .await
+        .unwrap_or(false)
+}
+
 #[tauri::command]
 fn quick_access() -> Vec<fs::Place> {
     fs::quick_access()
@@ -686,6 +695,7 @@ fn main() {
             cancel_dir,
             drives,
             tree_dirs,
+            path_is_dir,
             git_status,
             quick_access,
             open_path,
