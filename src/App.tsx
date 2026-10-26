@@ -212,6 +212,10 @@ export default function App() {
   const homeRef = useRef('C:\\')
   const readyRef = useRef(false)
   const watched = useRef(new Map<string, string>())
+  /** Wall-clock of the last scan per tab; a stale tab is refreshed when it becomes active. */
+  const lastScan = useRef(new Map<string, number>())
+  /** Active tab per pane, to detect a switch that left the tab unwatched while inactive. */
+  const lastActiveTab = useRef(new Map<string, string>())
   const rescanTimers = useRef(new Map<string, number>())
   /** Strongest pending change per pane: a content event must not swallow a structural one. */
   const pendingStructural = useRef(new Map<string, boolean>())
@@ -472,6 +476,7 @@ export default function App() {
       }
       const gen = (gens.current[tabId] ?? 0) + 1
       gens.current[tabId] = gen
+      lastScan.current.set(tabId, Date.now())
       const acc: Entry[] = []
       if (!keep) {
         setListData((prev) => ({
@@ -707,18 +712,30 @@ export default function App() {
       if (tab?.path) current.set(pane.id, tab.path)
     }
     for (const [paneId, path] of current) {
-      if (watched.current.get(paneId) !== path) {
+      const pane = ws.panes[paneId]
+      const tab = pane ? ws.tabs[pane.activeTabId] : undefined
+      if (!pane || !tab) continue
+      const switched = lastActiveTab.current.get(paneId) !== tab.id
+      lastActiveTab.current.set(paneId, tab.id)
+      const rewatching = watched.current.get(paneId) !== path
+      if (rewatching) {
         // Re-entering a folder must not reuse the status cached on an earlier visit; the
         // cache only exists to keep tab switches and rendering cheap within one visit.
         invalidateGit(path)
         void watchSet(paneId, path).catch(() => undefined)
+      }
+      // Only the active tab of a pane is watched, so a tab that was in the background
+      // missed every event; rescan it on activation. `has` skips the very first mount,
+      // where the bootstrap effect owns the initial scan.
+      if ((switched || rewatching) && lastScan.current.has(tab.id)) {
+        startScan(tab.id, path, pane.sort, pane.hidden, true)
       }
     }
     for (const paneId of watched.current.keys()) {
       if (!current.has(paneId)) void watchClear(paneId).catch(() => undefined)
     }
     watched.current = current
-  }, [ws, invalidateGit])
+  }, [ws, invalidateGit, startScan])
 
   useEffect(() => {
     let disposed = false
@@ -767,6 +784,36 @@ export default function App() {
       pendingStructural.current.clear()
     }
   }, [invalidateGit, invalidateTree, startScan])
+
+  // A watcher that fails (buffer overflow, revoked access, a volume that cannot notify)
+  // would otherwise freeze the pane on stale rows. Rescan once and say so, at most once
+  // per pane per minute so a broken watcher cannot turn into a toast loop.
+  useEffect(() => {
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    const warned = new Map<string, number>()
+    void listen<{ paneId: string; path: string; code: string; detail: string }>(
+      'flowdir:dir-error',
+      (event) => {
+        const current = wsRef.current
+        const pane = current?.panes[event.payload.paneId]
+        const tab = pane && current ? current.tabs[pane.activeTabId] : undefined
+        if (!current || !pane || !tab?.path) return
+        if (watched.current.get(pane.id) !== tab.path) return
+        startScan(tab.id, tab.path, pane.sort, pane.hidden, true)
+        if (Date.now() - (warned.get(pane.id) ?? 0) < 60_000) return
+        warned.set(pane.id, Date.now())
+        showToast(makeT(settingsRef.current.language)('toast.watchLost'))
+      },
+    ).then((fn) => {
+      if (disposed) fn()
+      else unlisten = fn
+    })
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [showToast, startScan])
 
   // `git add`/`git commit` touch only repository metadata, so badges go stale while the
   // listing stays valid; invalidating the status cache is enough.
@@ -1254,17 +1301,26 @@ export default function App() {
   }, [])
 
   // Plugging in a USB stick sends no event the webview sees; re-reading on focus is the
-  // cheap approximation Explorer uses for the drive list.
+  // cheap approximation Explorer uses for the drive list. The same pass refreshes folders
+  // whose watcher could have missed events while the window was in the background —
+  // network shares especially, where notifications are best-effort.
   useEffect(() => {
     const onFocus = () => {
       const current = wsRef.current
-      const pane = current?.panes[current.activePaneId]
-      const tab = pane && current ? current.tabs[pane.activeTabId] : undefined
-      if (tab && !tab.path) refreshDrives()
+      if (!current) return
+      for (const pane of Object.values(current.panes)) {
+        const tab = current.tabs[pane.activeTabId]
+        if (!tab?.path) continue
+        if (Date.now() - (lastScan.current.get(tab.id) ?? 0) < 2000) continue
+        startScan(tab.id, tab.path, pane.sort, pane.hidden, true)
+      }
+      const activePane = current.panes[current.activePaneId]
+      const activeTab = activePane ? current.tabs[activePane.activeTabId] : undefined
+      if (activeTab && !activeTab.path) refreshDrives()
     }
     window.addEventListener('focus', onFocus)
     return () => window.removeEventListener('focus', onFocus)
-  }, [refreshDrives])
+  }, [refreshDrives, startScan])
 
   const refreshPanes = useCallback(() => {
     const current = wsRef.current

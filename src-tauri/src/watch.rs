@@ -21,6 +21,17 @@ pub struct DirChanged {
     pub structural: bool,
 }
 
+/// Emitted when the watcher itself fails (buffer overflow, revoked access, unsupported
+/// volume): the pane then falls back to a rescan instead of silently going stale.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DirError {
+    pub pane_id: String,
+    pub path: String,
+    pub code: String,
+    pub detail: String,
+}
+
 pub fn set<R: Runtime>(
     app: &AppHandle<R>,
     watchers: &Watchers,
@@ -37,9 +48,22 @@ pub fn set<R: Runtime>(
     let git_dir_key = git_dir.as_ref().map(|dir| dir.to_string_lossy().to_lowercase());
     let handle = app.clone();
     let id = pane_id.clone();
+    let watched_path = path.clone();
     let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-        let Ok(event) = result else {
-            return;
+        let event = match result {
+            Ok(event) => event,
+            Err(err) => {
+                let _ = handle.emit(
+                    "flowdir:dir-error",
+                    DirError {
+                        pane_id: id.clone(),
+                        path: watched_path.clone(),
+                        code: "WATCH".into(),
+                        detail: err.to_string(),
+                    },
+                );
+                return;
+            }
         };
         // Index and ref writes (`git add`, `git commit`) change badges only: they must not
         // rescan a folder whose contents did not move.
