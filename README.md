@@ -68,9 +68,12 @@ Windows 文件管理器：多窗格 + 标签、原生 Shell 集成、低内存�
 
 ```bash
 npm ci
-npm run tauri dev          # 开发模式（Vite + Tauri）
-npm run tauri build        # 产物：src-tauri/target/release/flowdir.exe + NSIS 安装包
+npm run dev:app           # 开发版（Vite + Tauri，独立 identifier 与数据目录，可与正式版同时运行）
+npm run tauri dev         # 老旧方式：沿用正式版 identifier，会与正式版抢占单实例锁
+npm run tauri build       # 产物：src-tauri/target/release/flowdir.exe + NSIS 安装包
 ```
+
+开发版由 `src-tauri/tauri.dev.conf.json` 覆盖 identifier 为 `dev.flowdir.app.dev`。单实例锁、数据目录、窗口标题/托盘提示全部由该值派生：开发版使用 `%APPDATA%\FlowDir-dev`、`%LOCALAPPDATA%\FlowDir-dev`，标题为 `FlowDir Dev`，且禁止自更新替换 `target/` 下的二进制。正式版不受影响，仍为 `dev.flowdir.app` 与 `FlowDir`。
 
 Rust 侧单测：
 
@@ -109,8 +112,9 @@ screenshots/      README 与文档截图
 
 ## 待做
 
-- 标签路径可自由复制，并支持直接在路径上修改层级。
-- 「名称 / 大小 / 修改时间」列宽度可拖拽调整。
+- 标签路径可自由复制，并支持直接在路径上修改层级（[#1](https://github.com/fangweilong/flow-dir/issues/1)）。
+- 「名称 / 大小 / 修改时间」列宽度可拖拽调整（[#2](https://github.com/fangweilong/flow-dir/issues/2)）。
+- 界面字体与字号可调，方便高分辨率用户（[#3](https://github.com/fangweilong/flow-dir/issues/3)）。
 
 ## 已知限制
 

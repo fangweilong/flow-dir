@@ -193,6 +193,13 @@ pub fn check<R: Runtime>(app: &AppHandle<R>, force: bool) -> UpdateStatus {
 /// Downloads the asset for the running flavor, verifies its digest, swaps it in, and
 /// relaunches through a detached helper that waits for this process to exit.
 pub fn install<R: Runtime>(app: &AppHandle<R>) -> Result<(), ApiError> {
+    // A dev binary sits in target/ and must never be replaced by a release asset.
+    if store::is_dev(app) {
+        return Err(ApiError::new(
+            "UPDATE_DEV",
+            "development builds cannot install release updates",
+        ));
+    }
     let slug = repo()
         .ok_or_else(|| ApiError::new("UPDATE_SOURCE", "release repository is not configured"))?;
     let manifest = fetch_manifest(&slug)?;

@@ -10,3 +10,4 @@
 - 需要重建已存在的版本时，用 `workflow_dispatch` 并勾选 `force`，不要删除 tag 重发。
 - 自动检查间隔存 `settings.toml` 的 `update_interval_hours`（默认 24，`0` = 仅设置页手动检查），实现见 `src-tauri/src/update.rs`（WinHTTP + CNG，无额外网络/加密依赖）。
 - 升级方式按构建形态自动分流：单文件版改名自身为 `*.old.exe` 后原地替换并等待进程退出再启动；安装版（同目录有 `uninstall.exe`）以 `/S` 静默执行 setup。修改这两条路径前先读该文件的注释与测试。
+- 开发版与正式版靠 identifier 区分：日常开发必须用 `npm run dev:app`（叠加 `src-tauri/tauri.dev.conf.json`，identifier `dev.flowdir.app.dev`）。单实例互斥名、`%APPDATA%\FlowDir-dev`、`%LOCALAPPDATA%\FlowDir-dev`、标题 `FlowDir Dev` 均由该后缀派生（见 `src-tauri/src/store.rs`），不要另建第二套开关。`release.yml` 的正式构建不带 `--config`，不要为此修改工作流。

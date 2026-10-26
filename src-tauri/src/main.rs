@@ -556,7 +556,7 @@ fn init_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let menu = Menu::with_items(app, &[&show, &quit])?;
     TrayIconBuilder::with_id("main")
         .icon(app.default_window_icon().cloned().unwrap())
-        .tooltip("FlowDir")
+        .tooltip(store::display_name(app))
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
@@ -613,7 +613,7 @@ fn main() {
                 "main",
                 tauri::WebviewUrl::App(format!("index.html?v={}", env!("CARGO_PKG_VERSION")).into()),
             )
-            .title("FlowDir")
+            .title(store::display_name(app.handle()))
             .inner_size(1280.0, 820.0)
             .min_inner_size(900.0, 520.0)
             .center()
