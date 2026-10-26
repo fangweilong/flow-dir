@@ -125,7 +125,7 @@ fn run_on_menu_thread(
 }
 
 /// Runs a blocking shell call off the IPC thread and waits for its result.
-fn run_offthread<T: Send + 'static>(
+pub(crate) fn run_offthread<T: Send + 'static>(
     name: &str,
     timeout: Duration,
     work: impl FnOnce() -> T + Send + 'static,
@@ -438,7 +438,7 @@ unsafe fn invoke_verb_on(hwnd: HWND, path: &str, verb: &str) -> Result<(), ApiEr
             .GetUIObjectOf(hwnd, &[child as *const _], None)
             .map_err(|e| ApiError::new("SHELL_MENU", e.to_string()))?;
         let menu = CreatePopupMenu().map_err(|e| ApiError::new("SHELL_MENU", e.to_string()))?;
-        let outcome = invoke_from_menu(hwnd, &context, menu, verb);
+        let outcome = invoke_from_menu(hwnd, &context, menu, &[verb]);
         let _ = DestroyMenu(menu);
         drop(context);
         drop(cleanup);
@@ -446,11 +446,11 @@ unsafe fn invoke_verb_on(hwnd: HWND, path: &str, verb: &str) -> Result<(), ApiEr
     }
 }
 
-unsafe fn invoke_from_menu(
+pub(crate) unsafe fn invoke_from_menu(
     hwnd: HWND,
     context: &IContextMenu,
     menu: HMENU,
-    verb: &str,
+    verbs: &[&str],
 ) -> Result<(), ApiError> {
     unsafe {
         // Verb discovery needs a built menu: handlers populate their verbs in QueryContextMenu.
@@ -459,7 +459,7 @@ unsafe fn invoke_from_menu(
             return Err(ApiError::new("SHELL_MENU", "the drive exposes no context menu"));
         }
         let count = GetMenuItemCount(Some(menu));
-        let mut found: Option<u32> = None;
+        let mut found: Option<String> = None;
         for index in 0..count {
             let id = GetMenuItemID(menu, index);
             if !(ID_CMD_FIRST..=ID_CMD_LAST).contains(&id) {
@@ -479,17 +479,18 @@ unsafe fn invoke_from_menu(
                 continue;
             }
             let len = buffer.iter().position(|c| *c == 0).unwrap_or(buffer.len());
-            if String::from_utf16_lossy(&buffer[..len]).eq_ignore_ascii_case(verb) {
-                found = Some(id);
+            let found_verb = String::from_utf16_lossy(&buffer[..len]);
+            if verbs.iter().any(|verb| found_verb.eq_ignore_ascii_case(verb)) {
+                found = Some(found_verb);
                 break;
             }
         }
-        if found.is_none() {
-            return Err(ApiError::new("NO_VERB", format!("no {verb} verb for this drive")));
-        }
+        let Some(verb) = found else {
+            return Err(ApiError::new("NO_VERB", format!("none of {verbs:?} for this item")));
+        };
         // Both spellings name the verb: the shell accepts a string instead of an offset.
-        let ansi = CString::new(verb).map_err(|_| ApiError::new("BAD_VERB", verb))?;
-        let wide = HSTRING::from(verb);
+        let ansi = CString::new(verb.as_str()).map_err(|_| ApiError::new("BAD_VERB", &verb))?;
+        let wide = HSTRING::from(verb.as_str());
         let info = CMINVOKECOMMANDINFOEX {
             cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
             fMask: CMIC_MASK_UNICODE,

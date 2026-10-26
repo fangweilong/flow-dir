@@ -787,3 +787,31 @@ mod tests {
         }
     }
 }
+
+/// Test hook: deletes one path to the Recycle Bin through the real shell pipeline and
+/// returns the number of failed items, so the restore path can be exercised end to end.
+#[cfg(test)]
+pub(crate) fn recycle_for_test(path: &str) -> u32 {
+    let request = Request {
+        op_id: "test-recycle".into(),
+        kind: "delete".into(),
+        sources: vec![path.to_string()],
+        target_dir: None,
+        new_name: None,
+        permanent: false,
+    };
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+    }
+    let outcome = perform(
+        &request,
+        Kind::Delete,
+        None,
+        Arc::new(AtomicBool::new(false)),
+        Channel::new(|_| Ok(())),
+    );
+    unsafe {
+        CoUninitialize();
+    }
+    outcome.error.map(|_| 1).unwrap_or(outcome.failed_total)
+}

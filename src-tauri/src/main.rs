@@ -10,6 +10,7 @@ mod icons;
 mod layout;
 mod ops;
 mod preview;
+mod restore;
 mod search;
 mod settings;
 mod shell_menu;
@@ -498,6 +499,14 @@ fn drive_eject(root: String) -> Result<(), ApiError> {
     shell_menu::eject(root)
 }
 
+/// Puts recycled files back at their original paths (Ctrl+Z after a delete).
+#[tauri::command]
+async fn restore_recycle(paths: Vec<String>) -> Result<restore::RestoreReport, ApiError> {
+    tauri::async_runtime::spawn_blocking(move || restore::restore(&paths))
+        .await
+        .map_err(|e| ApiError::new("RESTORE_TASK", e.to_string()))?
+}
+
 #[tauri::command]
 fn search_cancel(state: tauri::State<'_, search::SearchState>) {
     state.cancel();
@@ -743,6 +752,7 @@ fn main() {
             everything_status,
             shell_properties,
             drive_eject,
+            restore_recycle,
             app_info,
             update_check,
             update_install

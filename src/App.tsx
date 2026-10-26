@@ -32,6 +32,7 @@ import {
   previewExternal,
   previewInfo,
   quickAccess,
+  restoreRecycle,
   setAppTheme,
   settingsLoad,
   settingsSave,
@@ -87,6 +88,8 @@ import {
   uid,
 } from './workspace'
 import type { DropMode, Node, PaneState, TabState, Workspace } from './workspace'
+import { UNDO_LIMIT, undoEntryFor } from './undo'
+import type { UndoEntry } from './undo'
 
 /** Error code of a rejected IPC call; `ApiError` is `{ code, detail }`. */
 const errorCode = (err: unknown): string =>
@@ -211,6 +214,10 @@ export default function App() {
   /** Latest git cache, so the event listener can skip probes for folders outside a repository. */
   const gitByDirRef = useRef<Record<string, GitStatus>>({})
   const toastTimer = useRef<number | null>(null)
+  /** Undo stack: process-local, capped, only fully successful operations. */
+  const undoStack = useRef<UndoEntry[]>([])
+  /** A permanent delete succeeded last, so an empty stack is not "nothing happened". */
+  const lastIrreversible = useRef(false)
   const notifiedUpdate = useRef<string | null>(null)
   const previewRequest = useRef(0)
   const treePending = useRef(new Set<string>())
@@ -1217,7 +1224,7 @@ export default function App() {
     (
       kind: OpKind,
       sources: string[],
-      options?: { targetDir?: string; newName?: string; permanent?: boolean; after?: () => void },
+      options?: { targetDir?: string; newName?: string; permanent?: boolean; after?: () => void; record?: boolean },
     ) => {
       if (!sources.length) return
       const opId = uid('op')
@@ -1281,6 +1288,17 @@ export default function App() {
             drop(15000)
             return
           }
+          if (options?.record !== false) {
+            const entry = undoEntryFor(kind, sources, options)
+            if (entry) {
+              undoStack.current.push(entry)
+              if (undoStack.current.length > UNDO_LIMIT) undoStack.current.shift()
+              lastIrreversible.current = false
+            } else if (kind === 'delete' && options?.permanent) {
+              // Permanent deletes never enter the stack; Ctrl+Z explains instead of no-oping.
+              lastIrreversible.current = true
+            }
+          }
           options?.after?.()
           refreshPanes()
           drop(800)
@@ -1292,6 +1310,67 @@ export default function App() {
     },
     [refreshPanes, showToast, t],
   )
+
+  /**
+   * Ctrl+Z: reverse the newest recorded operation. Undo operations themselves pass
+   * `record: false`, so repeated undo walks back through the stack instead of ping-ponging.
+   */
+  const undoLast = useCallback(() => {
+    const entry = undoStack.current.pop()
+    if (!entry) {
+      showToast(t(lastIrreversible.current ? 'undo.irreversible' : 'undo.empty'))
+      return
+    }
+    const afterDirs = (dirs: string[]) => () => {
+      for (const dir of new Set(dirs)) {
+        invalidateTree(dir)
+        invalidateGit(dir)
+      }
+    }
+    switch (entry.kind) {
+      case 'rename': {
+        const parent = parentPath(entry.path)
+        runOp('rename', [joinPath(parent, entry.newName)], {
+          newName: entry.oldName,
+          record: false,
+          after: afterDirs([parent]),
+        })
+        return
+      }
+      case 'move': {
+        // A move keeps the names, so only the original folders are needed.
+        const byDir = new Map<string, string[]>()
+        for (const item of entry.items) {
+          const dir = parentPath(item.from)
+          byDir.set(dir, [...(byDir.get(dir) ?? []), item.to])
+        }
+        for (const [dir, paths] of byDir) {
+          runOp('move', paths, { targetDir: dir, record: false, after: afterDirs([dir]) })
+        }
+        return
+      }
+      case 'copy':
+        runOp('delete', entry.created, {
+          record: false,
+          after: afterDirs(entry.created.map(parentPath)),
+        })
+        return
+      case 'delete':
+        void restoreRecycle(entry.paths)
+          .then((report) => {
+            if (report.missing.length) {
+              showToast(
+                t('undo.partial', { ok: report.restored.length, failed: report.missing.length }),
+              )
+            } else {
+              showToast(t('undo.done'))
+            }
+            for (const path of report.restored) invalidateTree(parentPath(path))
+            refreshPanes()
+          })
+          .catch((e: unknown) => showToast(t('op.failed', { code: errorCode(e) })))
+    }
+  }, [invalidateGit, invalidateTree, refreshPanes, runOp, showToast, t])
 
   /** Nearest element carrying `data-drop-dir`, with the box the highlight should cover. */
   const resolveDropTarget = useCallback((x: number, y: number): DropTarget | null => {
@@ -1970,6 +2049,13 @@ export default function App() {
         setSearchOpen(true)
         return
       }
+      // Text fields keep their native undo; the app stack only handles file operations.
+      if (matchBinding(event, keys.undo)) {
+        if (isTextInput(event.target)) return
+        event.preventDefault()
+        undoLast()
+        return
+      }
       if (matchBinding(event, keys.togglePreview)) {
         event.preventDefault()
         setPreviewOpen((open) => !open)
@@ -2017,6 +2103,7 @@ export default function App() {
     newTab,
     closeTab,
     openExternalPreview,
+    undoLast,
   ])
 
   const placeLabel = (key: string) => {

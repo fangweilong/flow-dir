@@ -4,6 +4,12 @@ export const pathKey = (path: string) => path.toLowerCase()
 export const joinPath = (dir: string, name: string) =>
   dir.endsWith('\\') ? `${dir}${name}` : `${dir}\\${name}`
 
+/** Trailing segment of a path, for building a destination from a source path. */
+export const baseName = (path: string) => {
+  const cut = Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'))
+  return cut < 0 ? path : path.slice(cut + 1)
+}
+
 export function parentPath(p: string): string {
   const norm = p.replace(/\\+$/, '')
   // The drive overview is the top; a drive or share root climbs back to it.
