@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod clipboard;
+mod dragout;
 mod error;
 mod folder_picker;
 mod fs;
@@ -314,6 +315,15 @@ fn clipboard_copy(paths: Vec<String>, cut: bool) -> Result<(), ApiError> {
 #[tauri::command]
 fn clipboard_paste() -> Result<clipboard::Clip, ApiError> {
     clipboard::read_paths()
+}
+
+/// Starts an OLE drag for the given paths; blocks until the target accepts or cancels.
+#[tauri::command(rename_all = "camelCase")]
+fn drag_out(paths: Vec<String>) -> Result<String, ApiError> {
+    if paths.is_empty() {
+        return Err(ApiError::new("EMPTY", "no paths"));
+    }
+    dragout::drag_out(&paths)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -714,6 +724,7 @@ fn main() {
             watch_clear,
             clipboard_copy,
             clipboard_paste,
+            drag_out,
             op_start,
             op_cancel,
             shell_menu_show,

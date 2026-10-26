@@ -41,6 +41,8 @@ export const watchSet = (paneId: string, path: string) => invoke<void>('watch_se
 export const watchClear = (paneId: string) => invoke<void>('watch_clear', { paneId })
 export const clipboardCopy = (paths: string[], cut: boolean) => invoke<void>('clipboard_copy', { paths, cut })
 export const clipboardPaste = () => invoke<Clip>('clipboard_paste')
+/** Starts an OLE drag of the paths; resolves to the accepted effect: copy/move/link/none. */
+export const dragOut = (paths: string[]) => invoke<string>('drag_out', { paths })
 
 export type OpRequest = {
   opId: string

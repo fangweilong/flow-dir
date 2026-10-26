@@ -18,6 +18,7 @@ import {
   cancelDir,
   clipboardCopy,
   clipboardPaste,
+  dragOut,
   drives,
   explorerOpen,
   layoutLoad,
@@ -1346,6 +1347,27 @@ export default function App() {
           userSelect = document.body.style.userSelect
           document.body.style.userSelect = 'none'
         }
+        // Leaving the window means the drop target is Explorer, the desktop or another
+        // app: hand the gesture to OLE before the button is released.
+        if (
+          e.clientX < 0 ||
+          e.clientY < 0 ||
+          e.clientX >= window.innerWidth ||
+          e.clientY >= window.innerHeight
+        ) {
+          detach()
+          setRowDrag(null)
+          void dragOut(names.map((name) => joinPath(sourceDir, name)))
+            .then((effect) => {
+              if (effect !== 'move') return
+              // The target app moved the files; the source listing is stale now.
+              invalidateTree(sourceDir)
+              invalidateGit(sourceDir)
+              refreshPanes()
+            })
+            .catch(() => showToast(t('drag.outFailed')))
+          return
+        }
         setRowDrag({
           names,
           sourceDir,
@@ -1357,12 +1379,15 @@ export default function App() {
           move: e.shiftKey && !(e.ctrlKey || e.metaKey),
         })
       }
-      const finish = (e: PointerEvent | null) => {
+      const detach = () => {
         window.removeEventListener('pointermove', move)
         window.removeEventListener('pointerup', up)
         window.removeEventListener('pointercancel', cancel)
         window.removeEventListener('keydown', onKey)
         if (started) document.body.style.userSelect = userSelect
+      }
+      const finish = (e: PointerEvent | null) => {
+        detach()
         setRowDrag(null)
         if (!e) return
         const target = resolveDropTarget(e.clientX, e.clientY)
@@ -1384,7 +1409,7 @@ export default function App() {
       window.addEventListener('pointercancel', cancel)
       window.addEventListener('keydown', onKey)
     },
-    [dropPaths, listData, resolveDropTarget],
+    [dropPaths, invalidateGit, invalidateTree, listData, refreshPanes, resolveDropTarget, showToast, t],
   )
 
   // Files dragged in from Explorer or the desktop. Tauri reports physical pixels, while
