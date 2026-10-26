@@ -42,7 +42,7 @@ import {
   watchClear,
   watchSet,
 } from './api'
-import { EMPTY_GIT, EMPTY_LIST, emptyList } from './types'
+import { EMPTY_GIT, EMPTY_LIST, emptyList, filterMatches } from './types'
 import type {
   Drive,
   Entry,
@@ -429,7 +429,7 @@ export default function App() {
               loading: false,
               error: null,
               selected,
-              anchor: old.anchor < acc.length ? old.anchor : -1,
+              anchor: names.has(old.anchor) ? old.anchor : '',
             },
           }
         })
@@ -1139,7 +1139,11 @@ export default function App() {
       const tab = pane ? current.tabs[pane.activeTabId] : undefined
       const data = tab ? listData[tab.id] : undefined
       if (!pane || !tab || !data || data.selected.size === 0) return
-      const paths = Array.from(data.selected).map((name) => joinPath(tab.path, name))
+      // Only rows the filter is showing: a selection hidden behind the filter must not be
+      // copied or cut, the same rule the pane applies to delete and rename.
+      const names = Array.from(data.selected).filter((name) => filterMatches(name, data.filter))
+      if (!names.length) return
+      const paths = names.map((name) => joinPath(tab.path, name))
       clipboardCopy(paths, cut)
         .then(() => showToast(makeT(lang)(cut ? 'toast.cut' : 'toast.copied', { count: paths.length })))
         .catch(() => showToast(makeT(lang)('toast.copyFailed')))
@@ -1482,7 +1486,11 @@ export default function App() {
               hint: 'Ctrl+A',
               onSelect: () => {
                 const all = (data?.entries ?? []).map((entry) => entry.name)
-                update(tab.id, (d) => ({ ...d, selected: new Set(all), anchor: 0 }))
+                update(tab.id, (d) => ({
+                  ...d,
+                  selected: new Set(all),
+                  anchor: all[0] ?? '',
+                }))
               },
             },
             { kind: 'sep' },

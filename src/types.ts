@@ -54,7 +54,8 @@ export type ListData = {
   scanned: number
   error: ApiError | null
   selected: Set<string>
-  anchor: number
+  /** Name of the row Shift-extends from; a name survives sorting and filtering, an index does not. */
+  anchor: string
   filter: string
 }
 
@@ -64,9 +65,32 @@ export const emptyList = (): ListData => ({
   scanned: 0,
   error: null,
   selected: new Set(),
-  anchor: -1,
+  anchor: '',
   filter: '',
 })
+
+/** The one filter predicate the list, the selection and the clipboard all agree on. */
+export const filterMatches = (name: string, filter: string): boolean => {
+  const q = filter.trim().toLowerCase()
+  return !q || name.toLowerCase().includes(q)
+}
+
+/**
+ * Filtering hides rows, so it also drops them from the selection and the Shift anchor.
+ * Without this the pane would still delete, rename or copy a row the user cannot see.
+ */
+export function filterList(data: ListData, filter: string): ListData {
+  if (data.filter === filter) return data
+  if (!filter.trim()) return { ...data, filter }
+  const selected = new Set<string>()
+  for (const name of data.selected) if (filterMatches(name, filter)) selected.add(name)
+  return {
+    ...data,
+    filter,
+    selected,
+    anchor: filterMatches(data.anchor, filter) ? data.anchor : '',
+  }
+}
 
 export const EMPTY_LIST: ListData = emptyList()
 

@@ -7,7 +7,7 @@ import type { GitBadges } from './git'
 import { openPath, pathIsDir } from './api'
 import { matchBinding } from './shortcuts'
 import type { ShortcutId } from './shortcuts'
-import { EMPTY_LIST } from './types'
+import { EMPTY_LIST, filterList, filterMatches } from './types'
 import { DEFAULT_SETTINGS } from './persist'
 import type { Drive, Entry, GitStatus, Lang, ListData, SortKey, SortState } from './types'
 import { driveKindLabel, makeT } from './i18n'
@@ -245,10 +245,27 @@ export function PaneView({
   const navButtonStyle = { width: navControlHeight, height: navControlHeight }
   const navFieldStyle = { height: navControlHeight }
 
-  const view = useMemo(() => {
-    const q = list.filter.trim().toLowerCase()
-    return q ? list.entries.filter((e) => e.name.toLowerCase().includes(q)) : list.entries
-  }, [list.entries, list.filter])
+  const view = useMemo(
+    () => (list.filter.trim() ? list.entries.filter((e) => filterMatches(e.name, list.filter)) : list.entries),
+    [list.entries, list.filter],
+  )
+
+  /** The anchor is a name, so it must be resolved against the current view every time. */
+  const anchorIdx = useMemo(
+    () => (list.anchor ? view.findIndex((e) => e.name === list.anchor) : -1),
+    [view, list.anchor],
+  )
+
+  /**
+   * Operations only ever touch rows the user can see. The filter input prunes the state, so
+   * this intersection is the second line of defence for a selection that outlived its view.
+   */
+  const visibleSelected = useMemo(() => {
+    const names = new Set(view.map((e) => e.name))
+    const picked = new Set<string>()
+    for (const name of list.selected) if (names.has(name)) picked.add(name)
+    return picked
+  }, [view, list.selected])
 
   const virtualizer = useVirtualizer({
     count: view.length,
@@ -266,10 +283,10 @@ export function PaneView({
   const selectedSize = useMemo(
     () =>
       list.entries.reduce(
-        (sum, e) => (list.selected.has(e.name) && !isDir(e.attrs) ? sum + e.size : sum),
+        (sum, e) => (visibleSelected.has(e.name) && !isDir(e.attrs) ? sum + e.size : sum),
         0,
       ),
-    [list.entries, list.selected],
+    [list.entries, visibleSelected],
   )
 
   // Rebuilt only when a new status payload arrives, never per row.
@@ -384,17 +401,17 @@ export function PaneView({
     const entry = view[index]
     if (!entry || !tab) return
     update(tab.id, (d) => {
-      if (ev.shiftKey && d.anchor >= 0) {
-        const [a, b] = [Math.min(d.anchor, index), Math.max(d.anchor, index)]
+      if (ev.shiftKey && anchorIdx >= 0) {
+        const [a, b] = [Math.min(anchorIdx, index), Math.max(anchorIdx, index)]
         return { ...d, selected: new Set(view.slice(a, b + 1).map((e) => e.name)) }
       }
       if (ev.ctrlKey || ev.metaKey) {
         const next = new Set(d.selected)
         if (next.has(entry.name)) next.delete(entry.name)
         else next.add(entry.name)
-        return { ...d, selected: next, anchor: index }
+        return { ...d, selected: next, anchor: entry.name }
       }
-      return { ...d, selected: new Set([entry.name]), anchor: index }
+      return { ...d, selected: new Set([entry.name]), anchor: entry.name }
     })
   }
 
@@ -402,10 +419,10 @@ export function PaneView({
     if (!tab) return
     if (matchBinding(ev, keys.properties)) {
       ev.preventDefault()
-      const names = list.selected.size
-        ? Array.from(list.selected)
-        : view[list.anchor]
-          ? [view[list.anchor].name]
+      const names = visibleSelected.size
+        ? Array.from(visibleSelected)
+        : view[anchorIdx]
+          ? [view[anchorIdx].name]
           : []
       if (names.length) onProperties(names)
       return
@@ -440,43 +457,52 @@ export function PaneView({
     }
     if (matchBinding(ev, keys.selectAll)) {
       ev.preventDefault()
-      update(tab.id, (d) => ({ ...d, selected: new Set(view.map((e) => e.name)) }))
+      update(tab.id, (d) => ({
+        ...d,
+        selected: new Set(view.map((e) => e.name)),
+        anchor: view[0]?.name ?? '',
+      }))
       return
     }
     if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
       ev.preventDefault()
       if (!view.length) return
       const step = ev.key === 'ArrowDown' ? 1 : -1
-      const current = list.anchor < 0 ? (step > 0 ? -1 : 0) : list.anchor
+      const current = anchorIdx < 0 ? (step > 0 ? -1 : 0) : anchorIdx
       const next = Math.max(0, Math.min(view.length - 1, current + step))
-      const base = list.anchor < 0 ? next : list.anchor
+      const base = anchorIdx < 0 ? next : anchorIdx
       update(tab.id, (d) => {
-        if (!ev.shiftKey) return { ...d, anchor: next, selected: new Set([view[next].name]) }
+        if (!ev.shiftKey) return { ...d, anchor: view[next].name, selected: new Set([view[next].name]) }
         const [a, b] = [Math.min(base, next), Math.max(base, next)]
-        return { ...d, anchor: next, selected: new Set(view.slice(a, b + 1).map((e) => e.name)) }
+        return {
+          ...d,
+          anchor: view[next].name,
+          selected: new Set(view.slice(a, b + 1).map((e) => e.name)),
+        }
       })
       virtualizer.scrollToIndex(next, { align: 'auto' })
       return
     }
     if (matchBinding(ev, keys.open)) {
-      const entry = view[list.anchor]
+      const entry = view[anchorIdx]
       if (entry) activate(entry)
       return
     }
     if (ev.key === 'Escape') {
-      update(tab.id, (d) => ({ ...d, selected: new Set(), anchor: -1 }))
+      update(tab.id, (d) => ({ ...d, selected: new Set(), anchor: '' }))
     }
     if (matchBinding(ev, keys.rename)) {
       ev.preventDefault()
-      const target = list.selected.size === 1 ? Array.from(list.selected)[0] : view[list.anchor]?.name
+      const target =
+        visibleSelected.size === 1 ? Array.from(visibleSelected)[0] : view[anchorIdx]?.name
       if (target) onRename(target)
       return
     }
     // Shift+Delete shares the binding: the modifier picks permanent instead of Recycle Bin.
     if (matchBinding(ev, keys.delete, { ignoreShift: true })) {
-      if (!list.selected.size) return
+      if (!visibleSelected.size) return
       ev.preventDefault()
-      onDelete(Array.from(list.selected), ev.shiftKey)
+      onDelete(Array.from(visibleSelected), ev.shiftKey)
       return
     }
     if (matchBinding(ev, keys.refresh)) {
@@ -490,12 +516,12 @@ export function PaneView({
       return
     }
     if (matchBinding(ev, keys.contextMenu)) {
-      const name = view[list.anchor]?.name
+      const name = view[anchorIdx]?.name
       const row = name ? sectionRef.current?.querySelector<HTMLElement>(`[data-row="${CSS.escape(name)}"]`) : null
       if (name && row) {
         ev.preventDefault()
         const rect = row.getBoundingClientRect()
-        onRowContextMenu(view[list.anchor], {
+        onRowContextMenu(view[anchorIdx], {
           clientX: rect.left + 40,
           clientY: rect.top + 8,
           screenX: window.screenX + rect.left + 40,
@@ -508,7 +534,7 @@ export function PaneView({
         const rect = scrollRef.current?.getBoundingClientRect()
         if (rect) {
           ev.preventDefault()
-          update(tab.id, (d) => ({ ...d, selected: new Set(), anchor: -1 }))
+          update(tab.id, (d) => ({ ...d, selected: new Set(), anchor: '' }))
           onBlankContextMenu({
             clientX: rect.left + 40,
             clientY: rect.top + 8,
@@ -765,11 +791,26 @@ export function PaneView({
         {showFilter && !root && (
           <input
             value={list.filter}
-            onChange={(e) => tab && update(tab.id, (d) => ({ ...d, filter: e.target.value }))}
+            onChange={(e) => tab && update(tab.id, (d) => filterList(d, e.target.value))}
             placeholder={t('list.filter')}
             style={navFieldStyle}
             className="w-[5.25rem] shrink-0 rounded border border-line bg-surface-2 px-1.5 text-[0.92em] outline-none placeholder:text-muted-2 focus:border-blue-400 focus:bg-surface"
           />
+        )}
+        {!showFilter && !root && list.filter && (
+          // The input is gone at this width, but the filter still decides what the list
+          // shows: keep a chip so it is never invisible and never sticky.
+          <button
+            type="button"
+            data-filter-clear
+            onClick={() => tab && update(tab.id, (d) => filterList(d, ''))}
+            title={t('list.filterActive', { query: list.filter })}
+            style={navFieldStyle}
+            className="ml-0.5 flex max-w-[5rem] shrink-0 items-center gap-0.5 rounded border border-line bg-surface-3 px-1 text-[0.85em] text-fg"
+          >
+            <span className="truncate">{list.filter}</span>
+            <span className="shrink-0 text-muted">×</span>
+          </button>
         )}
         <button
           type="button"
@@ -822,13 +863,13 @@ export function PaneView({
         onKeyDown={onKeyDown}
         onClick={(e) => {
           if (e.target === e.currentTarget && tab) {
-            update(tab.id, (d) => ({ ...d, selected: new Set(), anchor: -1 }))
+            update(tab.id, (d) => ({ ...d, selected: new Set(), anchor: '' }))
           }
         }}
         onContextMenu={(e) => {
           e.preventDefault()
           if (e.target !== e.currentTarget) return
-          if (tab) update(tab.id, (d) => ({ ...d, selected: new Set(), anchor: -1 }))
+          if (tab) update(tab.id, (d) => ({ ...d, selected: new Set(), anchor: '' }))
           onBlankContextMenu(pointOf(e))
         }}
         className="typo-list relative min-h-0 flex-1 overflow-auto outline-none"
@@ -948,9 +989,9 @@ export function PaneView({
           {list.filter && list.entries.length !== view.length && (
             <span>{t('list.total', { count: list.entries.length })}</span>
           )}
-          {list.selected.size > 0 && (
+          {visibleSelected.size > 0 && (
             <span>
-              {t('list.selected', { count: list.selected.size })}
+              {t('list.selected', { count: visibleSelected.size })}
               {selectedSize > 0 && ` · ${formatSize(selectedSize, false)}`}
             </span>
           )}
