@@ -67,6 +67,13 @@ export const opCancel = (opId: string) => invoke<void>('op_cancel', { opId })
 
 export const shellMenuShow = (paths: string[], x: number, y: number, extended: boolean) =>
   invoke<MenuOutcome>('shell_menu_show', { paths, x, y, extended })
+export const shellMenuBackgroundShow = (
+  path: string,
+  x: number,
+  y: number,
+  extended: boolean,
+  toggleLabel: string,
+) => invoke<MenuOutcome>('shell_menu_background_show', { path, x, y, extended, toggleLabel })
 export const appInfo = () => invoke<AppInfo>('app_info')
 export const updateCheck = (force: boolean) => invoke<UpdateStatus>('update_check', { force })
 export const updateInstall = () => invoke<void>('update_install')

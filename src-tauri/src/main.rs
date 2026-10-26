@@ -373,6 +373,21 @@ async fn shell_menu_show(
         .map_err(|e| ApiError::new("THREAD", e.to_string()))?
 }
 
+#[tauri::command]
+async fn shell_menu_background_show(
+    path: String,
+    x: i32,
+    y: i32,
+    extended: bool,
+    toggle_label: String,
+) -> Result<shell_menu::Outcome, ApiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        shell_menu::show_background(path, x, y, extended, toggle_label)
+    })
+    .await
+    .map_err(|e| ApiError::new("THREAD", e.to_string()))?
+}
+
 include!(concat!(env!("OUT_DIR"), "/deps.rs"));
 
 #[derive(Serialize)]
@@ -692,6 +707,7 @@ fn main() {
             op_start,
             op_cancel,
             shell_menu_show,
+            shell_menu_background_show,
             titlebar_menu,
             preview_info,
             preview_external,

@@ -32,6 +32,7 @@ import {
   setAppTheme,
   settingsLoad,
   settingsSave,
+  shellMenuBackgroundShow,
   shellMenuShow,
   shellProperties,
   titlebarMenu,
@@ -1326,7 +1327,9 @@ export default function App() {
     [listData, refreshPanes, rowFallback],
   )
 
-  const openBlankMenu = useCallback(
+  // Self-drawn fallback: used when the native folder menu cannot be shown, and for the drive
+  // overview, which has no folder behind it.
+  const blankFallbackMenu = useCallback(
     (paneId: string, point: MenuPoint) => {
       const current = wsRef.current
       if (!current) return
@@ -1366,6 +1369,36 @@ export default function App() {
       setMenu({ x: point.clientX, y: point.clientY, items })
     },
     [createFolder, listData, pasteInto, refreshPanes, t, toggleHidden, update],
+  )
+
+  const openBlankMenu = useCallback(
+    (paneId: string, point: MenuPoint) => {
+      const current = wsRef.current
+      if (!current) return
+      const pane = current.panes[paneId]
+      const tab = pane ? current.tabs[pane.activeTabId] : undefined
+      if (!pane || !tab) return
+      if (!tab.path) {
+        blankFallbackMenu(paneId, point)
+        return
+      }
+      const dpr = window.devicePixelRatio || 1
+      // Explorer's folder-background menu, so shell extensions (New, terminal, VCS) are
+      // reachable; the hidden-items toggle only exists in the self-drawn menu.
+      void shellMenuBackgroundShow(
+        tab.path,
+        Math.round(point.screenX * dpr),
+        Math.round(point.screenY * dpr),
+        point.shiftKey,
+        pane.hidden ? t('list.hideHidden') : t('list.showHidden'),
+      )
+        .then((outcome) => {
+          if (outcome.action === 'toggleHidden') toggleHidden(paneId)
+          else if (outcome.invoked) refreshPanes()
+        })
+        .catch(() => blankFallbackMenu(paneId, point))
+    },
+    [blankFallbackMenu, refreshPanes, t, toggleHidden],
   )
 
   const openTabMenu = useCallback(
