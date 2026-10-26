@@ -86,6 +86,7 @@ const TreeRow = memo(function TreeRow({
     <>
       <div
         data-tree-key={key}
+        data-drop-dir={expandable ? path : undefined}
         className={`flex h-[1.375rem] items-center rounded pr-1 ${
           selected
             ? 'bg-sel font-medium text-fg-strong'

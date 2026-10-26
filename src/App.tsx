@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { getCurrentWebview } from '@tauri-apps/api/webview'
 import iconUrl from './assets/icon.png'
 import { PaneView } from './PaneView'
 import type { MenuPoint } from './PaneView'
@@ -67,7 +68,7 @@ import {
 } from './fonts'
 import { DEFAULT_SETTINGS, fromSnapshot, toSnapshot } from './persist'
 import type { Settings } from './persist'
-import { isDir, isFsPath, joinPath, pathKey, treeChain } from './paths'
+import { isDir, isFsPath, joinPath, parentPath, pathKey, sameVolume, treeChain, underPath } from './paths'
 import { centerOffset } from './scroll'
 import { formatBinding, isTextInput, matchBinding, resolveShortcuts } from './shortcuts'
 import {
@@ -110,6 +111,21 @@ type DragState = {
   target: { paneId: string; mode: DropMode } | null
 }
 
+/** A resolved drop destination plus the box to outline while hovering it. */
+type DropTarget = { dir: string; left: number; top: number; width: number; height: number }
+
+/** In-flight pointer drag of file rows; `started` separates a click from a real drag. */
+type RowDragState = {
+  names: string[]
+  sourceDir: string
+  x: number
+  y: number
+  started: boolean
+  target: DropTarget | null
+  copy: boolean
+  move: boolean
+}
+
 type SplitNode = Extract<Node, { t: 'split' }>
 
 /** Below these widths a release collapses the panel instead of leaving it unusable. */
@@ -124,6 +140,8 @@ export default function App() {
   const [places, setPlaces] = useState<Place[]>([])
   const [driveList, setDriveList] = useState<Drive[]>([])
   const [drag, setDrag] = useState<DragState | null>(null)
+  const [rowDrag, setRowDrag] = useState<RowDragState | null>(null)
+  const [osDrag, setOsDrag] = useState<{ paths: string[]; target: DropTarget | null } | null>(null)
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [updateAvailable, setUpdateAvailable] = useState<string | null>(null)
@@ -1173,7 +1191,7 @@ export default function App() {
     (
       kind: OpKind,
       sources: string[],
-      options?: { targetDir?: string; newName?: string; permanent?: boolean },
+      options?: { targetDir?: string; newName?: string; permanent?: boolean; after?: () => void },
     ) => {
       if (!sources.length) return
       const opId = uid('op')
@@ -1231,11 +1249,13 @@ export default function App() {
             const ok = Math.max(0, progress.total - failed)
             showToast(t('op.partial', { ok, failed }))
             // Rows that did make it are on disk; a stale list would hide them.
+            options?.after?.()
             refreshPanes()
             // Keep the card around so the failure list stays readable.
             drop(15000)
             return
           }
+          options?.after?.()
           refreshPanes()
           drop(800)
         },
@@ -1246,6 +1266,172 @@ export default function App() {
     },
     [refreshPanes, showToast, t],
   )
+
+  /** Nearest element carrying `data-drop-dir`, with the box the highlight should cover. */
+  const resolveDropTarget = useCallback((x: number, y: number): DropTarget | null => {
+    const hit = document.elementFromPoint(x, y)
+    const el = hit instanceof Element ? hit.closest<HTMLElement>('[data-drop-dir]') : null
+    const dir = el?.dataset.dropDir
+    if (!el || !dir) return null
+    const rect = el.getBoundingClientRect()
+    return { dir, left: rect.left, top: rect.top, width: rect.width, height: rect.height }
+  }, [])
+
+  /**
+   * Drops full paths into a folder with Explorer's semantics: same volume moves, cross
+   * volume copies, Ctrl forces copy and Shift forces move. Dropping into the source
+   * folder, onto the item itself, or into its own subtree is skipped rather than turned
+   * into a duplicate or a recursion.
+   */
+  const dropPaths = useCallback(
+    (sources: string[], targetDir: string, forced: 'copy' | 'move' | null) => {
+      const target = pathKey(targetDir)
+      const items = sources.filter(
+        (source) =>
+          pathKey(source) !== target &&
+          pathKey(parentPath(source)) !== target &&
+          !underPath(targetDir, source),
+      )
+      if (!items.length) return
+      const dirs = Array.from(new Set([targetDir, ...items.map(parentPath)]))
+      const after = () => {
+        for (const dir of dirs) {
+          invalidateTree(dir)
+          invalidateGit(dir)
+        }
+      }
+      if (forced === 'copy') {
+        runOp('copy', items, { targetDir, after })
+        return
+      }
+      if (forced === 'move') {
+        runOp('move', items, { targetDir, after })
+        return
+      }
+      const moving = items.filter((source) => sameVolume(source, targetDir))
+      const copying = items.filter((source) => !sameVolume(source, targetDir))
+      // Mixed selections can need both modes at once, exactly like Explorer.
+      if (copying.length) runOp('copy', copying, { targetDir, after })
+      if (moving.length) runOp('move', moving, { targetDir, after })
+    },
+    [invalidateGit, invalidateTree, runOp],
+  )
+
+  /**
+   * Pointer-based in-app drag. HTML5 `dragstart` is avoided on purpose: WebView2 and the
+   * tab-drag gesture both live in the same pointer space, and pointer events keep the
+   * drop target resolution under our control.
+   */
+  const startRowDrag = useCallback(
+    (paneId: string, entry: Entry, ev: React.PointerEvent) => {
+      if (ev.button !== 0) return
+      const current = wsRef.current
+      const pane = current?.panes[paneId]
+      const tab = pane && current ? current.tabs[pane.activeTabId] : undefined
+      if (!current || !pane || !tab?.path) return
+      const data = listData[tab.id]
+      const names = data?.selected.has(entry.name)
+        ? Array.from(data.selected)
+        : [entry.name]
+      const sourceDir = tab.path
+      const startX = ev.clientX
+      const startY = ev.clientY
+      let started = false
+      let userSelect = ''
+
+      const move = (e: PointerEvent) => {
+        if (!started) {
+          if (Math.hypot(e.clientX - startX, e.clientY - startY) < 4) return
+          started = true
+          userSelect = document.body.style.userSelect
+          document.body.style.userSelect = 'none'
+        }
+        setRowDrag({
+          names,
+          sourceDir,
+          x: e.clientX,
+          y: e.clientY,
+          started: true,
+          target: resolveDropTarget(e.clientX, e.clientY),
+          copy: e.ctrlKey || e.metaKey,
+          move: e.shiftKey && !(e.ctrlKey || e.metaKey),
+        })
+      }
+      const finish = (e: PointerEvent | null) => {
+        window.removeEventListener('pointermove', move)
+        window.removeEventListener('pointerup', up)
+        window.removeEventListener('pointercancel', cancel)
+        window.removeEventListener('keydown', onKey)
+        if (started) document.body.style.userSelect = userSelect
+        setRowDrag(null)
+        if (!e) return
+        const target = resolveDropTarget(e.clientX, e.clientY)
+        if (!target) return
+        const forced = e.ctrlKey || e.metaKey ? 'copy' : e.shiftKey ? 'move' : null
+        dropPaths(
+          names.map((name) => joinPath(sourceDir, name)),
+          target.dir,
+          forced,
+        )
+      }
+      const up = (e: PointerEvent) => finish(e)
+      const cancel = () => finish(null)
+      const onKey = (e: KeyboardEvent) => {
+        if (e.key === 'Escape') finish(null)
+      }
+      window.addEventListener('pointermove', move)
+      window.addEventListener('pointerup', up)
+      window.addEventListener('pointercancel', cancel)
+      window.addEventListener('keydown', onKey)
+    },
+    [dropPaths, listData, resolveDropTarget],
+  )
+
+  // Files dragged in from Explorer or the desktop. Tauri reports physical pixels, while
+  // the hit test works in CSS pixels, so the position is scaled before resolving a target.
+  useEffect(() => {
+    const mods = { ctrl: false, shift: false }
+    const onModifier = (e: KeyboardEvent) => {
+      mods.ctrl = e.ctrlKey
+      mods.shift = e.shiftKey
+    }
+    let paths: string[] = []
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    void getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const payload = event.payload
+        if (payload.type === 'leave') {
+          paths = []
+          setOsDrag(null)
+          return
+        }
+        const dpr = window.devicePixelRatio || 1
+        const target = resolveDropTarget(payload.position.x / dpr, payload.position.y / dpr)
+        if (payload.type === 'enter') paths = payload.paths
+        if (payload.type === 'drop') {
+          const dropped = payload.paths.filter((path) => isFsPath(path))
+          setOsDrag(null)
+          if (!target || !dropped.length) return
+          const forced = mods.ctrl ? 'copy' : mods.shift ? 'move' : null
+          dropPaths(dropped, target.dir, forced)
+          return
+        }
+        setOsDrag({ paths, target })
+      })
+      .then((fn) => {
+        if (disposed) fn()
+        else unlisten = fn
+      })
+    window.addEventListener('keydown', onModifier)
+    window.addEventListener('keyup', onModifier)
+    return () => {
+      disposed = true
+      unlisten?.()
+      window.removeEventListener('keydown', onModifier)
+      window.removeEventListener('keyup', onModifier)
+    }
+  }, [dropPaths, resolveDropTarget])
 
   const pathsFor = useCallback((paneId: string, names: string[]): string[] => {
     const current = wsRef.current
@@ -1628,6 +1814,16 @@ export default function App() {
     })
   }, [])
 
+  /** What the ghost promises before release: the same rule `dropPaths` will apply. */
+  const dragMode = (() => {
+    if (!rowDrag) return 'move' as const
+    if (rowDrag.copy) return 'copy' as const
+    if (rowDrag.move) return 'move' as const
+    const target = rowDrag.target?.dir
+    const source = joinPath(rowDrag.sourceDir, rowDrag.names[0] ?? '')
+    return target && !sameVolume(source, target) ? ('copy' as const) : ('move' as const)
+  })()
+
   const layoutInfo = useMemo(() => {
     if (!ws) return { count: 1, dir: 'row' as const }
     return { count: paneIds(ws.root).length, dir: ws.root.t === 'split' ? ws.root.dir : ('row' as const) }
@@ -1887,6 +2083,7 @@ export default function App() {
               onCopyPath={copyCurrentPath}
               onPathInvalid={reportInvalidPath}
               onRowContextMenu={(entry, point) => openRowMenu(pane.id, entry, point)}
+              onRowDragStart={(entry, ev) => startRowDrag(pane.id, entry, ev)}
               onBlankContextMenu={(point) => openBlankMenu(pane.id, point)}
               onTabContextMenu={(tabId, point) => openTabMenu(pane.id, tabId, point)}
               drives={driveList}
@@ -1925,6 +2122,7 @@ export default function App() {
       registerPane,
       applyRatio,
       openRowMenu,
+      startRowDrag,
       openBlankMenu,
       openTabMenu,
       openProperties,
@@ -2098,6 +2296,7 @@ export default function App() {
                     active={activeTab?.path === place.path}
                     label={place.label}
                     hint={place.custom ? '' : undefined}
+                    dropDir={place.path}
                     onClick={() => activeTab && navigate(activeTab.id, place.path)}
                     onContextMenu={(point) => openPlaceMenu(place, point)}
                     icon={
@@ -2178,6 +2377,31 @@ export default function App() {
           onClose={() => setSearchOpen(false)}
           onOpen={(folder) => navigate(activeTab.id, folder)}
         />
+      )}
+
+      {/* Drop feedback: the target row is outlined in screen space, which works for list
+          rows, tree rows and sidebar places without threading drag state into each one. */}
+      {(rowDrag?.started || osDrag) && (
+        <div className="pointer-events-none fixed inset-0 z-40">
+          {(rowDrag?.target ?? osDrag?.target) && (() => {
+            const box = (rowDrag?.target ?? osDrag?.target)!
+            return (
+              <div
+                data-drop-highlight
+                className="absolute rounded bg-blue-400/10 ring-2 ring-blue-400"
+                style={{ left: box.left, top: box.top, width: box.width, height: box.height }}
+              />
+            )
+          })()}
+          {rowDrag?.started && (
+            <div
+              className="absolute rounded border border-line bg-surface px-2 py-1 text-[0.6875rem] font-medium text-fg-strong shadow-lg"
+              style={{ left: rowDrag.x + 14, top: rowDrag.y + 14 }}
+            >
+              {t(dragMode === 'copy' ? 'drag.copyCount' : 'drag.moveCount', { count: rowDrag.names.length })}
+            </div>
+          )}
+        </div>
       )}
 
       <OpsPanel
@@ -2330,6 +2554,7 @@ function SidebarItem({
   hint,
   active,
   icon,
+  dropDir,
   onClick,
   onContextMenu,
 }: {
@@ -2337,12 +2562,15 @@ function SidebarItem({
   hint?: string
   active: boolean
   icon: React.ReactNode
+  /** Folder that accepts dragged files; unset makes the row an inert drop target. */
+  dropDir?: string
   onClick: () => void
   onContextMenu?: (point: { clientX: number; clientY: number }) => void
 }) {
   return (
     <button
       type="button"
+      data-drop-dir={dropDir}
       onClick={onClick}
       onContextMenu={onContextMenu}
       className={`flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[0.75rem] ${

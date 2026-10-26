@@ -63,6 +63,24 @@ export function underPath(path: string, root: string): boolean {
   return p === r || p.startsWith(r.endsWith('\\') ? r : `${r}\\`)
 }
 
+/**
+ * Windows drop semantics: a drag inside one volume moves, across volumes copies. UNC
+ * paths count as their `\\server\share` root, which is the closest thing to a volume.
+ */
+export function sameVolume(a: string, b: string): boolean {
+  const root = (path: string): string => {
+    const drive = /^[a-zA-Z]:/.exec(path)
+    if (drive) return drive[0].toLowerCase()
+    if (path.startsWith('\\\\')) {
+      const parts = path.slice(2).split('\\')
+      return `\\\\${(parts[0] ?? '').toLowerCase()}\\${(parts[1] ?? '').toLowerCase()}`
+    }
+    return ''
+  }
+  const left = root(a)
+  return left !== '' && left === root(b)
+}
+
 export const isDir = (attrs: number) => (attrs & 0x10) !== 0
 
 export const formatSize = (n: number, dir: boolean) => {

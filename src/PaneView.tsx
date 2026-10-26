@@ -106,6 +106,8 @@ type Props = {
   /** Reports an address-bar edit that did not resolve to a folder, so the hint is visible. */
   onPathInvalid: (path: string) => void
   onRowContextMenu: (entry: Entry, point: MenuPoint) => void
+  /** Starts a pointer-based in-app drag of the current selection/row. */
+  onRowDragStart: (entry: Entry, ev: React.PointerEvent) => void
   onBlankContextMenu: (point: MenuPoint) => void
   onTabContextMenu: (tabId: string, point: MenuPoint) => void
   drives: Drive[]
@@ -155,6 +157,7 @@ export function PaneView({
   onCopyPath,
   onPathInvalid,
   onRowContextMenu,
+  onRowDragStart,
   onBlankContextMenu,
   onTabContextMenu,
   drives,
@@ -943,6 +946,7 @@ export function PaneView({
           if (tab) update(tab.id, (d) => ({ ...d, selected: new Set(), anchor: '' }))
           onBlankContextMenu(pointOf(e))
         }}
+        data-drop-dir={tab?.path || undefined}
         className="typo-list relative min-h-0 flex-1 overflow-auto outline-none"
       >
         <input
@@ -1012,8 +1016,11 @@ export function PaneView({
                 key={`${entry.name}-${vi.index}`}
                 data-row={entry.name}
                 data-dir={dir ? '1' : '0'}
-                onMouseDown={(e) => {
-                  if (e.button === 0) selectRow(vi.index, e)
+                data-drop-dir={dir ? joinPath(tab.path, entry.name) : undefined}
+                onPointerDown={(e) => {
+                  if (e.button !== 0) return
+                  selectRow(vi.index, e)
+                  onRowDragStart(entry, e)
                 }}
                 onContextMenu={(e) => {
                   e.preventDefault()
