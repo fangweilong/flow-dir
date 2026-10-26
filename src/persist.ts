@@ -1,7 +1,11 @@
 import type { Lang, Theme } from './types'
 import type { Node, PaneState, TabState, Workspace } from './workspace'
+import type { ShortcutOverride } from './shortcuts'
 
 export type QuickPlace = { name: string; path: string }
+
+/** Program used for extensions the built-in previewer cannot render. */
+export type ExternalPreviewRule = { ext: string; command: string }
 
 export type Settings = {
   language: Lang
@@ -10,8 +14,14 @@ export type Settings = {
   showHidden: boolean
   useEverything: boolean
   sidebarOpen: boolean
+  /** Pixel width of the sidebar while open; drag-resizable. */
+  sidebarWidth: number
+  /** Pixel width of the preview panel while open; drag-resizable. */
+  previewWidth: number
   customPlaces: QuickPlace[]
   hiddenPlaces: string[]
+  externalPreview: ExternalPreviewRule[]
+  shortcuts: ShortcutOverride[]
   gpuAccel: boolean
   updateIntervalHours: number
 }
@@ -23,8 +33,12 @@ export const DEFAULT_SETTINGS: Settings = {
   showHidden: false,
   useEverything: true,
   sidebarOpen: true,
+  sidebarWidth: 176,
+  previewWidth: 320,
   customPlaces: [],
   hiddenPlaces: [],
+  externalPreview: [],
+  shortcuts: [],
   gpuAccel: true,
   updateIntervalHours: 24,
 }
@@ -74,7 +88,8 @@ export function fromSnapshot(value: unknown): Workspace | null {
     if (!pane.sort || typeof pane.sort.key !== 'string') return null
   }
   for (const tab of Object.values(tabMap)) {
-    if (typeof tab.path !== 'string' || !tab.path) return null
+    // An empty path is the drive overview tab and must survive a restart.
+    if (typeof tab.path !== 'string') return null
     if (!Array.isArray(tab.history) || typeof tab.histIdx !== 'number') return null
   }
   const activePaneId =

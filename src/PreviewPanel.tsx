@@ -1,4 +1,5 @@
 import { makeT } from './i18n'
+import type { Translate } from './i18n'
 import { formatSize, formatTime } from './paths'
 import type { ApiError, Lang, PreviewInfo } from './types'
 
@@ -7,12 +8,20 @@ type Props = {
   loading: boolean
   error: ApiError | null
   name: string
+  path: string
   lang: Lang
+  /** Drag-resized width in px. */
+  width: number
+  /** CSS cap that keeps the centre panes at least half of the layout. */
+  maxWidth: string
+  /** Bound key for the external previewer, shown on the button. */
+  externalKey: string
   onClose: () => void
+  onOpenExternal: (path: string) => void
 }
 
 /** Maps raw error codes/details to a human sentence; never prints `[object Object]`. */
-function friendlyError(error: ApiError, t: ReturnType<typeof makeT>) {
+function friendlyError(error: ApiError, t: Translate) {
   switch (error.code) {
     case 'ACCESS_DENIED':
     case 'WINDOWS':
@@ -28,11 +37,26 @@ function friendlyError(error: ApiError, t: ReturnType<typeof makeT>) {
   }
 }
 
-export function PreviewPanel({ info, loading, error, name, lang, onClose }: Props) {
+export function PreviewPanel({
+  info,
+  loading,
+  error,
+  name,
+  path,
+  lang,
+  width,
+  maxWidth,
+  externalKey,
+  onClose,
+  onOpenExternal,
+}: Props) {
   const t = makeT(lang)
 
   return (
-    <aside className="flex w-[320px] shrink-0 flex-col border-l border-line bg-surface">
+    <aside
+      style={{ width, maxWidth }}
+      className="flex shrink-0 flex-col overflow-x-hidden border-l border-line bg-surface"
+    >
       <header className="flex h-8 shrink-0 items-center gap-2 border-b border-line px-2.5">
         <span className="text-[10px] font-semibold tracking-wider text-muted-2">{t('preview.title')}</span>
         <span className="min-w-0 flex-1 truncate text-[11.5px] font-medium text-fg-strong" title={name}>
@@ -139,6 +163,16 @@ export function PreviewPanel({ info, loading, error, name, lang, onClose }: Prop
                   <div className="mt-1 text-[11px] text-muted-2">
                     {info.reason === 'too-large' ? t('preview.tooLarge') : t('preview.noPreview')}
                   </div>
+                  {info.external && (
+                    <button
+                      type="button"
+                      onClick={() => onOpenExternal(path)}
+                      title={externalKey}
+                      className="mt-3 rounded-md border border-line bg-surface-2 px-2.5 py-1 text-[11px] text-fg hover:bg-surface-3"
+                    >
+                      {t('preview.external', { name: info.external })}
+                    </button>
+                  )}
                 </div>
               </div>
             )}

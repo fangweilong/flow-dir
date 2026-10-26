@@ -31,6 +31,7 @@ use windows::Win32::System::Com::{
 };
 
 use crate::error::ApiError;
+use crate::settings::ExternalPreview;
 
 /// Icon and thumbnail payloads are small and cheap to regenerate; a generous cache
 /// only inflates the resident set of a file manager that is meant to stay small.
@@ -45,6 +46,18 @@ const IMAGE_EXT: &[&str] = &[
 
 const VIDEO_EXT: &[&str] = &[
     "mp4", "m4v", "mkv", "mov", "avi", "webm", "wmv", "flv", "mpg", "mpeg", "ts", "m2ts",
+];
+
+/// Extensions always treated as text. Anything else is sniffed, so an unlisted or
+/// extension-less file still previews when its bytes look like text.
+const TEXT_EXT: &[&str] = &[
+    "txt", "md", "markdown", "json", "jsonc", "js", "jsx", "mjs", "cjs", "ts", "tsx", "css",
+    "scss", "sass", "less", "html", "htm", "xml", "yaml", "yml", "toml", "ini", "cfg", "conf",
+    "properties", "log", "csv", "tsv", "rs", "py", "go", "java", "kt", "kts", "c", "h", "cc",
+    "cpp", "cxx", "hpp", "hxx", "cs", "rb", "php", "pl", "lua", "swift", "dart", "scala", "r",
+    "sql", "sh", "zsh", "fish", "bat", "cmd", "ps1", "vue", "svelte", "astro", "tex", "proto",
+    "graphql", "gql", "gradle", "dockerfile", "makefile", "cmake", "diff", "patch", "srt", "vtt",
+    "reg", "inf", "gitignore", "gitattributes", "editorconfig", "env", "lock",
 ];
 
 #[derive(Default)]
@@ -116,6 +129,8 @@ pub struct PreviewInfo {
     pub entries: Option<Vec<ArchiveEntry>>,
     pub meta: Option<Vec<MetaRow>>,
     pub reason: Option<String>,
+    /// Caption of the configured external preview program, when one handles this extension.
+    pub external: Option<String>,
     pub size: u64,
     pub mtime: u64,
 }
@@ -261,47 +276,43 @@ fn url_form(query: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-pub fn info(path: String, width: u32, bg: u32) -> Result<PreviewInfo, ApiError> {
+pub fn info(
+    path: String,
+    width: u32,
+    bg: u32,
+    external: &[ExternalPreview],
+) -> Result<PreviewInfo, ApiError> {
     let meta = std::fs::metadata(&path).map_err(|e| ApiError::from_io(&path, &e))?;
-    if meta.is_dir() {
-        let mtime = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        return Ok(PreviewInfo {
-            kind: "folder".into(),
-            mtime,
-            ..Default::default()
-        });
-    }
-    if meta.len() > MAX_SOURCE_BYTES {
-        let mtime = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        return Ok(PreviewInfo {
-            kind: "unsupported".into(),
-            reason: Some("too-large".into()),
-            size: meta.len(),
-            mtime,
-            ..Default::default()
-        });
-    }
-    let size = meta.len();
     let mtime = meta
         .modified()
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
+    if meta.is_dir() {
+        return Ok(PreviewInfo {
+            kind: "folder".into(),
+            mtime,
+            ..Default::default()
+        });
+    }
+    let size = meta.len();
     let ext = extension(&path);
+    let external = rule_for(&ext, external).map(|rule| command_label(&rule.command));
+    if size > MAX_SOURCE_BYTES {
+        return Ok(PreviewInfo {
+            kind: "unsupported".into(),
+            reason: Some("too-large".into()),
+            size,
+            mtime,
+            external,
+            ..Default::default()
+        });
+    }
     let mut info = PreviewInfo {
         size,
         mtime,
+        external,
         ..Default::default()
     };
 
@@ -323,15 +334,6 @@ pub fn info(path: String, width: u32, bg: u32) -> Result<PreviewInfo, ApiError> 
     }
 
     match ext.as_str() {
-        "txt" | "md" | "markdown" | "json" | "jsonc" | "js" | "jsx" | "ts" | "tsx" | "css"
-        | "html" | "htm" | "xml" | "yaml" | "yml" | "toml" | "ini" | "cfg" | "conf" | "log"
-        | "csv" | "rs" | "py" | "go" | "java" | "c" | "h" | "cpp" | "hpp" | "cs" | "sh" | "bat"
-        | "cmd" | "ps1" | "sql" | "gitignore" | "env" => {
-            let bytes = std::fs::read(&path).map_err(|e| ApiError::from_io(&path, &e))?;
-            let slice = &bytes[..bytes.len().min(MAX_TEXT_BYTES)];
-            info.kind = "text".to_string();
-            info.text = Some(decode_text(slice));
-        }
         "zip" => {
             let file = std::fs::File::open(&path).map_err(|e| ApiError::from_io(&path, &e))?;
             let mut archive =
@@ -353,11 +355,134 @@ pub fn info(path: String, width: u32, bg: u32) -> Result<PreviewInfo, ApiError> 
             info.meta = Some(version_rows(&path));
         }
         _ => {
-            info.kind = "unsupported".to_string();
-            info.reason = Some("no-preview".to_string());
+            let known = TEXT_EXT.contains(&ext.as_str());
+            match read_prefix(&path) {
+                // Sniffing keeps unknown and extension-less text (Lua scripts, Dockerfile,
+                // LICENSE, …) previewable without an ever-growing extension table.
+                Ok(bytes) if known || looks_like_text(&bytes) => {
+                    info.kind = "text".to_string();
+                    info.text = Some(decode_text(&bytes));
+                }
+                // A whitelisted text file must report why it could not be read; for an
+                // unknown binary the failed read simply means "no preview".
+                Err(err) if known => return Err(err),
+                _ => {
+                    info.kind = "unsupported".to_string();
+                    info.reason = Some("no-preview".to_string());
+                }
+            }
         }
     }
     Ok(info)
+}
+
+/// Head of the file, capped at `MAX_TEXT_BYTES`: a text preview never needs more and
+/// reading a 64 MB log in full would stall the reply.
+fn read_prefix(path: &str) -> Result<Vec<u8>, ApiError> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(|e| ApiError::from_io(path, &e))?;
+    let mut bytes = Vec::with_capacity(MAX_TEXT_BYTES);
+    file.take(MAX_TEXT_BYTES as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| ApiError::from_io(path, &e))?;
+    Ok(bytes)
+}
+
+/// Binary sniff: NUL bytes or more than 2% control characters mean the prefix is not
+/// readable text. Files with a text BOM are always accepted, even UTF-16 where every
+/// ASCII character carries a NUL.
+fn looks_like_text(bytes: &[u8]) -> bool {
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF])
+        || bytes.starts_with(&[0xFF, 0xFE])
+        || bytes.starts_with(&[0xFE, 0xFF])
+    {
+        return true;
+    }
+    let mut control = 0usize;
+    for &byte in bytes {
+        match byte {
+            0x00 => return false,
+            0x09 | 0x0A | 0x0C | 0x0D => {}
+            0x01..=0x1F | 0x7F => control += 1,
+            _ => {}
+        }
+    }
+    control * 100 <= bytes.len() * 2
+}
+
+/// First matching rule for `ext`; entries without a command are ignored so a half-typed
+/// rule in settings.toml does not shadow anything.
+fn rule_for<'a>(ext: &str, external: &'a [ExternalPreview]) -> Option<&'a ExternalPreview> {
+    external
+        .iter()
+        .find(|rule| rule.ext.eq_ignore_ascii_case(ext) && !rule.command.trim().is_empty())
+}
+
+/// Caption for the preview button: the program's file stem (`WINWORD`, `notepad`).
+fn command_label(command: &str) -> String {
+    split_command(command)
+        .first()
+        .and_then(|program| FsPath::new(program).file_stem())
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or(command)
+        .to_string()
+}
+
+/// Splits a command line into program and arguments. Double quotes group one token;
+/// there are no escape sequences, matching how a path with spaces is typed.
+fn split_command(command: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut started = false;
+    for ch in command.chars() {
+        match ch {
+            '"' => {
+                quoted = !quoted;
+                started = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if started {
+                    tokens.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            c => {
+                current.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        tokens.push(current);
+    }
+    tokens
+}
+
+/// Starts the configured preview program for `path` as a detached child process.
+pub fn launch_external(path: &str, external: &[ExternalPreview]) -> Result<(), ApiError> {
+    let ext = extension(path);
+    let rule = rule_for(&ext, external).ok_or_else(|| ApiError::new("NO_RULE", ext))?;
+    let mut argv = split_command(&rule.command);
+    if argv.is_empty() {
+        return Err(ApiError::new("NO_RULE", rule.command.clone()));
+    }
+    let mut substituted = false;
+    for arg in &mut argv {
+        if arg.contains("{path}") {
+            *arg = arg.replace("{path}", path);
+            substituted = true;
+        }
+    }
+    if !substituted {
+        argv.push(path.to_string());
+    }
+    std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| ApiError::new("LAUNCH", format!("{}: {e}", argv[0])))
 }
 
 /// Decodes a text prefix: BOM (UTF-8/UTF-16) first, then strict UTF-8, then the
@@ -819,5 +944,63 @@ fn version_rows(path: &str) -> Vec<MetaRow> {
             }
         }
         rows
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_command_keeps_quoted_program_and_arguments() {
+        assert_eq!(
+            split_command(r#""C:\Program Files\Microsoft Office\WINWORD.EXE" /q "{path}""#),
+            vec![r"C:\Program Files\Microsoft Office\WINWORD.EXE", "/q", "{path}"]
+        );
+        assert_eq!(split_command("  notepad   "), vec!["notepad"]);
+        assert!(split_command("   ").is_empty());
+    }
+
+    #[test]
+    fn command_label_uses_the_program_stem() {
+        assert_eq!(command_label(r#""C:\Tools\WINWORD.EXE" "{path}""#), "WINWORD");
+        assert_eq!(command_label("notepad"), "notepad");
+    }
+
+    #[test]
+    fn sniff_rejects_binary_and_accepts_bom() {
+        assert!(looks_like_text(b"fn main() {}\n"));
+        assert!(!looks_like_text(&[0x4D, 0x5A, 0x00, 0x00]));
+        assert!(looks_like_text(&[0xFF, 0xFE, b'a', 0x00]));
+        assert!(!looks_like_text(b"\x89PNG\r\n\x1a\n\x00\x00"));
+    }
+
+    #[test]
+    fn unlisted_text_previews_and_binary_falls_back_to_the_external_rule() {
+        let dir = std::env::temp_dir();
+        let lua = dir.join("flowdir_preview_probe.lua");
+        std::fs::write(&lua, "print('hi')\n").unwrap();
+        let text = info(lua.to_string_lossy().into_owned(), 320, 0xffffff, &[]).unwrap();
+        assert_eq!(text.kind, "text");
+        assert_eq!(text.text.as_deref(), Some("print('hi')\n"));
+
+        let docx = dir.join("flowdir_preview_probe.docx");
+        std::fs::write(&docx, [0x50, 0x4B, 0x03, 0x04, 0x00, 0x00]).unwrap();
+        let rule = ExternalPreview {
+            ext: "docx".into(),
+            command: r#""C:\Tools\WINWORD.EXE" "{path}""#.into(),
+        };
+        let rule_info = info(
+            docx.to_string_lossy().into_owned(),
+            320,
+            0xffffff,
+            std::slice::from_ref(&rule),
+        )
+        .unwrap();
+        assert_eq!(rule_info.kind, "unsupported");
+        assert_eq!(rule_info.external.as_deref(), Some("WINWORD"));
+
+        let _ = std::fs::remove_file(&lua);
+        let _ = std::fs::remove_file(&docx);
     }
 }

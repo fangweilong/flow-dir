@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Runtime};
 use toml_edit::{DocumentMut, Item, Value};
@@ -13,6 +15,40 @@ pub struct QuickPlace {
     pub path: String,
 }
 
+/// Program used to preview an extension FlowDir cannot render itself.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ExternalPreview {
+    /// Lower-case extension without the dot, e.g. `docx`.
+    pub ext: String,
+    /// Command line; `{path}` is replaced with the selected file, appended when absent.
+    pub command: String,
+}
+
+/// Rebound key combination; only ids the user changed are stored, defaults live in the UI.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ShortcutOverride {
+    pub id: String,
+    /// Canonical combination such as `ctrl+shift+f`.
+    pub keys: String,
+}
+
+/// Parsed settings kept in memory so previews do not re-read the TOML on every selection.
+#[derive(Default)]
+pub struct SettingsCache(Mutex<Option<Arc<Settings>>>);
+
+impl SettingsCache {
+    pub fn get<R: Runtime>(&self, app: &AppHandle<R>) -> Arc<Settings> {
+        let mut slot = self.0.lock().unwrap();
+        slot.get_or_insert_with(|| Arc::new(load(app))).clone()
+    }
+
+    pub fn set(&self, settings: Settings) {
+        *self.0.lock().unwrap() = Some(Arc::new(settings));
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
@@ -26,10 +62,18 @@ pub struct Settings {
     pub use_everything: bool,
     /// Sidebar (quick access + drives) visibility.
     pub sidebar_open: bool,
+    /// Sidebar width in px while open; drag-resizable in the UI.
+    pub sidebar_width: u32,
+    /// Preview panel width in px while open; drag-resizable in the UI.
+    pub preview_width: u32,
     /// Extra quick-access entries appended after the built-in ones.
     pub custom_places: Vec<QuickPlace>,
     /// Keys of built-in quick-access entries the user removed.
     pub hidden_places: Vec<String>,
+    /// Per-extension preview programs for formats the built-in previewer cannot render.
+    pub external_preview: Vec<ExternalPreview>,
+    /// Rebound shortcuts; absent ids keep their defaults.
+    pub shortcuts: Vec<ShortcutOverride>,
     /// WebView2 hardware compositing. Takes effect on the next launch because the
     /// argument is fixed when the browser process is created.
     pub gpu_accel: bool,
@@ -55,8 +99,12 @@ impl Default for Settings {
             show_hidden: false,
             use_everything: true,
             sidebar_open: true,
+            sidebar_width: 176,
+            preview_width: 320,
             custom_places: Vec::new(),
             hidden_places: Vec::new(),
+            external_preview: Vec::new(),
+            shortcuts: Vec::new(),
             gpu_accel: true,
             update_interval_hours: 24,
         }
@@ -88,6 +136,10 @@ use_everything = true
 # 显示左侧快速访问栏 / show the quick-access sidebar
 sidebar_open = true
 
+# 侧边栏和预览面板宽度（像素，可拖拽）/ sidebar and preview widths in px, drag-resizable
+sidebar_width = 176
+preview_width = 320
+
 # WebView2 硬件合成，关闭省约 90MB 内存 / GPU compositing, saves ~90MB when off
 gpu_accel = true
 
@@ -101,6 +153,16 @@ custom_places = []
 
 # 已删除的内置快速访问项 / removed built-ins: home | desktop | downloads | documents
 hidden_places = []
+
+# 外部预览程序：为内置预览不支持的扩展名指定程序，{path} 会替换为文件路径，
+# 省略 {path} 时自动追加到命令末尾 / external preview per extension; {path} is
+# replaced with the file path, or appended when missing
+# external_preview = [{ ext = "docx", command = '"C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE" "{path}"' }]
+external_preview = []
+
+# 快捷键覆盖（只记录改过的项，默认值内置）/ shortcut overrides, defaults live in the app
+# shortcuts = [{ id = "search", keys = "ctrl+shift+f" }]
+shortcuts = []
 "#;
 
 /// On-disk shape: snake_case keys, no coupling to the camelCase IPC payload.
@@ -113,10 +175,14 @@ struct FileSettings {
     show_hidden: bool,
     use_everything: bool,
     sidebar_open: bool,
+    sidebar_width: u32,
+    preview_width: u32,
     gpu_accel: bool,
     update_interval_hours: u32,
     custom_places: Vec<QuickPlace>,
     hidden_places: Vec<String>,
+    external_preview: Vec<ExternalPreview>,
+    shortcuts: Vec<ShortcutOverride>,
 }
 
 impl Default for FileSettings {
@@ -129,10 +195,14 @@ impl Default for FileSettings {
             show_hidden: base.show_hidden,
             use_everything: base.use_everything,
             sidebar_open: base.sidebar_open,
+            sidebar_width: base.sidebar_width,
+            preview_width: base.preview_width,
             gpu_accel: base.gpu_accel,
             update_interval_hours: base.update_interval_hours,
             custom_places: base.custom_places,
             hidden_places: base.hidden_places,
+            external_preview: base.external_preview,
+            shortcuts: base.shortcuts,
         }
     }
 }
@@ -146,10 +216,14 @@ impl From<FileSettings> for Settings {
             show_hidden: file.show_hidden,
             use_everything: file.use_everything,
             sidebar_open: file.sidebar_open,
+            sidebar_width: file.sidebar_width,
+            preview_width: file.preview_width,
             gpu_accel: file.gpu_accel,
             update_interval_hours: file.update_interval_hours,
             custom_places: file.custom_places,
             hidden_places: file.hidden_places,
+            external_preview: file.external_preview,
+            shortcuts: file.shortcuts,
         }
     }
 }
@@ -202,6 +276,8 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), A
     set_value(&mut doc, "show_hidden", Value::from(settings.show_hidden));
     set_value(&mut doc, "use_everything", Value::from(settings.use_everything));
     set_value(&mut doc, "sidebar_open", Value::from(settings.sidebar_open));
+    set_value(&mut doc, "sidebar_width", Value::from(settings.sidebar_width as i64));
+    set_value(&mut doc, "preview_width", Value::from(settings.preview_width as i64));
     set_value(&mut doc, "gpu_accel", Value::from(settings.gpu_accel));
     set_value(
         &mut doc,
@@ -214,6 +290,24 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), A
         hidden.push(key.as_str());
     }
     set_value(&mut doc, "hidden_places", Value::Array(hidden));
+
+    let mut external = toml_edit::Array::new();
+    for rule in &settings.external_preview {
+        let mut entry = toml_edit::InlineTable::new();
+        entry.insert("ext", Value::from(rule.ext.as_str()));
+        entry.insert("command", Value::from(rule.command.as_str()));
+        external.push(Value::InlineTable(entry));
+    }
+    set_value(&mut doc, "external_preview", Value::Array(external));
+
+    let mut shortcuts = toml_edit::Array::new();
+    for shortcut in &settings.shortcuts {
+        let mut entry = toml_edit::InlineTable::new();
+        entry.insert("id", Value::from(shortcut.id.as_str()));
+        entry.insert("keys", Value::from(shortcut.keys.as_str()));
+        shortcuts.push(Value::InlineTable(entry));
+    }
+    set_value(&mut doc, "shortcuts", Value::Array(shortcuts));
 
     // Written as an inline array, not `[[custom_places]]`: array-of-tables entries have no
     // stable position in the document, so rewriting them would drag the key to the end and
@@ -260,5 +354,31 @@ fn set_value(doc: &mut DocumentMut, key: &str, value: Value) {
         if let Some(mut k) = doc.as_table_mut().key_mut(key) {
             k.leaf_decor_mut().set_suffix(" ");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn template_and_inline_rules_parse() {
+        let seed: FileSettings = toml_edit::de::from_str(TEMPLATE).unwrap();
+        assert!(seed.external_preview.is_empty());
+
+        let text = r#"external_preview = [{ ext = "docx", command = '"C:\Tools\WINWORD.EXE" "{path}"' }]"#;
+        let parsed: FileSettings = toml_edit::de::from_str(text).unwrap();
+        assert_eq!(parsed.external_preview.len(), 1);
+        assert_eq!(parsed.external_preview[0].ext, "docx");
+        assert_eq!(
+            parsed.external_preview[0].command,
+            r#""C:\Tools\WINWORD.EXE" "{path}""#
+        );
+
+        let text = r#"shortcuts = [{ id = "search", keys = "ctrl+shift+f" }]"#;
+        let parsed: FileSettings = toml_edit::de::from_str(text).unwrap();
+        assert_eq!(parsed.shortcuts.len(), 1);
+        assert_eq!(parsed.shortcuts[0].id, "search");
+        assert_eq!(parsed.shortcuts[0].keys, "ctrl+shift+f");
     }
 }

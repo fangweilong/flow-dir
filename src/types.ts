@@ -7,7 +7,7 @@ export type DirBatch = {
   items: RawEntry[]
   error: ApiError | null
 }
-export type Drive = { root: string; kind: string }
+export type Drive = { root: string; kind: string; name: string }
 export type Place = { key: string; path: string }
 export type Lang = 'zh-CN' | 'en'
 export type Theme = 'system' | 'light' | 'dark'
@@ -78,8 +78,18 @@ export type PreviewInfo = {
   entries?: ArchiveEntry[] | null
   meta?: MetaRow[] | null
   reason?: string | null
+  /** Caption of the configured external preview program for this extension. */
+  external?: string | null
   size: number
   mtime: number
+}
+export type GitFile = { path: string; code: string }
+/** Work-tree status of one folder; `root` is empty outside a repository. */
+export type GitStatus = {
+  root: string
+  files: GitFile[]
+  /** Child folders with changes deeper down. */
+  dirs: string[]
 }
 export type SearchItem = { path: string; name: string; isDir: boolean; size: number; mtime: number }
 export type SearchBatch = {

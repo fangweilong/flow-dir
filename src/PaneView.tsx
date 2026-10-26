@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { FileIcon } from './icons'
-import { crumbs, formatSize, formatTime, isDir, joinPath, parentPath } from './paths'
+import { crumbs, formatSize, formatTime, isDir, isFsPath, joinPath, parentPath, underPath } from './paths'
+import { buildGitBadges } from './git'
 import { openPath } from './api'
+import { matchBinding } from './shortcuts'
+import type { ShortcutId } from './shortcuts'
 import { EMPTY_LIST } from './types'
-import type { Drive, Entry, Lang, ListData, SortKey, SortState } from './types'
-import { makeT } from './i18n'
+import type { Drive, Entry, GitStatus, Lang, ListData, SortKey, SortState } from './types'
+import { driveKindLabel, makeT } from './i18n'
 import type { DropMode, PaneState, TabState } from './workspace'
 
 /** Drive label for the address bar ("C:", "D:"); UNC and relative paths fall back to a dash. */
@@ -13,6 +16,16 @@ const driveRoot = (path: string | undefined): string => {
   const match = path ? /^([A-Za-z]:)/.exec(path) : null
   return match ? match[1].toUpperCase() : '⋯'
 }
+
+/** Badge colour per porcelain letter; conflicts and deletions read as problems. */
+const gitTone = (code: string) =>
+  code === 'D' || code === '!'
+    ? 'text-red-500'
+    : code === 'A' || code === 'U'
+      ? 'text-emerald-500'
+      : code === 'R' || code === 'C'
+        ? 'text-sky-500'
+        : 'text-amber-500'
 
 const ROW_H = 28
 const GRID_FULL = 'minmax(0,1fr) 96px 142px'
@@ -40,6 +53,8 @@ type Props = {
   pane: PaneState
   tabs: Record<string, TabState>
   data: ListData | undefined
+  /** Repository status of the active tab's folder; null when unknown or not a repo. */
+  git: GitStatus | null
   active: boolean
   lang: Lang
   dropHint: DropMode | null
@@ -63,6 +78,8 @@ type Props = {
   onDelete: (names: string[], permanent: boolean) => void
   onPaste: () => void
   onRefresh: () => void
+  /** Resolved key combinations, so rebinding in settings reaches the pane commands. */
+  keys: Record<ShortcutId, string>
   update: (tabId: string, fn: (d: ListData) => ListData) => void
 }
 
@@ -77,6 +94,7 @@ export function PaneView({
   pane,
   tabs,
   data,
+  git,
   active,
   lang,
   dropHint,
@@ -100,11 +118,20 @@ export function PaneView({
   onDelete,
   onPaste,
   onRefresh,
+  keys,
   update,
 }: Props) {
   const t = makeT(lang)
   const list = data ?? EMPTY_LIST
   const tab = tabs[pane.activeTabId]
+  /** Empty path = the drive overview, rendered from `drives` instead of a scan. */
+  const root = !tab?.path
+  /** Network locations are top-level rows: their root climbs straight back to the overview. */
+  const location = tab?.path
+    ? drives.find((drive) => drive.kind === 'location' && underPath(tab.path, drive.root))
+    : undefined
+  const atLocationRoot = !!location && tab?.path.toLowerCase() === location.root.toLowerCase()
+  const upTarget = atLocationRoot ? '' : parentPath(tab?.path ?? '')
   const scrollRef = useRef<HTMLDivElement>(null)
   const sectionRef = useRef<HTMLElement>(null)
   const [width, setWidth] = useState(0)
@@ -153,6 +180,9 @@ export function PaneView({
     [list.entries, list.selected],
   )
 
+  // Rebuilt only when a new status payload arrives, never per row.
+  const gitBadges = useMemo(() => buildGitBadges(git), [git])
+
   const activate = (entry: Entry) => {
     if (!tab) return
     const full = joinPath(tab.path, entry.name)
@@ -185,7 +215,7 @@ export function PaneView({
 
   const onKeyDown = (ev: React.KeyboardEvent) => {
     if (!tab) return
-    if (ev.altKey && ev.key === 'Enter') {
+    if (matchBinding(ev, keys.properties)) {
       ev.preventDefault()
       const names = list.selected.size
         ? Array.from(list.selected)
@@ -195,32 +225,35 @@ export function PaneView({
       if (names.length) onProperties(names)
       return
     }
-    if (ev.altKey && ev.key === 'ArrowLeft') {
+    if (matchBinding(ev, keys.back)) {
       ev.preventDefault()
       if (tab.histIdx > 0) onNavigate(tab.id, tab.history[tab.histIdx - 1])
       return
     }
-    if (ev.altKey && ev.key === 'ArrowRight') {
+    if (matchBinding(ev, keys.forward)) {
       ev.preventDefault()
       if (tab.histIdx < tab.history.length - 1) onNavigate(tab.id, tab.history[tab.histIdx + 1])
       return
     }
-    if (ev.altKey && ev.key === 'ArrowUp') {
+    // Alt+Up stays a fixed alias for the parent folder; older habits outlive rebinds.
+    if (matchBinding(ev, keys.up) || (ev.altKey && ev.key === 'ArrowUp')) {
       ev.preventDefault()
-      onNavigate(tab.id, parentPath(tab.path))
+      onNavigate(tab.id, upTarget)
       return
     }
-    if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'l') {
+    if (matchBinding(ev, keys.addressBar)) {
       ev.preventDefault()
       setAddressDraft(tab.path)
       return
     }
-    if ((ev.ctrlKey || ev.metaKey) && (ev.key === 'c' || ev.key === 'x')) {
+    // The drive overview holds no entries: skip selection, clipboard, and rename actions.
+    if (!tab.path) return
+    if (matchBinding(ev, keys.copy) || matchBinding(ev, keys.cut)) {
       ev.preventDefault()
-      onClipboard(ev.key === 'x')
+      onClipboard(matchBinding(ev, keys.cut))
       return
     }
-    if ((ev.ctrlKey || ev.metaKey) && ev.key === 'a') {
+    if (matchBinding(ev, keys.selectAll)) {
       ev.preventDefault()
       update(tab.id, (d) => ({ ...d, selected: new Set(view.map((e) => e.name)) }))
       return
@@ -240,42 +273,38 @@ export function PaneView({
       virtualizer.scrollToIndex(next, { align: 'auto' })
       return
     }
-    if (ev.key === 'Enter') {
+    if (matchBinding(ev, keys.open)) {
       const entry = view[list.anchor]
       if (entry) activate(entry)
-      return
-    }
-    if (ev.key === 'Backspace') {
-      ev.preventDefault()
-      onNavigate(tab.id, parentPath(tab.path))
       return
     }
     if (ev.key === 'Escape') {
       update(tab.id, (d) => ({ ...d, selected: new Set(), anchor: -1 }))
     }
-    if (ev.key === 'F2') {
+    if (matchBinding(ev, keys.rename)) {
       ev.preventDefault()
       const target = list.selected.size === 1 ? Array.from(list.selected)[0] : view[list.anchor]?.name
       if (target) onRename(target)
       return
     }
-    if (ev.key === 'Delete') {
+    // Shift+Delete shares the binding: the modifier picks permanent instead of Recycle Bin.
+    if (matchBinding(ev, keys.delete, { ignoreShift: true })) {
       if (!list.selected.size) return
       ev.preventDefault()
       onDelete(Array.from(list.selected), ev.shiftKey)
       return
     }
-    if (ev.key === 'F5') {
+    if (matchBinding(ev, keys.refresh)) {
       ev.preventDefault()
       onRefresh()
       return
     }
-    if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'v') {
+    if (matchBinding(ev, keys.paste)) {
       ev.preventDefault()
       onPaste()
       return
     }
-    if (ev.key === 'F10' && ev.shiftKey) {
+    if (matchBinding(ev, keys.contextMenu)) {
       const name = view[list.anchor]?.name
       const row = name ? sectionRef.current?.querySelector<HTMLElement>(`[data-row="${CSS.escape(name)}"]`) : null
       if (name && row) {
@@ -293,7 +322,17 @@ export function PaneView({
     }
   }
 
-  const parts = tab ? crumbs(tab.path) : []
+  // Inside a location the first crumb is the location itself, never the WebDAV share root.
+  const parts = location
+    ? [
+        { label: location.name, path: location.root },
+        ...crumbs(tab?.path ?? '')
+          .filter((crumb) => underPath(crumb.path, location.root))
+          .slice(1),
+      ]
+    : tab?.path
+      ? crumbs(tab.path)
+      : []
 
   return (
     <section
@@ -337,11 +376,19 @@ export function PaneView({
                     ? 'border-line bg-surface font-medium text-fg-strong'
                     : 'border-transparent text-muted hover:bg-surface-3'
                 } ${draggingTabId === id ? 'opacity-40' : ''}`}
-                title={tabState.path}
+                title={tabState.path || t('sidebar.thisPc')}
               >
-                <FileIcon name={tabState.path} dir path={tabState.path} />
+                {tabState.path ? (
+                  <FileIcon name={tabState.path} dir path={tabState.path} />
+                ) : (
+                  <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 shrink-0 text-muted-2" fill="currentColor">
+                    <path d="M2 5.5C2 4.7 2.7 4 3.5 4h9c.8 0 1.5.7 1.5 1.5v5c0 .8-.7 1.5-1.5 1.5h-9C2.7 12 2 11.3 2 10.5v-5Zm2 4.3h8v.7H4v-.7Z" />
+                  </svg>
+                )}
                 <span className="max-w-[150px] truncate">
-                  {tabState.path.split('\\').filter(Boolean).pop() ?? tabState.path}
+                  {tabState.path
+                    ? (tabState.path.split('\\').filter(Boolean).pop() ?? tabState.path)
+                    : t('sidebar.thisPc')}
                 </span>
                 <button
                   type="button"
@@ -399,8 +446,8 @@ export function PaneView({
         <button
           type="button"
           title={t('nav.up')}
-          onClick={() => tab && onNavigate(tab.id, parentPath(tab.path))}
-          disabled={!tab || parentPath(tab.path) === tab.path}
+          onClick={() => tab && onNavigate(tab.id, upTarget)}
+          disabled={!tab || upTarget === tab.path}
           className="grid h-6 w-6 place-items-center rounded text-muted hover:bg-surface-3 disabled:opacity-30"
         >
           <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.6">
@@ -423,7 +470,9 @@ export function PaneView({
           }}
           className="ml-1 flex h-6 shrink-0 items-center gap-0.5 rounded border border-line bg-surface-2 px-1.5 text-[11.5px] leading-none text-fg hover:bg-surface-3"
         >
-          <span className="font-medium">{driveRoot(tab?.path)}</span>
+          <span className="font-medium">
+            {location ? location.name : root ? t('sidebar.thisPc') : driveRoot(tab?.path)}
+          </span>
           <svg viewBox="0 0 16 16" className="h-3 w-3 text-muted-2" fill="none" stroke="currentColor" strokeWidth="1.6">
             <path d="m4 6.5 4 4 4-4" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
@@ -441,7 +490,8 @@ export function PaneView({
                 ev.preventDefault()
                 const next = addressDraft.trim()
                 setAddressDraft(null)
-                if (next && tab) onNavigate(tab.id, next)
+                // "c:" (no slash) must land on the drive root, not on a relative path.
+                if (next && tab) onNavigate(tab.id, /^[a-zA-Z]:$/.test(next) ? `${next}\\` : next)
               } else if (ev.key === 'Escape') {
                 ev.preventDefault()
                 setAddressDraft(null)
@@ -451,6 +501,11 @@ export function PaneView({
           />
         ) : (
         <div className="no-bar mx-0.5 flex h-6 min-w-0 flex-1 items-center overflow-x-auto overflow-y-hidden rounded border border-line bg-surface-2 px-1 text-[11.5px] leading-none">
+          {root && (
+            <span className="shrink-0 px-1 py-1 text-[11.5px] font-medium leading-none text-fg-strong">
+              {t('sidebar.thisPc')}
+            </span>
+          )}
           {parts.map((part, i) => (
             <div key={part.path} className="flex shrink-0 items-center">
               {i > 0 && <span className="px-0.5 text-muted-2">›</span>}
@@ -468,7 +523,7 @@ export function PaneView({
         </div>
         )}
 
-        {showFilter && (
+        {showFilter && !root && (
           <input
             value={list.filter}
             onChange={(e) => tab && update(tab.id, (d) => ({ ...d, filter: e.target.value }))}
@@ -491,18 +546,20 @@ export function PaneView({
         </button>
       </div>
 
-      <div
-        className="grid h-7 shrink-0 items-center border-b border-line bg-surface-2 text-muted"
-        style={{ gridTemplateColumns: grid }}
-      >
-        <HeaderCell label={t('list.name')} k="name" sort={pane.sort} onSort={changeSort} align="left" />
-        {showSize && (
-          <HeaderCell label={t('list.size')} k="size" sort={pane.sort} onSort={changeSort} align="right" />
-        )}
-        {showTime && (
-          <HeaderCell label={t('list.mtime')} k="mtime" sort={pane.sort} onSort={changeSort} align="left" />
-        )}
-      </div>
+      {!root && (
+        <div
+          className="grid h-7 shrink-0 items-center border-b border-line bg-surface-2 text-muted"
+          style={{ gridTemplateColumns: grid }}
+        >
+          <HeaderCell label={t('list.name')} k="name" sort={pane.sort} onSort={changeSort} align="left" />
+          {showSize && (
+            <HeaderCell label={t('list.size')} k="size" sort={pane.sort} onSort={changeSort} align="right" />
+          )}
+          {showTime && (
+            <HeaderCell label={t('list.mtime')} k="mtime" sort={pane.sort} onSort={changeSort} align="left" />
+          )}
+        </div>
+      )}
 
       <div
         ref={scrollRef}
@@ -521,7 +578,7 @@ export function PaneView({
         }}
         className="relative min-h-0 flex-1 overflow-auto outline-none"
       >
-        {list.error && (
+        {list.error && !root && (
           <div className="m-3 flex items-start gap-2 rounded-md border border-red-300 bg-red-50 p-2 text-red-800 dark:border-red-900 dark:bg-red-950/50 dark:text-red-200">
             <div className="font-mono text-[10px] font-semibold">{list.error.code}</div>
             <div className="min-w-0 flex-1 break-words text-[11px]">
@@ -537,7 +594,31 @@ export function PaneView({
           </div>
         )}
 
-        <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
+        {root && (
+          <div className="py-0.5">
+            {drives.map((drive) => (
+              <div
+                key={`${drive.kind}:${drive.name}`}
+                data-drive={drive.root}
+                onDoubleClick={() =>
+                  tab &&
+                  (isFsPath(drive.root)
+                    ? onNavigate(tab.id, drive.root)
+                    : void openPath(drive.root).catch(() => undefined))
+                }
+                onContextMenu={(ev) => ev.preventDefault()}
+                title={drive.root}
+                className="flex h-7 cursor-default items-center gap-1.5 border-b border-line/60 px-1.5 text-[12.5px] hover:bg-surface-3"
+              >
+                <FileIcon name={drive.name} dir path={drive.root} />
+                <span className="truncate font-medium text-fg-strong">{drive.name}</span>
+                <span className="shrink-0 text-[11px] text-muted-2">{driveKindLabel(t, drive.kind)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {!root && <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
           {virtualizer.getVirtualItems().map((vi) => {
             const entry = view[vi.index]
             if (!entry) return null
@@ -565,6 +646,7 @@ export function PaneView({
                 <div className="flex min-w-0 items-center gap-1.5 pl-1.5">
                   <FileIcon name={entry.name} dir={dir} path={joinPath(tab.path, entry.name)} />
                   <span className={`truncate ${dir ? 'font-medium text-fg-strong' : ''}`}>{entry.name}</span>
+                  <GitBadge name={entry.name} dir={dir} badges={gitBadges} />
                 </div>
                 {showSize && (
                   <div className="tabular pr-1.5 text-right text-[11px] text-muted">
@@ -577,9 +659,9 @@ export function PaneView({
               </div>
             )
           })}
-        </div>
+        </div>}
 
-        {!list.error && !view.length && (
+        {!root && !list.error && !view.length && (
           <div className="grid h-full place-items-center text-center text-muted-2">
             {list.loading ? (
               <div className="flex flex-col items-center gap-2">
@@ -602,7 +684,7 @@ export function PaneView({
         className="flex h-6 shrink-0 items-center justify-between border-t border-line bg-surface-2 px-2 text-[10.5px] text-muted"
       >
         <div className="flex items-center gap-2">
-          <span>{t('list.items', { count: view.length })}</span>
+          <span>{root ? t('list.drives', { count: drives.length }) : t('list.items', { count: view.length })}</span>
           {list.filter && list.entries.length !== view.length && (
             <span>{t('list.total', { count: list.entries.length })}</span>
           )}
@@ -630,6 +712,31 @@ export function PaneView({
       )}
     </section>
   )
+}
+
+/** Porcelain letter for a changed entry, or a dot when a folder holds changes below it. */
+function GitBadge({
+  name,
+  dir,
+  badges,
+}: {
+  name: string
+  dir: boolean
+  badges: ReturnType<typeof buildGitBadges>
+}) {
+  const key = name.toLowerCase()
+  const code = badges.changed.get(key)
+  if (code) {
+    return (
+      <span title={code} className={`shrink-0 text-[10px] font-semibold ${gitTone(code)}`}>
+        {code}
+      </span>
+    )
+  }
+  if (dir && badges.dirtyDirs.has(key)) {
+    return <span title="git" className="h-1.5 w-1.5 shrink-0 rounded-full bg-blue-500/70" />
+  }
+  return null
 }
 
 function HeaderCell({

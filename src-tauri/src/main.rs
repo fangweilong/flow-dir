@@ -4,6 +4,7 @@ mod clipboard;
 mod error;
 mod folder_picker;
 mod fs;
+mod git;
 mod icons;
 mod layout;
 mod ops;
@@ -32,6 +33,11 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 const BATCH_SIZE: usize = 200;
+/// Per-node cap for the sidebar tree.
+const TREE_LIMIT: usize = 1000;
+/// Records read before sorting: a folder such as `WinSxS` has tens of thousands of
+/// subfolders and only the first `TREE_LIMIT` names are ever sent.
+const TREE_SCAN_LIMIT: usize = 5_000;
 
 type Scans = Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>;
 
@@ -204,8 +210,34 @@ async fn pick_folder(
 }
 
 #[tauri::command]
-fn drives() -> Vec<fs::Drive> {
-    fs::drives()
+async fn drives() -> Vec<fs::Drive> {
+    // Reads `%APPDATA%` and parses shell links, which can sit on a redirected share.
+    tauri::async_runtime::spawn_blocking(fs::drives)
+        .await
+        .unwrap_or_default()
+}
+
+/// Repository status for the folder, empty when it is not a work tree or git is absent.
+#[tauri::command]
+async fn git_status(path: String) -> Result<git::GitStatus, ApiError> {
+    tauri::async_runtime::spawn_blocking(move || git::status(&path))
+        .await
+        .map_err(|e| ApiError::new("GIT_TASK", e.to_string()))
+}
+
+/// Subdirectory names of one folder, for the sidebar tree. Capped so a pathological
+/// folder cannot flood the panel; the tree only asks for expanded nodes.
+#[tauri::command]
+async fn tree_dirs(path: String, hidden: bool) -> Result<Vec<String>, ApiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let cancel = AtomicBool::new(false);
+        let mut entries = fs::enumerate_dirs(&path, hidden, TREE_SCAN_LIMIT, &cancel)?;
+        fs::sort_entries(&mut entries, "name", "asc");
+        entries.truncate(TREE_LIMIT);
+        Ok(entries.into_iter().map(|entry| entry.name).collect())
+    })
+    .await
+    .map_err(|e| ApiError::new("TREE_TASK", e.to_string()))?
 }
 
 #[tauri::command]
@@ -229,13 +261,24 @@ fn layout_preserve(app: tauri::AppHandle) -> Result<String, ApiError> {
 }
 
 #[tauri::command]
-fn settings_load(app: tauri::AppHandle) -> settings::Settings {
-    settings::load(&app)
+fn settings_load(
+    app: tauri::AppHandle,
+    cache: tauri::State<'_, settings::SettingsCache>,
+) -> settings::Settings {
+    let settings = settings::load(&app);
+    cache.set(settings.clone());
+    settings
 }
 
 #[tauri::command]
-fn settings_save(app: tauri::AppHandle, settings: settings::Settings) -> Result<(), ApiError> {
-    settings::save(&app, &settings)
+fn settings_save(
+    app: tauri::AppHandle,
+    cache: tauri::State<'_, settings::SettingsCache>,
+    settings: settings::Settings,
+) -> Result<(), ApiError> {
+    settings::save(&app, &settings)?;
+    cache.set(settings);
+    Ok(())
 }
 
 #[tauri::command]
@@ -347,9 +390,32 @@ struct AppInfo {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn preview_info(path: String, width: u32, bg: String) -> Result<preview::PreviewInfo, ApiError> {
+async fn preview_info(
+    app: tauri::AppHandle,
+    cache: tauri::State<'_, settings::SettingsCache>,
+    path: String,
+    width: u32,
+    bg: String,
+) -> Result<preview::PreviewInfo, ApiError> {
     let bg = u32::from_str_radix(bg.trim_start_matches('#'), 16).unwrap_or(0xffffff);
-    preview::info(path, width.clamp(64, 2048), bg)
+    // Archive central directories and version resources can sit on a network share:
+    // never inspect a file on the IPC thread.
+    let external = cache.get(&app).external_preview.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        preview::info(path, width.clamp(64, 2048), bg, &external)
+    })
+    .await
+    .map_err(|e| ApiError::new("THREAD", e.to_string()))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn preview_external(
+    app: tauri::AppHandle,
+    cache: tauri::State<'_, settings::SettingsCache>,
+    path: String,
+) -> Result<(), ApiError> {
+    let settings = cache.get(&app);
+    preview::launch_external(&path, &settings.external_preview)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -521,6 +587,7 @@ fn main() {
         .manage(ops::OpState::default())
         .manage(watch::Watchers::default())
         .manage(preview::PreviewCache::default())
+        .manage(settings::SettingsCache::default())
         .manage(search::SearchState::default())
         .register_asynchronous_uri_scheme_protocol("fd", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
@@ -538,6 +605,7 @@ fn main() {
             store::migrate_legacy(app.handle());
             update::cleanup_leftovers();
             let saved = settings::load(app.handle());
+            app.state::<settings::SettingsCache>().set(saved.clone());
             // The window is built here instead of in tauri.conf.json because the WebView2
             // browser arguments (GPU on/off) are fixed when the browser process starts.
             let window = tauri::WebviewWindowBuilder::new(
@@ -601,6 +669,8 @@ fn main() {
             list_dir,
             cancel_dir,
             drives,
+            tree_dirs,
+            git_status,
             quick_access,
             open_path,
             explorer_open,
@@ -623,6 +693,7 @@ fn main() {
             shell_menu_show,
             titlebar_menu,
             preview_info,
+            preview_external,
             search_start,
             search_cancel,
             everything_status,

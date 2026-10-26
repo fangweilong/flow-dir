@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { PointerEvent as ReactPointerEvent } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import iconUrl from './assets/icon.png'
@@ -11,6 +12,7 @@ import { PromptDialog } from './PromptDialog'
 import { PreviewPanel } from './PreviewPanel'
 import { SearchOverlay } from './SearchOverlay'
 import { SettingsModal } from './SettingsModal'
+import { SidebarTree } from './SidebarTree'
 import {
   cancelDir,
   clipboardCopy,
@@ -24,24 +26,41 @@ import {
   openPath,
   opCancel,
   opStart,
+  previewExternal,
   previewInfo,
   quickAccess,
   setAppTheme,
   settingsLoad,
   settingsSave,
   shellMenuShow,
-  titlebarMenu,
   shellProperties,
+  titlebarMenu,
+  treeDirs,
   updateCheck,
+  gitStatus,
   watchClear,
   watchSet,
 } from './api'
 import { EMPTY_LIST, emptyList } from './types'
-import type { Drive, Entry, Lang, ListData, OpKind, OpProgress, Place, PreviewInfo, SortState, UpdateStatus } from './types'
-import { makeT } from './i18n'
+import type {
+  Drive,
+  Entry,
+  GitStatus,
+  Lang,
+  ListData,
+  OpKind,
+  OpProgress,
+  Place,
+  PreviewInfo,
+  SortState,
+  UpdateStatus,
+} from './types'
+import { driveKindLabel, makeT } from './i18n'
 import { DEFAULT_SETTINGS, fromSnapshot, toSnapshot } from './persist'
 import type { Settings } from './persist'
-import { isDir, joinPath } from './paths'
+import { isDir, isFsPath, joinPath, pathKey, treeChain } from './paths'
+import { centerOffset } from './scroll'
+import { formatBinding, isTextInput, matchBinding, resolveShortcuts } from './shortcuts'
 import {
   DEFAULT_SORT,
   adoptIds,
@@ -55,6 +74,9 @@ import {
 } from './workspace'
 import type { DropMode, Node, PaneState, TabState, Workspace } from './workspace'
 
+/** Folders whose full change list stays cached; older ones refetch on demand. */
+const GIT_CACHE_LIMIT = 64
+
 type DragState = {
   tabId: string
   fromPane: string
@@ -65,6 +87,12 @@ type DragState = {
 }
 
 type SplitNode = Extract<Node, { t: 'split' }>
+
+/** Below these widths a release collapses the panel instead of leaving it unusable. */
+const SIDEBAR_MIN = 140
+const PREVIEW_MIN = 220
+/** Splitter width; the centre-pane half-width cap must account for it. */
+const GUTTER = 3
 
 export default function App() {
   const [ws, setWs] = useState<Workspace | null>(null)
@@ -77,6 +105,8 @@ export default function App() {
   const [updateAvailable, setUpdateAvailable] = useState<string | null>(null)
   const [searchOpen, setSearchOpen] = useState(false)
   const [previewOpen, setPreviewOpen] = useState(true)
+  const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SETTINGS.sidebarWidth)
+  const [previewWidth, setPreviewWidth] = useState(DEFAULT_SETTINGS.previewWidth)
   const [maximized, setMaximized] = useState(false)
   useEffect(() => {
     // Alt+Space normally opens the system menu from the caption we no longer have.
@@ -109,8 +139,16 @@ export default function App() {
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null)
   const [prompt, setPrompt] = useState<{ title: string; initial: string; submit: (value: string) => void } | null>(null)
   const [ops, setOps] = useState<Record<string, OpProgress>>({})
+  /** Sidebar tree: expanded folders (key → display path) and their cached children. */
+  const [treeOpen, setTreeOpen] = useState<Record<string, string>>({})
+  const [treeNodes, setTreeNodes] = useState<Record<string, string[]>>({})
+  /** `git status` per folder, keyed by {@link pathKey}; empty repo = no badges. */
+  const [gitByDir, setGitByDir] = useState<Record<string, GitStatus>>({})
+  /** Bumped by invalidation so the fetch effect re-arms even if nothing was cached yet. */
+  const [gitEpoch, setGitEpoch] = useState(0)
 
   const wsRef = useRef<Workspace | null>(null)
+  const layoutRef = useRef<HTMLDivElement>(null)
   const settingsRef = useRef<Settings>(DEFAULT_SETTINGS)
   const gens = useRef<Record<string, number>>({})
   const paneEls = useRef(new Map<string, HTMLDivElement>())
@@ -121,9 +159,20 @@ export default function App() {
   const toastTimer = useRef<number | null>(null)
   const notifiedUpdate = useRef<string | null>(null)
   const previewRequest = useRef(0)
+  const treePending = useRef(new Set<string>())
+  /** Per-folder request generation; a reply from an older mode is dropped. */
+  const treeGeneration = useRef(new Map<string, number>())
+  const treeCounter = useRef(0)
+  const treeOpenRef = useRef<Record<string, string>>({})
+  const gitPending = useRef(new Set<string>())
+  /** Bumped on invalidation so a reply that started earlier is discarded. */
+  const gitSeq = useRef(new Map<string, number>())
+  const sidebarRef = useRef<HTMLElement | null>(null)
+  const treeNodesRef = useRef<Record<string, string[]>>({})
 
   const lang: Lang = settings.language
   const t = useMemo(() => makeT(lang), [lang])
+  const keys = useMemo(() => resolveShortcuts(settings.shortcuts), [settings.shortcuts])
 
   useEffect(() => {
     wsRef.current = ws
@@ -133,13 +182,163 @@ export default function App() {
     settingsRef.current = settings
   }, [settings])
 
+  /**
+   * Fetches one tree node. Callers only ask for folders that are open, so the cache
+   * never grows with folders the user never looked at; a repeated request while one
+   * is in flight is dropped instead of queueing.
+   */
+  const loadTree = useCallback((path: string, force = false) => {
+    const key = pathKey(path)
+    if (!isFsPath(path) || treePending.current.has(key)) return
+    if (!force && treeNodesRef.current[key]) return
+    treePending.current.add(key)
+    const generation = ++treeCounter.current
+    treeGeneration.current.set(key, generation)
+    const reply = (names: string[]) => {
+      if (treeGeneration.current.get(key) !== generation) return
+      treeNodesRef.current = { ...treeNodesRef.current, [key]: names }
+      setTreeNodes(treeNodesRef.current)
+    }
+    treeDirs(path, settingsRef.current.showHidden)
+      .then(reply)
+      .catch(() => reply([]))
+      .finally(() => {
+        if (treeGeneration.current.get(key) === generation) treePending.current.delete(key)
+      })
+  }, [])
+
+  /** Drops one folder's children; open nodes refetch on the next pass. */
+  const invalidateTree = useCallback((path: string) => {
+    const key = pathKey(path)
+    if (!(key in treeNodesRef.current)) return
+    const next = { ...treeNodesRef.current }
+    delete next[key]
+    treeNodesRef.current = next
+    setTreeNodes(next)
+  }, [])
+
+  /**
+   * Expanding paints the cache first and refreshes behind it, so a long-unseen folder
+   * never flashes empty and never shows a folder that was deleted meanwhile.
+   */
+  const toggleTree = useCallback(
+    (path: string) => {
+      const key = pathKey(path)
+      const opening = !(key in treeOpenRef.current)
+      if (opening) treeOpenRef.current = { ...treeOpenRef.current, [key]: path }
+      setTreeOpen((prev) => {
+        if (!(key in prev)) return { ...prev, [key]: path }
+        const next = { ...prev }
+        delete next[key]
+        return next
+      })
+      if (opening) loadTree(path, true)
+    },
+    [loadTree],
+  )
+
+  // Single funnel for fetches: expanding, an invalidation and the hidden-files toggle
+  // all just leave open nodes without children, and this pass fills the gaps.
+  useEffect(() => {
+    treeOpenRef.current = treeOpen
+    if (!settings.sidebarOpen) return
+    for (const [key, path] of Object.entries(treeOpen)) {
+      if (!treeNodes[key]) loadTree(path)
+    }
+  }, [settings.sidebarOpen, treeOpen, treeNodes, loadTree])
+
+  useEffect(() => {
+    // Replies requested under the previous hidden mode must not repopulate the cleared
+    // cache, so bump the generation of every folder that is cached or in flight.
+    for (const key of new Set([...Object.keys(treeNodesRef.current), ...treePending.current])) {
+      treeGeneration.current.set(key, ++treeCounter.current)
+    }
+    treeNodesRef.current = {}
+    treePending.current.clear()
+    setTreeNodes({})
+  }, [settings.showHidden])
+
+  /** One `git status` per visited folder; failures cache as "no repository". */
+  const loadGit = useCallback((dir: string) => {
+    const key = pathKey(dir)
+    if (!dir || gitPending.current.has(key)) return
+    const seq = (gitSeq.current.get(key) ?? 0) + 1
+    gitSeq.current.set(key, seq)
+    gitPending.current.add(key)
+    const store = (status: GitStatus) =>
+      setGitByDir((prev) => {
+        if (gitSeq.current.get(key) !== seq) return prev
+        const next = { ...prev, [key]: status }
+        // Bound the cache; entries are pruned to the folder, but folders are unbounded.
+        const keys = Object.keys(next)
+        for (const stale of keys.slice(0, Math.max(0, keys.length - GIT_CACHE_LIMIT))) delete next[stale]
+        return next
+      })
+    gitStatus(dir)
+      .then(store)
+      .catch(() => store({ root: '', files: [], dirs: [] }))
+      .finally(() => {
+        if (gitSeq.current.get(key) === seq) gitPending.current.delete(key)
+      })
+  }, [])
+
+  /** Drops cached status (and any reply still in flight) so the next pass re-runs git. */
+  const invalidateGit = useCallback((dir: string) => {
+    const key = pathKey(dir)
+    gitSeq.current.set(key, (gitSeq.current.get(key) ?? 0) + 1)
+    gitPending.current.delete(key)
+    setGitEpoch((epoch) => epoch + 1)
+    setGitByDir((prev) => {
+      if (!(key in prev)) return prev
+      const next = { ...prev }
+      delete next[key]
+      return next
+    })
+  }, [])
+
+  // Badges are cosmetic: wait out fast arrow-key scrolling so holding a key does not
+  // spawn one `git status` per folder passed through.
+  useEffect(() => {
+    if (!ws) return
+    const missing: string[] = []
+    for (const pane of Object.values(ws.panes)) {
+      const tab = ws.tabs[pane.activeTabId]
+      if (tab?.path && !(pathKey(tab.path) in gitByDir)) missing.push(tab.path)
+    }
+    if (!missing.length) return
+    const timer = window.setTimeout(() => {
+      for (const dir of missing) loadGit(dir)
+    }, 150)
+    return () => window.clearTimeout(timer)
+  }, [ws, gitByDir, gitEpoch, loadGit])
+
   const showToast = useCallback((text: string) => {
     setToast(text)
     if (toastTimer.current) window.clearTimeout(toastTimer.current)
     toastTimer.current = window.setTimeout(() => setToast(null), 2200)
   }, [])
 
+  /** Shared by F3 and the preview panel button; the backend owns the per-extension rules. */
+  const openExternalPreview = useCallback(
+    (target: string) => {
+      void previewExternal(target).catch((err: unknown) => {
+        const code = err && typeof err === 'object' && 'code' in err ? String(err.code) : ''
+        showToast(t(code === 'NO_RULE' ? 'preview.externalMissing' : 'preview.externalFailed', { code }))
+      })
+    },
+    [showToast, t],
+  )
+
   const startScan = useCallback((tabId: string, path: string, sort: SortState, hidden: boolean) => {
+    // The drive overview is rendered from the drive list, not from a directory scan:
+    // retire the previous folder's scan so it stops enumerating and cannot write into
+    // this tab any more.
+    if (!path) {
+      gens.current[tabId] = (gens.current[tabId] ?? 0) + 1
+      void cancelDir(tabId).catch(() => undefined)
+      setListData((prev) => ({ ...prev, [tabId]: { ...emptyList(), loading: false } }))
+      return
+    }
     const gen = (gens.current[tabId] ?? 0) + 1
     gens.current[tabId] = gen
     const acc: Entry[] = []
@@ -193,8 +392,11 @@ export default function App() {
         layoutLoad().catch(() => null),
       ])
       if (cancelled) return
-      setSettings({ ...DEFAULT_SETTINGS, ...savedSettings })
-      setPreviewOpen(savedSettings.previewOpen ?? true)
+      const merged = { ...DEFAULT_SETTINGS, ...savedSettings }
+      setSettings(merged)
+      setPreviewOpen(merged.previewOpen)
+      setSidebarWidth(merged.sidebarWidth >= SIDEBAR_MIN ? merged.sidebarWidth : DEFAULT_SETTINGS.sidebarWidth)
+      setPreviewWidth(merged.previewWidth >= PREVIEW_MIN ? merged.previewWidth : DEFAULT_SETTINGS.previewWidth)
       setPlaces(placeList)
       setDriveList(driveListResult)
       const home = placeList[0]?.path ?? 'C:\\'
@@ -312,7 +514,7 @@ export default function App() {
     const current = new Map<string, string>()
     for (const pane of Object.values(ws.panes)) {
       const tab = ws.tabs[pane.activeTabId]
-      if (tab) current.set(pane.id, tab.path)
+      if (tab?.path) current.set(pane.id, tab.path)
     }
     for (const [paneId, path] of current) {
       if (watched.current.get(paneId) !== path) {
@@ -343,6 +545,8 @@ export default function App() {
           if (!pane || !tab) return
           if (watched.current.get(paneId) !== tab.path) return
           startScan(tab.id, tab.path, pane.sort, pane.hidden)
+          invalidateTree(tab.path)
+          invalidateGit(tab.path)
         }, 250),
       )
     }).then((fn) => {
@@ -355,12 +559,101 @@ export default function App() {
       for (const timer of rescanTimers.current.values()) window.clearTimeout(timer)
       rescanTimers.current.clear()
     }
-  }, [startScan])
+  }, [invalidateGit, invalidateTree, startScan])
 
   const updateSettings = useCallback((next: Settings) => {
     setSettings(next)
     void settingsSave(next).catch(() => undefined)
   }, [])
+
+  /** Ctrl+B and the caption button share this so a collapsed drag reopens at a usable width. */
+  const toggleSidebar = useCallback(() => {
+    const current = settingsRef.current
+    if (current.sidebarOpen) {
+      updateSettings({ ...current, sidebarOpen: false })
+      return
+    }
+    const width = Math.max(SIDEBAR_MIN, current.sidebarWidth)
+    setSidebarWidth(width)
+    updateSettings({ ...current, sidebarOpen: true, sidebarWidth: width })
+  }, [updateSettings])
+
+  // The centre panes keep at least half of the layout: each side panel is capped at
+  // `50% - the other panel`, so opening both still leaves the panes the majority.
+  const startSidebarResize = useCallback(
+    (ev: ReactPointerEvent<HTMLDivElement>) => {
+      ev.preventDefault()
+      const rect = layoutRef.current?.getBoundingClientRect()
+      if (!rect) return
+      const startX = ev.clientX
+      const startWidth = sidebarWidth
+      const max = Math.max(
+        0,
+        rect.width / 2 - GUTTER * (previewOpen ? 2 : 1) - (previewOpen ? previewWidth : 0),
+      )
+      let next = startWidth
+      let moved = false
+      const move = (e: PointerEvent) => {
+        moved = true
+        next = Math.min(max, Math.max(0, startWidth + e.clientX - startX))
+        setSidebarWidth(next)
+      }
+      const end = () => {
+        window.removeEventListener('pointermove', move)
+        window.removeEventListener('pointerup', end)
+        window.removeEventListener('pointercancel', end)
+        if (!moved) return
+        if (next < Math.min(SIDEBAR_MIN, max)) {
+          setSidebarWidth(settingsRef.current.sidebarWidth)
+          updateSettings({ ...settingsRef.current, sidebarOpen: false })
+        } else {
+          updateSettings({ ...settingsRef.current, sidebarWidth: Math.round(next) })
+        }
+      }
+      window.addEventListener('pointermove', move)
+      window.addEventListener('pointerup', end)
+      window.addEventListener('pointercancel', end)
+    },
+    [sidebarWidth, previewOpen, previewWidth, updateSettings],
+  )
+
+  const startPreviewResize = useCallback(
+    (ev: ReactPointerEvent<HTMLDivElement>) => {
+      ev.preventDefault()
+      const rect = layoutRef.current?.getBoundingClientRect()
+      if (!rect) return
+      const startX = ev.clientX
+      const startWidth = previewWidth
+      const sidebarOpen = settingsRef.current.sidebarOpen
+      const max = Math.max(
+        0,
+        rect.width / 2 - GUTTER * (sidebarOpen ? 2 : 1) - (sidebarOpen ? sidebarWidth : 0),
+      )
+      let next = startWidth
+      let moved = false
+      const move = (e: PointerEvent) => {
+        moved = true
+        next = Math.min(max, Math.max(0, startWidth + startX - e.clientX))
+        setPreviewWidth(next)
+      }
+      const end = () => {
+        window.removeEventListener('pointermove', move)
+        window.removeEventListener('pointerup', end)
+        window.removeEventListener('pointercancel', end)
+        if (!moved) return
+        if (next < Math.min(PREVIEW_MIN, max)) {
+          setPreviewWidth(settingsRef.current.previewWidth)
+          setPreviewOpen(false)
+        } else {
+          updateSettings({ ...settingsRef.current, previewWidth: Math.round(next) })
+        }
+      }
+      window.addEventListener('pointermove', move)
+      window.addEventListener('pointerup', end)
+      window.addEventListener('pointercancel', end)
+    },
+    [previewWidth, sidebarWidth, updateSettings],
+  )
 
   const update = useCallback((tabId: string, fn: (d: ListData) => ListData) => {
     setListData((prev) => ({ ...prev, [tabId]: fn(prev[tabId] ?? EMPTY_LIST) }))
@@ -392,6 +685,23 @@ export default function App() {
     [startScan],
   )
 
+  /** Tree rows: folders navigate the active tab, non-path locations go to the shell. */
+  const openTreePath = useCallback(
+    (path: string) => {
+      const current = wsRef.current
+      if (!current) return
+      const pane = current.panes[current.activePaneId]
+      const tab = pane ? current.tabs[pane.activeTabId] : undefined
+      if (!tab) return
+      if (!isFsPath(path)) {
+        void openPath(path).catch(() => undefined)
+        return
+      }
+      navigate(tab.id, path)
+    },
+    [navigate],
+  )
+
   const setPaneSort = useCallback(
     (paneId: string, sort: SortState) => {
       const current = wsRef.current
@@ -418,10 +728,9 @@ export default function App() {
   )
 
   const newTab = useCallback((paneId: string) => {
-    const current = wsRef.current
-    if (!current) return
-    const pane = current.panes[paneId]
-    const path = current.tabs[pane.activeTabId]?.path ?? homeRef.current
+    if (!wsRef.current) return
+    // New tabs open on the drive overview (C:, D:, …), never inherit the current folder.
+    const path = ''
     const tabId = uid('t')
     setWs((prev) =>
       prev
@@ -456,12 +765,11 @@ export default function App() {
     const single = paneIds(current.root).length === 1
     if (!remaining.length && single) {
       const freshId = uid('t')
-      const home = homeRef.current
       setWs((prev) =>
         prev
           ? {
               ...prev,
-              tabs: { ...prev.tabs, [freshId]: { id: freshId, path: home, history: [home], histIdx: 0 } },
+              tabs: { ...prev.tabs, [freshId]: { id: freshId, path: '', history: [''], histIdx: 0 } },
               panes: { ...prev.panes, [paneId]: { ...prev.panes[paneId], tabIds: [freshId], activeTabId: freshId } },
             }
           : prev,
@@ -685,11 +993,20 @@ export default function App() {
   const refreshPanes = useCallback(() => {
     const current = wsRef.current
     if (!current) return
+    let overview = false
     for (const pane of Object.values(current.panes)) {
       const tab = current.tabs[pane.activeTabId]
-      if (tab) startScan(tab.id, tab.path, pane.sort, pane.hidden)
+      if (!tab) continue
+      // The overview has no scan to restart; re-enumerate the drives instead.
+      if (!tab.path) overview = true
+      else {
+        startScan(tab.id, tab.path, pane.sort, pane.hidden)
+        invalidateTree(tab.path)
+        invalidateGit(tab.path)
+      }
     }
-  }, [startScan])
+    if (overview) void drives().then(setDriveList).catch(() => undefined)
+  }, [invalidateGit, invalidateTree, startScan])
 
   const runOp = useCallback(
     (kind: OpKind, sources: string[], options?: { targetDir?: string; newName?: string; permanent?: boolean }) => {
@@ -742,7 +1059,7 @@ export default function App() {
     if (!current) return []
     const pane = current.panes[paneId]
     const tab = pane ? current.tabs[pane.activeTabId] : undefined
-    if (!tab) return []
+    if (!tab?.path) return []
     return names.map((name) => joinPath(tab.path, name))
   }, [])
 
@@ -771,7 +1088,7 @@ export default function App() {
       if (!current) return
       const pane = current.panes[paneId]
       const tab = pane ? current.tabs[pane.activeTabId] : undefined
-      if (!tab) return
+      if (!tab?.path) return
       const target = joinPath(tab.path, name)
       setPrompt({
         title: t('dialog.renameTitle'),
@@ -788,7 +1105,7 @@ export default function App() {
       if (!current) return
       const pane = current.panes[paneId]
       const tab = pane ? current.tabs[pane.activeTabId] : undefined
-      if (!tab) return
+      if (!tab?.path) return
       setPrompt({
         title: t('dialog.newFolderTitle'),
         initial: '',
@@ -804,7 +1121,7 @@ export default function App() {
       if (!current) return
       const pane = current.panes[paneId]
       const tab = pane ? current.tabs[pane.activeTabId] : undefined
-      if (!tab) return
+      if (!tab?.path) return
       void clipboardPaste()
         .then((clip) => {
           if (!clip.paths.length) {
@@ -977,28 +1294,35 @@ export default function App() {
       const tab = pane ? current.tabs[pane.activeTabId] : undefined
       if (!tab) return
       const data = listData[tab.id]
-      const items: MenuItem[] = [
-        { kind: 'item', label: t('menu.newFolder'), onSelect: () => createFolder(paneId) },
-        { kind: 'item', label: t('menu.paste'), hint: 'Ctrl+V', onSelect: () => pasteInto(paneId) },
-        { kind: 'sep' },
-        { kind: 'item', label: t('menu.refresh'), hint: 'F5', onSelect: () => refreshPanes() },
-        {
-          kind: 'item',
-          label: t('menu.selectAll'),
-          hint: 'Ctrl+A',
-          onSelect: () => {
-            const all = (data?.entries ?? []).map((entry) => entry.name)
-            update(tab.id, (d) => ({ ...d, selected: new Set(all), anchor: 0 }))
-          },
-        },
-        { kind: 'sep' },
-        { kind: 'item', label: t('menu.openInExplorer'), onSelect: () => void explorerOpen(tab.path).catch(() => undefined) },
-        {
-          kind: 'item',
-          label: pane.hidden ? t('list.hideHidden') : t('list.showHidden'),
-          onSelect: () => toggleHidden(paneId),
-        },
-      ]
+      // The drive overview has no folder to create, paste, or reveal in.
+      const items: MenuItem[] = tab.path
+        ? [
+            { kind: 'item', label: t('menu.newFolder'), onSelect: () => createFolder(paneId) },
+            { kind: 'item', label: t('menu.paste'), hint: 'Ctrl+V', onSelect: () => pasteInto(paneId) },
+            { kind: 'sep' },
+            { kind: 'item', label: t('menu.refresh'), hint: 'F5', onSelect: () => refreshPanes() },
+            {
+              kind: 'item',
+              label: t('menu.selectAll'),
+              hint: 'Ctrl+A',
+              onSelect: () => {
+                const all = (data?.entries ?? []).map((entry) => entry.name)
+                update(tab.id, (d) => ({ ...d, selected: new Set(all), anchor: 0 }))
+              },
+            },
+            { kind: 'sep' },
+            {
+              kind: 'item',
+              label: t('menu.openInExplorer'),
+              onSelect: () => void explorerOpen(tab.path).catch(() => undefined),
+            },
+            {
+              kind: 'item',
+              label: pane.hidden ? t('list.hideHidden') : t('list.showHidden'),
+              onSelect: () => toggleHidden(paneId),
+            },
+          ]
+        : [{ kind: 'item', label: t('menu.refresh'), hint: 'F5', onSelect: () => refreshPanes() }]
       setMenu({ x: point.clientX, y: point.clientY, items })
     },
     [createFolder, listData, pasteInto, refreshPanes, t, toggleHidden, update],
@@ -1027,7 +1351,7 @@ export default function App() {
           onSelect: () => closeRight(paneId, tabId),
         },
         { kind: 'sep' },
-        { kind: 'item', label: t('menu.copyPath'), onSelect: () => copyPaths([tab.path]) },
+        { kind: 'item', label: t('menu.copyPath'), disabled: !tab.path, onSelect: () => copyPaths([tab.path]) },
         { kind: 'item', label: t('menu.openInNewPane'), onSelect: () => openInNewPane(paneId, tabId) },
       ]
       setMenu({ x: point.clientX, y: point.clientY, items })
@@ -1038,6 +1362,27 @@ export default function App() {
   const activePane = ws?.panes[ws.activePaneId]
   const activeTab = activePane ? ws?.tabs[activePane.activeTabId] : undefined
 
+  /**
+   * Keeps the active folder centred in the sidebar instead of parking it on the bottom
+   * edge the way `scrollIntoView({block:'nearest'})` does. Rows that are already fully
+   * visible are left alone, so a background refresh never yanks the panel around.
+   */
+  const revealTreeRow = useCallback((path: string, force: boolean) => {
+    const scroller = sidebarRef.current
+    if (!scroller) return
+    const row = scroller.querySelector<HTMLElement>(`[data-tree-key="${CSS.escape(pathKey(path))}"]`)
+    if (!row) return
+    const box = scroller.getBoundingClientRect()
+    const rect = row.getBoundingClientRect()
+    const margin = 16
+    const visible = rect.top >= box.top + margin && rect.bottom <= box.bottom - margin
+    if (!force && visible) return
+    scroller.scrollTo({
+      top: centerOffset(rect.top, rect.height, box.top, box.height, scroller.scrollTop),
+      behavior: 'smooth',
+    })
+  }, [])
+
   const layoutInfo = useMemo(() => {
     if (!ws) return { count: 1, dir: 'row' as const }
     return { count: paneIds(ws.root).length, dir: ws.root.t === 'split' ? ws.root.dir : ('row' as const) }
@@ -1046,6 +1391,52 @@ export default function App() {
   const activeList = activeTab ? listData[activeTab.id] : undefined
   const selectedNames = activeList ? Array.from(activeList.selected) : []
   const selectionKey = selectedNames.join('\u0001')
+
+  /** The single selected folder, if the list selection points at one. */
+  const selectedFolderPath = useMemo(() => {
+    const path = activeTab?.path
+    if (!path || !activeList || activeList.selected.size !== 1) return ''
+    const name = activeList.selected.values().next().value
+    if (typeof name !== 'string') return ''
+    const entry = activeList.entries.find((item) => item.name === name)
+    return entry && isDir(entry.attrs) ? joinPath(path, name) : ''
+  }, [activeList, activeTab?.path])
+
+  /**
+   * What the tree reveals: a selected folder, else the current folder. The folder itself
+   * is expanded too, so its subfolders stay visible while a file inside it is selected.
+   */
+  const treeFocus = selectedFolderPath || activeTab?.path || ''
+
+  // Highlight follows the selection: a selected folder wins; selecting a file (or several
+  // items) clears it instead of pretending the parent folder is what the user picked.
+  const treeSelected =
+    selectedFolderPath || (activeList && activeList.selected.size ? '' : (activeTab?.path ?? ''))
+
+  useEffect(() => {
+    if (!treeFocus) return
+    setTreeOpen((prev) => {
+      let next: Record<string, string> | null = null
+      for (const dir of treeChain(treeFocus)) {
+        const key = pathKey(dir)
+        if (!(key in prev)) (next ??= { ...prev })[key] = dir
+      }
+      return next ?? prev
+    })
+  }, [treeFocus])
+
+  // Focusing a folder always re-centres; loading children only recentres if needed.
+  useEffect(() => {
+    if (!settings.sidebarOpen || !treeFocus) return
+    const frame = window.requestAnimationFrame(() => revealTreeRow(treeFocus, true))
+    return () => window.cancelAnimationFrame(frame)
+  }, [treeFocus, settings.sidebarOpen, revealTreeRow])
+
+  useEffect(() => {
+    if (!settings.sidebarOpen || !treeFocus) return
+    const frame = window.requestAnimationFrame(() => revealTreeRow(treeFocus, false))
+    return () => window.cancelAnimationFrame(frame)
+  }, [treeNodes, treeFocus, settings.sidebarOpen, revealTreeRow])
   const previewName = selectedNames.length === 1 ? selectedNames[0] : ''
 
   useEffect(() => {
@@ -1073,30 +1464,70 @@ export default function App() {
         })
     }, 120)
     return () => window.clearTimeout(timer)
-  }, [previewOpen, previewName, activeTab, settings.theme, selectionKey])
+  }, [previewOpen, previewName, activeTab, settings.theme, settings.externalPreview, selectionKey])
 
+  // Window-level shortcuts all go through the registry, so a rebind in Settings applies to
+  // the global commands and the panes alike. Overlays return early to keep the background
+  // list from reacting to keys typed into them.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
+      if (settingsOpen || searchOpen) return
+      const bare = !event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey
+      if (bare && isTextInput(event.target)) return
+
+      if (matchBinding(event, keys.search)) {
         event.preventDefault()
         setSearchOpen(true)
+        return
       }
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'p') {
+      if (matchBinding(event, keys.togglePreview)) {
         event.preventDefault()
         setPreviewOpen((open) => !open)
+        return
       }
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'b') {
+      if (matchBinding(event, keys.toggleSidebar)) {
         event.preventDefault()
-        setSettings((prev) => {
-          const next = { ...prev, sidebarOpen: !prev.sidebarOpen }
-          void settingsSave(next).catch(() => undefined)
-          return next
-        })
+        toggleSidebar()
+        return
+      }
+      if (matchBinding(event, keys.openSettings)) {
+        event.preventDefault()
+        setSettingsOpen(true)
+        return
+      }
+      if (activePane && matchBinding(event, keys.newTab)) {
+        event.preventDefault()
+        newTab(activePane.id)
+        return
+      }
+      if (activePane && activeTab && matchBinding(event, keys.closeTab)) {
+        event.preventDefault()
+        closeTab(activePane.id, activeTab.id)
+        return
+      }
+      if (matchBinding(event, keys.externalPreview)) {
+        if (!activeTab || !previewName) return
+        const entry = activeList?.entries.find((item) => item.name === previewName)
+        if (!entry || isDir(entry.attrs)) return
+        event.preventDefault()
+        openExternalPreview(joinPath(activeTab.path, previewName))
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  }, [
+    keys,
+    toggleSidebar,
+    settingsOpen,
+    searchOpen,
+    activePane,
+    activeTab,
+    activeList,
+    previewName,
+    newTab,
+    closeTab,
+    openExternalPreview,
+  ])
 
   const placeLabel = (key: string) => {
     switch (key) {
@@ -1110,23 +1541,6 @@ export default function App() {
         return t('place.documents')
       default:
         return key
-    }
-  }
-
-  const driveLabel = (kind: string) => {
-    switch (kind) {
-      case 'fixed':
-        return t('drive.fixed')
-      case 'removable':
-        return t('drive.removable')
-      case 'network':
-        return t('drive.network')
-      case 'cdrom':
-        return t('drive.cdrom')
-      case 'ramdisk':
-        return t('drive.ramdisk')
-      default:
-        return ''
     }
   }
 
@@ -1176,9 +1590,12 @@ export default function App() {
       if (!tab) return
       const items: MenuItem[] = driveList.map((drive) => ({
         kind: 'item' as const,
-        label: drive.root.replace('\\', ''),
-        hint: driveLabel(drive.kind),
-        onSelect: () => navigate(tab.id, drive.root),
+        label: drive.name,
+        hint: driveKindLabel(t, drive.kind),
+        onSelect: () =>
+          isFsPath(drive.root)
+            ? navigate(tab.id, drive.root)
+            : void openPath(drive.root).catch(() => undefined),
       }))
       setMenu({ x: point.clientX, y: point.clientY, items })
     },
@@ -1201,6 +1618,7 @@ export default function App() {
               pane={pane}
               tabs={ws.tabs}
               data={listData[pane.activeTabId]}
+              git={gitByDir[pathKey(ws.tabs[pane.activeTabId]?.path ?? '')] ?? null}
               active={ws.activePaneId === pane.id}
               lang={lang}
               dropHint={drag?.target?.paneId === pane.id ? drag.target.mode : null}
@@ -1224,6 +1642,7 @@ export default function App() {
               onDelete={(names, permanent) => deleteEntries(pane.id, names, permanent)}
               onPaste={() => pasteInto(pane.id)}
               onRefresh={refreshPanes}
+              keys={keys}
               update={update}
             />
           </div>
@@ -1256,6 +1675,10 @@ export default function App() {
       deleteEntries,
       pasteInto,
       refreshPanes,
+      keys,
+      gitByDir,
+      driveList,
+      openDriveMenu,
     ],
   )
 
@@ -1307,7 +1730,7 @@ export default function App() {
         </div>
         <button
           type="button"
-          onClick={() => updateSettings({ ...settings, sidebarOpen: !settings.sidebarOpen })}
+          onClick={toggleSidebar}
           title={t('sidebar.toggle')}
           className={`grid h-7 w-7 shrink-0 place-items-center rounded-md hover:bg-surface-3 ${
             settings.sidebarOpen ? 'text-muted' : 'text-muted-2'
@@ -1389,61 +1812,80 @@ export default function App() {
         </div>
       </header>
 
-      <div className="flex min-h-0 flex-1">
+      <div ref={layoutRef} className="flex min-h-0 flex-1">
         {settings.sidebarOpen ? (
-          <aside className="flex w-44 shrink-0 flex-col gap-4 overflow-y-auto border-r border-line bg-surface-2 px-2 py-3">
-            <section>
-              <h2 className="px-2 pb-1 text-[10px] font-semibold tracking-wider text-muted-2">
-                {t('sidebar.quickAccess')}
-              </h2>
-              {quickPlaces.map((place) => (
-                <SidebarItem
-                  key={place.key}
-                  active={activeTab?.path === place.path}
-                  label={place.label}
-                  hint={place.custom ? '' : undefined}
-                  onClick={() => activeTab && navigate(activeTab.id, place.path)}
-                  onContextMenu={(point) => openPlaceMenu(place, point)}
-                  icon={
-                    <svg viewBox="0 0 16 16" className="h-4 w-4 text-blue-500" fill="currentColor">
-                      <path d="M1.5 3.6c0-.6.5-1.1 1.1-1.1h3.2c.4 0 .7.15.95.42l.85.93h6.3c.6 0 1.1.5 1.1 1.1v7.4c0 .6-.5 1.1-1.1 1.1H2.6c-.6 0-1.1-.5-1.1-1.1V3.6Z" />
-                    </svg>
-                  }
+          <>
+            <aside
+              ref={sidebarRef}
+              style={{
+                width: sidebarWidth,
+                maxWidth: previewOpen
+                  ? `calc(50% - ${GUTTER * 2}px - ${previewWidth}px)`
+                  : `calc(50% - ${GUTTER}px)`,
+              }}
+              className="flex shrink-0 flex-col gap-4 overflow-y-auto overflow-x-hidden border-r border-line bg-surface-2 px-2 py-3"
+            >
+              <section>
+                <h2 className="px-2 pb-1 text-[10px] font-semibold tracking-wider text-muted-2">
+                  {t('sidebar.quickAccess')}
+                </h2>
+                {quickPlaces.map((place) => (
+                  <SidebarItem
+                    key={place.key}
+                    active={activeTab?.path === place.path}
+                    label={place.label}
+                    hint={place.custom ? '' : undefined}
+                    onClick={() => activeTab && navigate(activeTab.id, place.path)}
+                    onContextMenu={(point) => openPlaceMenu(place, point)}
+                    icon={
+                      <svg viewBox="0 0 16 16" className="h-4 w-4 text-blue-500" fill="currentColor">
+                        <path d="M1.5 3.6c0-.6.5-1.1 1.1-1.1h3.2c.4 0 .7.15.95.42l.85.93h6.3c.6 0 1.1.5 1.1 1.1v7.4c0 .6-.5 1.1-1.1 1.1H2.6c-.6 0-1.1-.5-1.1-1.1V3.6Z" />
+                      </svg>
+                    }
+                  />
+                ))}
+              </section>
+              <section>
+                <h2 className="px-2 pb-1 text-[10px] font-semibold tracking-wider text-muted-2">
+                  {t('sidebar.thisPc')}
+                </h2>
+                <SidebarTree
+                  drives={driveList}
+                  open={treeOpen}
+                  nodes={treeNodes}
+                  selectedPath={treeSelected}
+                  currentPath={activeTab?.path ?? ''}
+                  onToggle={toggleTree}
+                  onOpen={openTreePath}
                 />
-              ))}
-            </section>
-            <section>
-              <h2 className="px-2 pb-1 text-[10px] font-semibold tracking-wider text-muted-2">
-                {t('sidebar.thisPc')}
-              </h2>
-              {driveList.map((drive) => (
-                <SidebarItem
-                  key={drive.root}
-                  active={activeTab?.path.slice(0, 2).toUpperCase() === drive.root.slice(0, 2).toUpperCase()}
-                  label={drive.root.replace('\\', '')}
-                  hint={driveLabel(drive.kind)}
-                  onClick={() => activeTab && navigate(activeTab.id, drive.root)}
-                  icon={
-                    <svg viewBox="0 0 16 16" className="h-4 w-4 text-muted-2" fill="currentColor">
-                      <path d="M2 5.5C2 4.7 2.7 4 3.5 4h9c.8 0 1.5.7 1.5 1.5v5c0 .8-.7 1.5-1.5 1.5h-9C2.7 12 2 11.3 2 10.5v-5Zm2 4.3h8v.7H4v-.7Z" />
-                    </svg>
-                  }
-                />
-              ))}
-            </section>
-          </aside>
+              </section>
+            </aside>
+            <ResizeHandle onPointerDown={startSidebarResize} />
+          </>
         ) : null}
 
         <main className="flex min-h-0 min-w-0 flex-1 gap-1 p-1">{ws && renderNode(ws.root)}</main>
         {previewOpen && (
-          <PreviewPanel
-            info={preview.info}
-            loading={preview.loading}
-            error={preview.error}
-            name={previewName}
-            lang={lang}
-            onClose={() => setPreviewOpen(false)}
-          />
+          <>
+            <ResizeHandle onPointerDown={startPreviewResize} />
+            <PreviewPanel
+              width={previewWidth}
+              maxWidth={
+                settings.sidebarOpen
+                  ? `calc(50% - ${GUTTER * 2}px - ${sidebarWidth}px)`
+                  : `calc(50% - ${GUTTER}px)`
+              }
+              info={preview.info}
+              loading={preview.loading}
+              error={preview.error}
+              name={previewName}
+              path={activeTab ? joinPath(activeTab.path, previewName) : ''}
+              lang={lang}
+              externalKey={formatBinding(keys.externalPreview)}
+              onClose={() => setPreviewOpen(false)}
+              onOpenExternal={openExternalPreview}
+            />
+          </>
         )}
       </div>
 
@@ -1452,7 +1894,9 @@ export default function App() {
           className="pointer-events-none fixed z-50 max-w-[220px] truncate rounded-md border border-blue-300 bg-surface/95 px-2 py-1 text-[11px] text-fg shadow-lg"
           style={{ left: drag.x + 12, top: drag.y + 10 }}
         >
-          {ws.tabs[drag.tabId]?.path.split('\\').filter(Boolean).pop() ?? '—'}
+          {ws.tabs[drag.tabId]?.path
+            ? (ws.tabs[drag.tabId].path.split('\\').filter(Boolean).pop() ?? '—')
+            : t('sidebar.thisPc')}
         </div>
       )}
 
@@ -1464,7 +1908,7 @@ export default function App() {
 
       {searchOpen && activeTab && (
         <SearchOverlay
-          root={activeTab.path}
+          root={activeTab.path || homeRef.current}
           lang={lang}
           preferEverything={settings.useEverything}
           onClose={() => setSearchOpen(false)}
@@ -1498,6 +1942,18 @@ export default function App() {
         />
       )}
     </div>
+  )
+}
+
+function ResizeHandle({ onPointerDown }: { onPointerDown: (ev: ReactPointerEvent<HTMLDivElement>) => void }) {
+  return (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      onPointerDown={onPointerDown}
+      style={{ width: GUTTER }}
+      className="shrink-0 cursor-col-resize bg-line-strong hover:bg-blue-400"
+    />
   )
 }
 

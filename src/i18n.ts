@@ -23,6 +23,7 @@ const zh = {
   'drive.network': '网络驱动器',
   'drive.cdrom': '光盘',
   'drive.ramdisk': '内存盘',
+  'drive.location': '网络位置',
   'nav.back': '后退',
   'nav.forward': '前进',
   'nav.up': '上一级 (Backspace)',
@@ -35,6 +36,7 @@ const zh = {
   'list.mtime': '修改时间',
   'list.filter': '筛选',
   'list.items': '{count} 项',
+  'list.drives': '{count} 个磁盘',
   'list.total': '（共 {count}）',
   'list.selected': '已选 {count} 项',
   'list.scanning': '扫描中 {count}',
@@ -78,7 +80,48 @@ const zh = {
   'settings.placeBuiltin': '内置',
   'settings.placeDelete': '删除',
   'settings.placeRestore': '恢复内置项',
+  'settings.externalPreview': '外部预览程序',
+  'settings.externalPreviewHint': '内置预览不支持的类型交给外部程序；{path} 会替换为文件路径，省略时自动追加到末尾',
+  'settings.externalKey': '选中文件按 {keys} 调用',
+  'settings.externalExt': '扩展名',
+  'settings.externalCommand': '命令',
+  'settings.externalExtPh': 'docx',
+  'settings.externalCommandPh': '"C:\\Program Files\\…\\WINWORD.EXE" "{path}"',
   'settings.configDir': '配置目录',
+  'settings.general': '常规',
+  'settings.shortcuts': '快捷键',
+  'settings.previewSection': '预览',
+  'settings.advanced': '高级',
+  'settings.searchPh': '搜索设置…',
+  'settings.noMatch': '没有匹配的设置项',
+  'settings.shortcutsHint': '点击按键重新绑定，Esc 取消；方向键与 Esc 固定不可改',
+  'settings.shortcutReset': '恢复默认',
+  'settings.shortcutResetAll': '全部恢复默认',
+  'settings.shortcutCapturing': '按下组合键…',
+  'settings.shortcutConflict': '与「{name}」冲突',
+  'settings.shortcutApp': '全局',
+  'settings.shortcutPane': '窗格',
+  'shortcut.search': '搜索文件',
+  'shortcut.togglePreview': '切换预览面板',
+  'shortcut.externalPreview': '外部预览',
+  'shortcut.toggleSidebar': '切换侧边栏',
+  'shortcut.newTab': '新建标签',
+  'shortcut.closeTab': '关闭标签',
+  'shortcut.openSettings': '打开设置',
+  'shortcut.open': '打开选中项',
+  'shortcut.rename': '重命名',
+  'shortcut.delete': '删除到回收站',
+  'shortcut.refresh': '刷新',
+  'shortcut.properties': '属性',
+  'shortcut.back': '后退',
+  'shortcut.forward': '前进',
+  'shortcut.up': '上一级',
+  'shortcut.addressBar': '定位到地址栏',
+  'shortcut.selectAll': '全选',
+  'shortcut.copy': '复制',
+  'shortcut.cut': '剪切',
+  'shortcut.paste': '粘贴',
+  'shortcut.contextMenu': '打开右键菜单',
   'settings.configOpen': '打开目录',
   'settings.updates': '更新',
   'settings.updateInterval': '自动检查间隔',
@@ -106,6 +149,9 @@ const zh = {
   'preview.folderHint': '双击可进入该文件夹',
   'preview.tooLarge': '文件超过 64 MB，暂不生成预览',
   'preview.noPreview': '此文件类型没有可用的预览方式',
+  'preview.external': '用 {name} 打开',
+  'preview.externalMissing': '该类型没有配置外部预览程序，可在设置中添加',
+  'preview.externalFailed': '无法启动外部预览程序（{code}）',
   'preview.errorAccess': '无法读取此文件（权限不足或被占用）',
   'preview.errorMissing': '文件已不存在',
   'preview.errorGeneric': '无法生成预览',
@@ -182,6 +228,7 @@ const en: Record<Key, string> = {
   'drive.network': 'Network',
   'drive.cdrom': 'Optical',
   'drive.ramdisk': 'RAM disk',
+  'drive.location': 'Network location',
   'nav.back': 'Back',
   'nav.forward': 'Forward',
   'nav.up': 'Up (Backspace)',
@@ -194,6 +241,7 @@ const en: Record<Key, string> = {
   'list.mtime': 'Modified',
   'list.filter': 'Filter',
   'list.items': '{count} items',
+  'list.drives': '{count} drives',
   'list.total': '({count} total)',
   'list.selected': '{count} selected',
   'list.scanning': 'Scanning {count}',
@@ -237,7 +285,49 @@ const en: Record<Key, string> = {
   'settings.placeBuiltin': 'built-in',
   'settings.placeDelete': 'Delete',
   'settings.placeRestore': 'Restore built-in entries',
+  'settings.externalPreview': 'External preview programs',
+  'settings.externalPreviewHint':
+    'Hands formats the built-in previewer cannot render to another program; {path} is replaced with the file path, or appended when missing',
+  'settings.externalKey': 'Press {keys} on a file to run it',
+  'settings.externalExt': 'Extension',
+  'settings.externalCommand': 'Command',
+  'settings.externalExtPh': 'docx',
+  'settings.externalCommandPh': '"C:\\Program Files\\…\\WINWORD.EXE" "{path}"',
   'settings.configDir': 'Config directory',
+  'settings.general': 'General',
+  'settings.shortcuts': 'Shortcuts',
+  'settings.previewSection': 'Preview',
+  'settings.advanced': 'Advanced',
+  'settings.searchPh': 'Search settings…',
+  'settings.noMatch': 'No settings match your search',
+  'settings.shortcutsHint': 'Click a key combination to rebind; Esc cancels. Arrow keys and Esc are fixed',
+  'settings.shortcutReset': 'Reset',
+  'settings.shortcutResetAll': 'Reset all',
+  'settings.shortcutCapturing': 'Press a combination…',
+  'settings.shortcutConflict': 'Conflicts with “{name}”',
+  'settings.shortcutApp': 'Global',
+  'settings.shortcutPane': 'Pane',
+  'shortcut.search': 'Search files',
+  'shortcut.togglePreview': 'Toggle preview panel',
+  'shortcut.externalPreview': 'External preview',
+  'shortcut.toggleSidebar': 'Toggle sidebar',
+  'shortcut.newTab': 'New tab',
+  'shortcut.closeTab': 'Close tab',
+  'shortcut.openSettings': 'Open settings',
+  'shortcut.open': 'Open selection',
+  'shortcut.rename': 'Rename',
+  'shortcut.delete': 'Delete to Recycle Bin',
+  'shortcut.refresh': 'Refresh',
+  'shortcut.properties': 'Properties',
+  'shortcut.back': 'Back',
+  'shortcut.forward': 'Forward',
+  'shortcut.up': 'Parent folder',
+  'shortcut.addressBar': 'Focus address bar',
+  'shortcut.selectAll': 'Select all',
+  'shortcut.copy': 'Copy',
+  'shortcut.cut': 'Cut',
+  'shortcut.paste': 'Paste',
+  'shortcut.contextMenu': 'Open context menu',
   'settings.configOpen': 'Open folder',
   'settings.updates': 'Updates',
   'settings.updateInterval': 'Automatic check interval',
@@ -265,6 +355,9 @@ const en: Record<Key, string> = {
   'preview.folderHint': 'Double-click to open this folder',
   'preview.tooLarge': 'File is larger than 64 MB, preview skipped',
   'preview.noPreview': 'No preview available for this file type',
+  'preview.external': 'Open with {name}',
+  'preview.externalMissing': 'No external preview program for this file type; add one in Settings',
+  'preview.externalFailed': 'Could not start the external preview program ({code})',
   'preview.errorAccess': 'Cannot read this file (permission or in use)',
   'preview.errorMissing': 'This file no longer exists',
   'preview.errorGeneric': 'Preview could not be generated',
@@ -324,6 +417,29 @@ export function translate(lang: Lang, key: Key, vars?: Record<string, string | n
   return template.replace(/\{(\w+)\}/g, (_, name: string) => String(vars[name] ?? ''))
 }
 
-export function makeT(lang: Lang) {
-  return (key: Key, vars?: Record<string, string | number>) => translate(lang, key, vars)
+/** Signature of the translator bound to one language. */
+export type Translate = (key: Key, vars?: Record<string, string | number>) => string
+
+export function makeT(lang: Lang): Translate {
+  return (key, vars) => translate(lang, key, vars)
+}
+
+/** Localized drive-type caption ("本地磁盘"); empty for kinds the sidebar also skips. */
+export function driveKindLabel(t: Translate, kind: string): string {
+  switch (kind) {
+    case 'fixed':
+      return t('drive.fixed')
+    case 'removable':
+      return t('drive.removable')
+    case 'network':
+      return t('drive.network')
+    case 'cdrom':
+      return t('drive.cdrom')
+    case 'ramdisk':
+      return t('drive.ramdisk')
+    case 'location':
+      return t('drive.location')
+    default:
+      return ''
+  }
 }

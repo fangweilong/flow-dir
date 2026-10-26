@@ -5,12 +5,17 @@ use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use windows::core::PCWSTR;
+use windows::core::{Interface, HSTRING, PCWSTR};
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Storage::FileSystem::{
     FileIdBothDirectoryInfo, GetDriveTypeW, GetFileInformationByHandleEx, GetLogicalDrives,
     FILE_ID_BOTH_DIR_INFO,
 };
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, IPersistFile, CLSCTX_INPROC_SERVER,
+    COINIT_MULTITHREADED, STGM_READ,
+};
+use windows::Win32::UI::Shell::{IShellLinkW, SLGP_RAWPATH, ShellLink};
 
 use crate::error::ApiError;
 
@@ -95,6 +100,27 @@ pub fn enumerate(
     show_hidden: bool,
     cancel: &AtomicBool,
 ) -> Result<Vec<Entry>, ApiError> {
+    scan(path, show_hidden, false, MAX_ENTRIES, cancel)
+}
+
+/// Subdirectories only, for the sidebar tree: files are dropped before their
+/// metadata is touched, so folders with tens of thousands of files stay cheap.
+pub fn enumerate_dirs(
+    path: &str,
+    show_hidden: bool,
+    limit: usize,
+    cancel: &AtomicBool,
+) -> Result<Vec<Entry>, ApiError> {
+    scan(path, show_hidden, true, limit, cancel)
+}
+
+fn scan(
+    path: &str,
+    show_hidden: bool,
+    dirs_only: bool,
+    limit: usize,
+    cancel: &AtomicBool,
+) -> Result<Vec<Entry>, ApiError> {
     let file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(FLAG_BACKUP_SEMANTICS)
@@ -146,11 +172,13 @@ pub fn enumerate(
             if !is_dot && info.FileNameLength > 0 {
                 let attrs = info.FileAttributes;
                 let hidden = attrs & (ATTR_HIDDEN | ATTR_SYSTEM) != 0;
-                if show_hidden || !hidden {
+                let is_dir = attrs & ATTR_DIRECTORY != 0;
+                // Keep the offset advance below reachable: a `continue` here would
+                // re-read the same record forever.
+                if (show_hidden || !hidden) && (is_dir || !dirs_only) {
                     let name = std::ffi::OsString::from_wide(name_slice)
                         .to_string_lossy()
                         .into_owned();
-                    let is_dir = attrs & ATTR_DIRECTORY != 0;
                     let size64 = if is_dir {
                         0
                     } else {
@@ -167,7 +195,7 @@ pub fn enumerate(
             }
             offset += info.NextEntryOffset as usize;
 
-            if entries.len() >= MAX_ENTRIES {
+            if entries.len() >= limit {
                 break 'scan;
             }
         }
@@ -198,11 +226,21 @@ pub fn sort_entries(entries: &mut [Entry], key: &str, dir: &str) {
 
 #[derive(serde::Serialize, Clone)]
 pub struct Drive {
+    /// Path handed to the file list: `C:\` for letters, a UNC share or URL for locations.
     pub root: String,
     pub kind: String,
+    /// Row caption: `C:` for letters, the shortcut name for network locations.
+    pub name: String,
 }
 
+/// Letter drives followed by Explorer's "网络位置" shortcuts.
 pub fn drives() -> Vec<Drive> {
+    let mut out = letter_drives();
+    out.extend(network_locations());
+    out
+}
+
+fn letter_drives() -> Vec<Drive> {
     let mask = unsafe { GetLogicalDrives() };
     let mut out = Vec::new();
     for i in 0..26u32 {
@@ -221,11 +259,77 @@ pub fn drives() -> Vec<Drive> {
             _ => continue,
         };
         out.push(Drive {
+            name: root.trim_end_matches('\\').to_string(),
             root,
             kind: kind.to_string(),
         });
     }
     out
+}
+
+/// Shortcuts from `%APPDATA%\Microsoft\Windows\Network Shortcuts`, the per-user
+/// folder behind Explorer's "网络位置". Targets may be UNC shares or WebDAV URLs;
+/// the list passes both through and the UI opens non-path targets with the shell.
+fn network_locations() -> Vec<Drive> {
+    let Some(appdata) = std::env::var_os("APPDATA") else {
+        return Vec::new();
+    };
+    let dir = std::path::PathBuf::from(appdata)
+        .join("Microsoft")
+        .join("Windows")
+        .join("Network Shortcuts");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    // Runs on a blocking-pool thread now, which previews already initialise as MTA;
+    // ShellLink is a "Both" object, so the apartment model does not matter. S_FALSE
+    // (already initialised) is fine, and the missing CoUninitialize keeps the thread's
+    // apartment for later calls on the same thread — same as the icon cache.
+    let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    let mut out: Vec<Drive> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Locations created by Explorer are folders holding `target.lnk`; older
+        // entries are loose `.lnk` files named after the location.
+        let (name, link) = if path.is_dir() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            (name, path.join("target.lnk"))
+        } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("lnk")) {
+            (path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(), path)
+        } else {
+            continue;
+        };
+        if name.is_empty() || !link.is_file() {
+            continue;
+        }
+        let Some(root) = shortcut_target(&link) else {
+            continue;
+        };
+        out.push(Drive {
+            root,
+            kind: "location".to_string(),
+            name,
+        });
+    }
+    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out
+}
+
+/// Reads the target stored inside a `.lnk` without resolving it, so listing network
+/// locations never blocks on an unreachable server.
+fn shortcut_target(lnk: &Path) -> Option<String> {
+    unsafe {
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+        let file: IPersistFile = link.cast().ok()?;
+        let path = lnk.to_string_lossy();
+        file.Load(&HSTRING::from(path.as_ref()), STGM_READ).ok()?;
+        let mut buffer = [0u16; 1024];
+        link.GetPath(&mut buffer, std::ptr::null_mut(), SLGP_RAWPATH.0 as u32)
+            .ok()?;
+        let len = buffer.iter().position(|c| *c == 0)?;
+        let target = String::from_utf16_lossy(&buffer[..len]);
+        (!target.is_empty()).then_some(target)
+    }
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -257,4 +361,35 @@ pub fn quick_access() -> Vec<Place> {
         }
     }
     out
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    /// Guards the `dirs_only` filter: a `continue` inside the record loop would skip
+    /// the offset advance and spin on the same entry forever.
+    #[test]
+    fn dirs_only_returns_folders_and_terminates() {
+        let root = std::env::temp_dir().join(format!("flowdir-scan-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("alpha")).unwrap();
+        std::fs::create_dir_all(root.join("beta")).unwrap();
+        std::fs::write(root.join("file.txt"), b"x").unwrap();
+
+        let cancel = AtomicBool::new(false);
+        let mut dirs = enumerate_dirs(root.to_str().unwrap(), true, 64, &cancel).unwrap();
+        sort_entries(&mut dirs, "name", "asc");
+        assert_eq!(
+            dirs.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(),
+            ["alpha", "beta"]
+        );
+
+        let mut all = enumerate(root.to_str().unwrap(), true, &cancel).unwrap();
+        sort_entries(&mut all, "name", "asc");
+        assert_eq!(all.len(), 3);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
