@@ -419,6 +419,21 @@ export function PaneView({
           screenY: window.screenY + rect.top + 8,
           shiftKey: false,
         })
+      } else if (tab) {
+        // No row to anchor on (empty folder, or selection cleared): same as right-clicking
+        // the blank area, which the shell serves with the folder-background menu.
+        const rect = scrollRef.current?.getBoundingClientRect()
+        if (rect) {
+          ev.preventDefault()
+          update(tab.id, (d) => ({ ...d, selected: new Set(), anchor: -1 }))
+          onBlankContextMenu({
+            clientX: rect.left + 40,
+            clientY: rect.top + 8,
+            screenX: window.screenX + rect.left + 40,
+            screenY: window.screenY + rect.top + 8,
+            shiftKey: false,
+          })
+        }
       }
       return
     }

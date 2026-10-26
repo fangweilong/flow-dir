@@ -14,7 +14,8 @@ export type Theme = 'system' | 'light' | 'dark'
 export type Dependency = { name: string; version: string; license: string; kind: string }
 export type Clip = { paths: string[]; cut: boolean }
 export type EverythingStatus = { usable: boolean; version: string | null; reason: string | null }
-export type MenuOutcome = { invoked: boolean; id: number }
+/** `action` is FlowDir's own appended entry (e.g. the hidden-items toggle), not a shell verb. */
+export type MenuOutcome = { invoked: boolean; id: number; action: string | null }
 export type OpKind = 'copy' | 'move' | 'delete' | 'rename' | 'newdir'
 export type OpProgress = {
   opId: string

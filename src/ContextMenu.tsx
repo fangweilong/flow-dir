@@ -11,7 +11,7 @@ type Props = {
   onClose: () => void
 }
 
-/** Self-drawn menu used for blank areas, tabs and breadcrumbs (files use the native shell menu). */
+/** Self-drawn menu for tabs, breadcrumbs, the drive overview and native-menu fallbacks. */
 export function ContextMenu({ x, y, items, onClose }: Props) {
   const ref = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState({ x, y })
