@@ -1187,6 +1187,22 @@ export default function App() {
     [showToast, t],
   )
 
+  /** Breadcrumb copy: the folder path as-is, so UNC prefixed paths and `C:\` paste intact. */
+  const copyCurrentPath = useCallback(
+    (path: string) => {
+      void navigator.clipboard
+        .writeText(path)
+        .then(() => showToast(t('toast.pathCopied')))
+        .catch(() => showToast(t('toast.copyFailed')))
+    },
+    [showToast, t],
+  )
+
+  const reportInvalidPath = useCallback(
+    (path: string) => showToast(t('toast.pathInvalid', { path })),
+    [showToast, t],
+  )
+
   const closeOthers = useCallback((paneId: string, tabId: string) => {
     setWs((prev) => {
       if (!prev) return prev
@@ -1709,6 +1725,8 @@ export default function App() {
               onSortChange={(sort) => setPaneSort(pane.id, sort)}
               onToggleHidden={() => toggleHidden(pane.id)}
               onClipboard={(cut) => copySelection(pane.id, cut)}
+              onCopyPath={copyCurrentPath}
+              onPathInvalid={reportInvalidPath}
               onRowContextMenu={(entry, point) => openRowMenu(pane.id, entry, point)}
               onBlankContextMenu={(point) => openBlankMenu(pane.id, point)}
               onTabContextMenu={(tabId, point) => openTabMenu(pane.id, tabId, point)}
@@ -1741,6 +1759,8 @@ export default function App() {
       setPaneSort,
       toggleHidden,
       copySelection,
+      copyCurrentPath,
+      reportInvalidPath,
       update,
       registerPane,
       applyRatio,
