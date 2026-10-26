@@ -90,6 +90,26 @@ export type GitStatus = {
   files: GitFile[]
   /** Child folders with changes deeper down. */
   dirs: string[]
+  /** Checked-out branch; empty when HEAD is detached. */
+  branch: string
+  ahead: number
+  behind: number
+  /** Whether the branch has an upstream, so the counts mean anything. */
+  upstream: boolean
+  /** Any change anywhere in the work tree, not only below the listed folder. */
+  dirty: boolean
+}
+
+/** Not a repository, or a lookup that failed; also the cache entry for both. */
+export const EMPTY_GIT: GitStatus = {
+  root: '',
+  files: [],
+  dirs: [],
+  branch: '',
+  ahead: 0,
+  behind: 0,
+  upstream: false,
+  dirty: false,
 }
 export type SearchItem = { path: string; name: string; isDir: boolean; size: number; mtime: number }
 export type SearchBatch = {

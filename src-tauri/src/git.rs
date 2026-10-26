@@ -35,6 +35,15 @@ pub struct GitStatus {
     pub files: Vec<GitFile>,
     /// Child folders holding changes deeper down; they only get a marker, not a letter.
     pub dirs: Vec<String>,
+    /// Checked-out branch; empty when HEAD is detached.
+    pub branch: String,
+    /// Commits the branch is ahead of and behind its upstream; both zero without one.
+    pub ahead: u32,
+    pub behind: u32,
+    /// Whether the branch has an upstream, so the counts mean anything.
+    pub upstream: bool,
+    /// Any change anywhere in the work tree, not only below the listed folder.
+    pub dirty: bool,
 }
 
 pub fn status(path: &str) -> GitStatus {
@@ -55,27 +64,42 @@ pub fn status(path: &str) -> GitStatus {
         // the status of every file inside it once opened. `all` names each file instead;
         // git still collapses foreign repositories, whose trailing separator marks them as
         // folders below.
-        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+        .args([
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--branch",
+            "--untracked-files=all",
+        ])
         .env("GIT_OPTIONAL_LOCKS", "0")
         .creation_flags(CREATE_NO_WINDOW);
     let Some(output) = output_with_timeout(&mut command) else {
         return GitStatus {
             root,
-            dirs: Vec::new(),
-            files: Vec::new(),
+            ..GitStatus::default()
         };
     };
     if !output.status.success() {
         return GitStatus {
             root,
-            dirs: Vec::new(),
-            files: Vec::new(),
+            ..GitStatus::default()
         };
     }
+    let (branch, ahead, behind, upstream) = summary(&output.stdout);
+    let dirty = has_changes(&output.stdout);
     // Nested paths collapse to one marker per child folder: a work tree with 50k changes
     // below the listed folder must not push 50k strings through the IPC bridge.
     let (files, dirs) = split_direct(parse(&output.stdout, prefix.as_deref()));
-    GitStatus { root, files, dirs }
+    GitStatus {
+        root,
+        files,
+        dirs,
+        branch,
+        ahead,
+        behind,
+        upstream,
+        dirty,
+    }
 }
 
 /// `git` is normally on PATH; GUI launches sometimes miss the user's shims, so the two
@@ -196,6 +220,47 @@ fn relative_to_root(root: &str, dir: &str) -> Option<String> {
     (!rest.is_empty()).then_some(rest)
 }
 
+/// Reads the `--branch` header: `## head...upstream [ahead N, behind M]`.
+/// `head` is `HEAD (no branch)` for a detached checkout and
+/// `No commits yet on <name>` right after `git init`.
+fn summary(bytes: &[u8]) -> (String, u32, u32, bool) {
+    let Some(record) = bytes
+        .split(|byte| *byte == 0)
+        .find(|record| record.starts_with(b"## "))
+    else {
+        return (String::new(), 0, 0, false);
+    };
+    let line = String::from_utf8_lossy(&record[3..]).into_owned();
+    let (head, tracking) = line.split_once("...").unwrap_or((&line, ""));
+    let head = head.trim();
+    let branch = match head.strip_prefix("No commits yet on ") {
+        Some(name) => name.to_string(),
+        None if head == "HEAD (no branch)" => String::new(),
+        None => head.to_string(),
+    };
+    let mut ahead = 0;
+    let mut behind = 0;
+    if let Some(open) = tracking.find('[') {
+        let counts = tracking[open + 1..].split(']').next().unwrap_or_default();
+        for part in counts.split(',') {
+            let mut words = part.split_whitespace();
+            match (words.next(), words.next().and_then(|count| count.parse().ok())) {
+                (Some("ahead"), Some(count)) => ahead = count,
+                (Some("behind"), Some(count)) => behind = count,
+                _ => {}
+            }
+        }
+    }
+    (branch, ahead, behind, !tracking.is_empty())
+}
+
+/// Any record besides the branch header means the work tree has something to report.
+fn has_changes(bytes: &[u8]) -> bool {
+    bytes
+        .split(|byte| *byte == 0)
+        .any(|record| !record.is_empty() && !record.starts_with(b"## "))
+}
+
 /// Parses `--porcelain=v1 -z`: NUL separated `XY path` records, where renames and copies
 /// carry the source path as one extra record.
 ///
@@ -205,7 +270,8 @@ fn parse(bytes: &[u8], prefix: Option<&str>) -> Vec<GitFile> {
     let mut files = Vec::new();
     let mut records = bytes.split(|byte| *byte == 0).filter(|r| !r.is_empty());
     while let Some(record) = records.next() {
-        if record.len() < 4 {
+        // `--branch` prepends one `## head...upstream` record; it is not a file entry.
+        if record.starts_with(b"## ") || record.len() < 4 {
             continue;
         }
         let status = String::from_utf8_lossy(&record[..2]).into_owned();
@@ -256,8 +322,10 @@ mod tests {
 
     #[test]
     fn porcelain_records_map_to_letters() {
-        let raw = b" M src\\App.tsx\0?? new file.txt\0A  staged.txt\0 D gone.txt\0UU merge.txt\0R  renamed.txt\0old.txt\0 M dir\\nested.txt\0";
+        // The `--branch` header is not a file entry.
+        let raw = b"## main...origin/main [ahead 1]\0 M src\\App.tsx\0?? new file.txt\0A  staged.txt\0 D gone.txt\0UU merge.txt\0R  renamed.txt\0old.txt\0 M dir\\nested.txt\0";
         let files = parse(raw, None);
+        assert_eq!(files.len(), 7);
         let pairs: Vec<(&str, &str)> = files
             .iter()
             .map(|f| (f.path.as_str(), f.code.as_str()))
@@ -274,6 +342,41 @@ mod tests {
                 ("dir\\nested.txt", "M"),
             ]
         );
+    }
+
+    #[test]
+    fn branch_header_reports_tracking_counts() {
+        assert_eq!(
+            summary(b"## main...origin/main [ahead 2, behind 3]\0"),
+            ("main".to_string(), 2, 3, true)
+        );
+        assert_eq!(
+            summary(b"## main...origin/main\0"),
+            ("main".to_string(), 0, 0, true)
+        );
+        assert_eq!(summary(b"## fix/x\0"), ("fix/x".to_string(), 0, 0, false));
+        assert_eq!(
+            summary(b"## HEAD (no branch)\0"),
+            (String::new(), 0, 0, false)
+        );
+        assert_eq!(
+            summary(b"## No commits yet on main\0"),
+            ("main".to_string(), 0, 0, false)
+        );
+        // An upstream that was deleted still counts as configured.
+        assert_eq!(
+            summary(b"## main...origin/main [gone]\0"),
+            ("main".to_string(), 0, 0, true)
+        );
+        assert_eq!(summary(b""), (String::new(), 0, 0, false));
+    }
+
+    #[test]
+    fn any_file_record_marks_the_work_tree_dirty() {
+        assert!(!has_changes(b""));
+        assert!(!has_changes(b"## main...origin/main\0"));
+        assert!(has_changes(b"## main...origin/main\0 M a.txt\0"));
+        assert!(has_changes(b"?? new.txt\0"));
     }
 
     #[test]
@@ -362,10 +465,17 @@ mod tests {
             "-qm",
             "init",
         ]);
+        let clean = status(root.to_str().unwrap());
+        assert!(!clean.dirty);
+        assert!(clean.files.is_empty() && clean.dirs.is_empty());
+        assert!(!clean.branch.is_empty());
+        assert!(!clean.upstream && clean.ahead == 0 && clean.behind == 0);
+
         std::fs::write(root.join("newdir").join("a.txt"), "a").unwrap();
         std::fs::write(root.join("newdir").join("deep").join("b.txt"), "b").unwrap();
 
         let inside = status(root.join("newdir").to_str().unwrap());
+        assert!(inside.dirty);
         let pairs: Vec<(&str, &str)> = inside
             .files
             .iter()
@@ -377,6 +487,7 @@ mod tests {
         let top = status(root.to_str().unwrap());
         assert!(top.files.is_empty(), "{:?}", top.files.iter().map(|f| &f.path).collect::<Vec<_>>());
         assert_eq!(top.dirs, ["newdir"]);
+        assert_eq!(top.branch, clean.branch);
 
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -41,7 +41,7 @@ import {
   watchClear,
   watchSet,
 } from './api'
-import { EMPTY_LIST, emptyList } from './types'
+import { EMPTY_GIT, EMPTY_LIST, emptyList } from './types'
 import type {
   Drive,
   Entry,
@@ -276,7 +276,7 @@ export default function App() {
       })
     gitStatus(dir)
       .then(store)
-      .catch(() => store({ root: '', files: [], dirs: [] }))
+      .catch(() => store(EMPTY_GIT))
       .finally(() => {
         if (gitSeq.current.get(key) === seq) gitPending.current.delete(key)
       })

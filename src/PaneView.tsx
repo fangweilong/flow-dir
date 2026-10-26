@@ -9,6 +9,7 @@ import type { ShortcutId } from './shortcuts'
 import { EMPTY_LIST } from './types'
 import type { Drive, Entry, GitStatus, Lang, ListData, SortKey, SortState } from './types'
 import { driveKindLabel, makeT } from './i18n'
+import type { Translate } from './i18n'
 import type { DropMode, PaneState, TabState } from './workspace'
 
 /** Drive label for the address bar ("C:", "D:"); UNC and relative paths fall back to a dash. */
@@ -683,7 +684,8 @@ export function PaneView({
         data-status
         className="flex h-6 shrink-0 items-center justify-between border-t border-line bg-surface-2 px-2 text-[10.5px] text-muted"
       >
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          {git?.root && <GitChip git={git} t={t} />}
           <span>{root ? t('list.drives', { count: drives.length }) : t('list.items', { count: view.length })}</span>
           {list.filter && list.entries.length !== view.length && (
             <span>{t('list.total', { count: list.entries.length })}</span>
@@ -711,6 +713,40 @@ export function PaneView({
         </div>
       )}
     </section>
+  )
+}
+
+/** Branch, uncommitted state and upstream distance; visible even when the tree is clean. */
+function GitChip({ git, t }: { git: GitStatus; t: Translate }) {
+  const title = [
+    git.branch || t('git.detached'),
+    git.dirty ? t('git.dirty') : t('git.clean'),
+    git.upstream ? '' : t('git.upstreamMissing'),
+    git.ahead > 0 ? t('git.ahead', { count: git.ahead }) : '',
+    git.behind > 0 ? t('git.behind', { count: git.behind }) : '',
+  ]
+    .filter(Boolean)
+    .join(' · ')
+  return (
+    <span className="flex min-w-0 max-w-[180px] shrink-0 items-center gap-1" title={title}>
+      <svg
+        viewBox="0 0 16 16"
+        className="h-3 w-3 shrink-0 text-blue-500"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+      >
+        <circle cx="4.5" cy="3.5" r="1.75" />
+        <circle cx="4.5" cy="12.5" r="1.75" />
+        <circle cx="11.5" cy="6" r="1.75" />
+        <path d="M4.5 5.25v5.5M11.5 7.75c0 2.5-2.1 3.6-4.6 4" />
+      </svg>
+      <span className="truncate font-mono text-[10px] text-fg-strong">{git.branch || t('git.detached')}</span>
+      {git.dirty && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" />}
+      {git.ahead > 0 && <span className="shrink-0 text-emerald-500">↑{git.ahead}</span>}
+      {git.behind > 0 && <span className="shrink-0 text-red-500">↓{git.behind}</span>}
+    </span>
   )
 }
 
