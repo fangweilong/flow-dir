@@ -51,12 +51,11 @@ pub fn status(path: &str) -> GitStatus {
         .args(["-c", "core.quotepath=false"])
         .arg("-C")
         .arg(&root)
-        .args([
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=normal",
-        ])
+        // `normal` collapses a wholly untracked folder into one `dir/` record, which hides
+        // the status of every file inside it once opened. `all` names each file instead;
+        // git still collapses foreign repositories, whose trailing separator marks them as
+        // folders below.
+        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
         .env("GIT_OPTIONAL_LOCKS", "0")
         .creation_flags(CREATE_NO_WINDOW);
     let Some(output) = output_with_timeout(&mut command) else {
@@ -163,7 +162,8 @@ fn output_with_timeout(command: &mut Command) -> Option<Output> {
 }
 
 /// Splits pruned status paths into direct children and child folders, dropping duplicates
-/// and deeper paths.
+/// and deeper paths. A path with any separator, including the trailing one of a collapsed
+/// folder record, marks its first component as a folder: only a real file gets a letter.
 fn split_direct(files: Vec<GitFile>) -> (Vec<GitFile>, Vec<String>) {
     let mut direct = Vec::new();
     let mut dirs: Vec<String> = Vec::new();
@@ -209,10 +209,10 @@ fn parse(bytes: &[u8], prefix: Option<&str>) -> Vec<GitFile> {
             continue;
         }
         let status = String::from_utf8_lossy(&record[..2]).into_owned();
-        let path = String::from_utf8_lossy(&record[3..])
-            .replace('/', "\\")
-            .trim_end_matches('\\')
-            .to_string();
+        // A record ending in `/` names a folder (an untracked foreign repository, which
+        // even `--untracked-files=all` does not descend into). The separator is kept so
+        // `split_direct` can give that row a folder marker instead of a status letter.
+        let path = String::from_utf8_lossy(&record[3..]).replace('/', "\\").to_string();
         if status.starts_with('R') || status.starts_with('C') {
             records.next();
         }
@@ -225,7 +225,7 @@ fn parse(bytes: &[u8], prefix: Option<&str>) -> Vec<GitFile> {
                 _ => None,
             },
         };
-        if let Some(path) = relative {
+        if let Some(path) = relative.filter(|path| !path.is_empty()) {
             files.push(GitFile {
                 path,
                 code: code_for(&status),
@@ -277,10 +277,27 @@ mod tests {
     }
 
     #[test]
-    fn untracked_directories_lose_the_trailing_separator() {
-        let files = parse(b"?? build/\0", None);
-        assert_eq!(files[0].path, "build");
-        assert_eq!(files[0].code, "U");
+    fn untracked_folder_records_mark_the_folder_instead_of_a_letter() {
+        // `--untracked-files=all` still collapses an untracked foreign repository.
+        let (direct, dirs) = split_direct(parse(b"?? build/\0", None));
+        assert!(direct.is_empty());
+        assert_eq!(dirs, ["build"]);
+    }
+
+    #[test]
+    fn untracked_files_inside_a_new_folder_keep_their_status() {
+        let raw = b"?? newdir\\a.txt\0?? newdir\\deep\\b.txt\0";
+        let files = parse(raw, Some("newdir"));
+        let pairs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|f| (f.path.as_str(), f.code.as_str()))
+            .collect();
+        assert_eq!(pairs, [("a.txt", "U"), ("deep\\b.txt", "U")]);
+
+        let (direct, dirs) = split_direct(files);
+        assert_eq!(direct.len(), 1);
+        assert_eq!(direct[0].path, "a.txt");
+        assert_eq!(dirs, ["deep"]);
     }
 
     #[test]
@@ -307,5 +324,60 @@ mod tests {
         let (direct, dirs) = split_direct(parse(raw, Some("src")));
         assert_eq!(direct.len(), 1);
         assert_eq!(dirs, ["a", "b"]);
+    }
+
+    /// The regression this module was fixed for: opening a folder git had collapsed to
+    /// one untracked record used to show no badges at all. Skipped when git is missing.
+    #[test]
+    fn status_inside_untracked_folder_lists_files() {
+        let Some(git) = git_binary() else {
+            return;
+        };
+        let root = std::env::temp_dir().join(format!("flowdir-git-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("newdir").join("deep")).unwrap();
+        let run = |args: &[&str]| {
+            let output = Command::new(git)
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(&["init", "-q"]);
+        std::fs::write(root.join("tracked.txt"), "x").unwrap();
+        run(&["add", "tracked.txt"]);
+        run(&[
+            "-c",
+            "user.name=flowdir",
+            "-c",
+            "user.email=flowdir@example.com",
+            "commit",
+            "-qm",
+            "init",
+        ]);
+        std::fs::write(root.join("newdir").join("a.txt"), "a").unwrap();
+        std::fs::write(root.join("newdir").join("deep").join("b.txt"), "b").unwrap();
+
+        let inside = status(root.join("newdir").to_str().unwrap());
+        let pairs: Vec<(&str, &str)> = inside
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.code.as_str()))
+            .collect();
+        assert_eq!(pairs, [("a.txt", "U")]);
+        assert_eq!(inside.dirs, ["deep"]);
+
+        let top = status(root.to_str().unwrap());
+        assert!(top.files.is_empty(), "{:?}", top.files.iter().map(|f| &f.path).collect::<Vec<_>>());
+        assert_eq!(top.dirs, ["newdir"]);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

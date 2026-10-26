@@ -561,6 +561,26 @@ export default function App() {
     }
   }, [invalidateGit, invalidateTree, startScan])
 
+  // `git add`/`git commit` touch only repository metadata, so badges go stale while the
+  // listing stays valid; invalidating the status cache is enough.
+  useEffect(() => {
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    void listen<{ paneId: string }>('flowdir:git-changed', (event) => {
+      const current = wsRef.current
+      const pane = current?.panes[event.payload.paneId]
+      const tab = pane && current ? current.tabs[pane.activeTabId] : undefined
+      if (tab?.path) invalidateGit(tab.path)
+    }).then((fn) => {
+      if (disposed) fn()
+      else unlisten = fn
+    })
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [invalidateGit])
+
   const updateSettings = useCallback((next: Settings) => {
     setSettings(next)
     void settingsSave(next).catch(() => undefined)
