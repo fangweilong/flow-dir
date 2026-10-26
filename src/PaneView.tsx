@@ -743,6 +743,7 @@ function GitChip({ git, t }: { git: GitStatus; t: Translate }) {
         <path d="M4.5 5.25v5.5M11.5 7.75c0 2.5-2.1 3.6-4.6 4" />
       </svg>
       <span className="truncate font-mono text-[10px] text-fg-strong">{git.branch || t('git.detached')}</span>
+      {!git.upstream && <span className="shrink-0 text-muted-2">{t('git.upstreamMissingShort')}</span>}
       {git.dirty && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" />}
       {git.ahead > 0 && <span className="shrink-0 text-emerald-500">↑{git.ahead}</span>}
       {git.behind > 0 && <span className="shrink-0 text-red-500">↓{git.behind}</span>}
