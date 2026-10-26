@@ -44,14 +44,26 @@ pub struct GitStatus {
     pub upstream: bool,
     /// Any change anywhere in the work tree, not only below the listed folder.
     pub dirty: bool,
+    /// Direct child folders that are repository roots; their rows show a git marker even
+    /// when the repository has nothing to report.
+    pub repos: Vec<String>,
 }
 
 pub fn status(path: &str) -> GitStatus {
+    // Independent of whether the listed folder is itself inside a repository, and cheap:
+    // one metadata probe per child folder, no git process.
+    let repos = child_repos(path);
     let Some(git) = git_binary() else {
-        return GitStatus::default();
+        return GitStatus {
+            repos,
+            ..GitStatus::default()
+        };
     };
     let Some(root) = toplevel(git, path) else {
-        return GitStatus::default();
+        return GitStatus {
+            repos,
+            ..GitStatus::default()
+        };
     };
     let prefix = relative_to_root(&root, path);
     let mut command = Command::new(git);
@@ -76,12 +88,14 @@ pub fn status(path: &str) -> GitStatus {
     let Some(output) = output_with_timeout(&mut command) else {
         return GitStatus {
             root,
+            repos,
             ..GitStatus::default()
         };
     };
     if !output.status.success() {
         return GitStatus {
             root,
+            repos,
             ..GitStatus::default()
         };
     }
@@ -99,6 +113,7 @@ pub fn status(path: &str) -> GitStatus {
         behind,
         upstream,
         dirty,
+        repos,
     }
 }
 
@@ -138,6 +153,26 @@ fn toplevel(git: &PathBuf, dir: &str) -> Option<String> {
     let text = String::from_utf8_lossy(&output.stdout);
     let root = text.trim().trim_end_matches(['/', '\\']).replace('/', "\\");
     (!root.is_empty()).then_some(root)
+}
+
+/// Direct child folders holding git metadata. A probe per child is enough to mark the row:
+/// the folder is a repository root whether `.git` is a directory or the pointer file used
+/// by linked worktrees and submodules.
+fn child_repos(dir: &str) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut repos: Vec<String> = entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter(|entry| {
+            let dot_git = entry.path().join(".git");
+            dot_git.is_dir() || dot_git.is_file()
+        })
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    repos.sort_by_key(|name| name.to_lowercase());
+    repos
 }
 
 /// Runs `command` with a hard deadline. A work tree on an unreachable share (or a stuck
@@ -488,6 +523,21 @@ mod tests {
         assert!(top.files.is_empty(), "{:?}", top.files.iter().map(|f| &f.path).collect::<Vec<_>>());
         assert_eq!(top.dirs, ["newdir"]);
         assert_eq!(top.branch, clean.branch);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn child_repos_marks_repository_folders_only() {
+        let root = std::env::temp_dir().join(format!("flowdir-git-repos-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("repo").join(".git")).unwrap();
+        std::fs::create_dir_all(root.join("plain")).unwrap();
+        std::fs::create_dir_all(root.join("worktree")).unwrap();
+        std::fs::write(root.join("worktree").join(".git"), "gitdir: elsewhere\n").unwrap();
+        std::fs::write(root.join("file.txt"), "x").unwrap();
+
+        assert_eq!(child_repos(root.to_str().unwrap()), ["repo", "worktree"]);
 
         let _ = std::fs::remove_dir_all(&root);
     }

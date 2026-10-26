@@ -98,6 +98,8 @@ export type GitStatus = {
   upstream: boolean
   /** Any change anywhere in the work tree, not only below the listed folder. */
   dirty: boolean
+  /** Child folders that are repository roots, marked on their rows. */
+  repos: string[]
 }
 
 /** Not a repository, or a lookup that failed; also the cache entry for both. */
@@ -110,6 +112,7 @@ export const EMPTY_GIT: GitStatus = {
   behind: 0,
   upstream: false,
   dirty: false,
+  repos: [],
 }
 export type SearchItem = { path: string; name: string; isDir: boolean; size: number; mtime: number }
 export type SearchBatch = {

@@ -3,6 +3,7 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import { FileIcon } from './icons'
 import { crumbs, formatSize, formatTime, isDir, isFsPath, joinPath, parentPath, underPath } from './paths'
 import { buildGitBadges } from './git'
+import type { GitBadges } from './git'
 import { openPath } from './api'
 import { matchBinding } from './shortcuts'
 import type { ShortcutId } from './shortcuts'
@@ -716,6 +717,24 @@ export function PaneView({
   )
 }
 
+function GitBranchIcon({ className }: { className: string }) {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+    >
+      <circle cx="4.5" cy="3.5" r="1.75" />
+      <circle cx="4.5" cy="12.5" r="1.75" />
+      <circle cx="11.5" cy="6" r="1.75" />
+      <path d="M4.5 5.25v5.5M11.5 7.75c0 2.5-2.1 3.6-4.6 4" />
+    </svg>
+  )
+}
+
 /** Branch, uncommitted state and upstream distance; visible even when the tree is clean. */
 function GitChip({ git, t }: { git: GitStatus; t: Translate }) {
   const title = [
@@ -729,19 +748,7 @@ function GitChip({ git, t }: { git: GitStatus; t: Translate }) {
     .join(' · ')
   return (
     <span className="flex min-w-0 max-w-[180px] shrink-0 items-center gap-1" title={title}>
-      <svg
-        viewBox="0 0 16 16"
-        className="h-3 w-3 shrink-0 text-blue-500"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-      >
-        <circle cx="4.5" cy="3.5" r="1.75" />
-        <circle cx="4.5" cy="12.5" r="1.75" />
-        <circle cx="11.5" cy="6" r="1.75" />
-        <path d="M4.5 5.25v5.5M11.5 7.75c0 2.5-2.1 3.6-4.6 4" />
-      </svg>
+      <GitBranchIcon className="h-3 w-3 shrink-0 text-blue-500" />
       <span className="truncate font-mono text-[10px] text-fg-strong">{git.branch || t('git.detached')}</span>
       {!git.upstream && <span className="shrink-0 text-muted-2">{t('git.upstreamMissingShort')}</span>}
       {git.dirty && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" />}
@@ -751,7 +758,10 @@ function GitChip({ git, t }: { git: GitStatus; t: Translate }) {
   )
 }
 
-/** Porcelain letter for a changed entry, or a dot when a folder holds changes below it. */
+/**
+ * Porcelain letter for a changed entry, a dot when a folder holds changes below it, and a
+ * branch icon on every repository folder — clean or not.
+ */
 function GitBadge({
   name,
   dir,
@@ -759,21 +769,25 @@ function GitBadge({
 }: {
   name: string
   dir: boolean
-  badges: ReturnType<typeof buildGitBadges>
+  badges: GitBadges
 }) {
   const key = name.toLowerCase()
   const code = badges.changed.get(key)
-  if (code) {
-    return (
-      <span title={code} className={`shrink-0 text-[10px] font-semibold ${gitTone(code)}`}>
-        {code}
-      </span>
-    )
-  }
-  if (dir && badges.dirtyDirs.has(key)) {
-    return <span title="git" className="h-1.5 w-1.5 shrink-0 rounded-full bg-blue-500/70" />
-  }
-  return null
+  const repo = dir && badges.repos.has(key)
+  const dirty = dir && badges.dirtyDirs.has(key)
+  if (!code && !repo && !dirty) return null
+  return (
+    <span className="flex shrink-0 items-center gap-1">
+      {repo && <GitBranchIcon className="h-3 w-3 text-blue-500/80" />}
+      {code ? (
+        <span title={code} className={`text-[10px] font-semibold ${gitTone(code)}`}>
+          {code}
+        </span>
+      ) : (
+        dirty && <span title="git" className="h-1.5 w-1.5 rounded-full bg-blue-500/70" />
+      )}
+    </span>
+  )
 }
 
 function HeaderCell({
