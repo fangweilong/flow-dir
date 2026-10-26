@@ -35,25 +35,26 @@ export function FileIcon({
   name,
   dir,
   path,
-  size = 16,
+  scale = 1,
 }: {
   name: string
   dir: boolean
   path?: string
-  size?: number
+  /** Base-text multiplier used only for the requested raster size; CSS keeps the icon at 1rem. */
+  scale?: number
 }) {
   const [failed, setFailed] = useState(false)
   if (path && !failed) {
-    const px = Math.max(16, Math.round(size * (window.devicePixelRatio || 1)))
+    const px = Math.max(16, Math.round(16 * scale * (window.devicePixelRatio || 1)))
     return (
       <img
         src={`http://fd.localhost/icon?path=${encodeURIComponent(path)}&s=${px}`}
-        width={size}
-        height={size}
+        width={16}
+        height={16}
         alt=""
         draggable={false}
         className="shrink-0"
-        style={{ width: size, height: size }}
+        style={{ width: '1rem', height: '1rem' }}
         onError={() => setFailed(true)}
       />
     )

@@ -56,6 +56,7 @@ import type {
   UpdateStatus,
 } from './types'
 import { driveKindLabel, makeT } from './i18n'
+import { clampFontSize, fontStack } from './fonts'
 import { DEFAULT_SETTINGS, fromSnapshot, toSnapshot } from './persist'
 import type { Settings } from './persist'
 import { isDir, isFsPath, joinPath, pathKey, treeChain } from './paths'
@@ -496,6 +497,14 @@ export default function App() {
       window.clearTimeout(timer)
     }
   }, [showToast])
+
+  // One source for the whole UI: the root vars drive body text, the rem-derived
+  // spacing/icons, and each pane's row metrics (see PaneView's fontScale).
+  useEffect(() => {
+    const root = document.documentElement
+    root.style.setProperty('--font-ui', fontStack(settings.fontFamily))
+    root.style.setProperty('--font-size-base', `${clampFontSize(settings.fontSize)}px`)
+  }, [settings.fontFamily, settings.fontSize])
 
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)')
@@ -1644,6 +1653,7 @@ export default function App() {
               git={gitByDir[pathKey(ws.tabs[pane.activeTabId]?.path ?? '')] ?? null}
               active={ws.activePaneId === pane.id}
               lang={lang}
+              fontSize={settings.fontSize}
               dropHint={drag?.target?.paneId === pane.id ? drag.target.mode : null}
               draggingTabId={drag?.tabId ?? null}
               onFocusPane={() => focusPane(pane.id)}
@@ -1702,6 +1712,7 @@ export default function App() {
       gitByDir,
       driveList,
       openDriveMenu,
+      settings.fontSize,
     ],
   )
 
@@ -1718,7 +1729,7 @@ export default function App() {
       >
         <div className="flex items-center gap-2" data-tauri-drag-region>
           <img src={iconUrl} alt="" className="h-6 w-6 select-none" draggable={false} />
-          <span data-tauri-drag-region className="text-[13px] font-semibold tracking-tight">
+          <span data-tauri-drag-region className="text-[0.8125rem] font-semibold tracking-tight">
             {t('app.name')}
           </span>
         </div>
@@ -1745,10 +1756,10 @@ export default function App() {
           <LayoutButton title={t('layout.four')} active={layoutInfo.count === 4} onClick={() => applyLayout(4, 'h')} kind={4} />
         </div>
 
-        <div data-tauri-drag-region className="ml-2 min-w-0 flex-1 truncate text-[11px] text-muted-2">
+        <div data-tauri-drag-region className="ml-2 min-w-0 flex-1 truncate text-[0.6875rem] text-muted-2">
           {activeTab ? activeTab.path : ''}
         </div>
-        <div data-tauri-drag-region className="hidden shrink-0 text-[11px] text-muted-2 lg:block">
+        <div data-tauri-drag-region className="hidden shrink-0 text-[0.6875rem] text-muted-2 lg:block">
           {t('layout.hint', { count: layoutInfo.count })}
         </div>
         <button
@@ -1849,7 +1860,7 @@ export default function App() {
               className="flex shrink-0 flex-col gap-4 overflow-y-auto overflow-x-hidden border-r border-line bg-surface-2 px-2 py-3"
             >
               <section>
-                <h2 className="px-2 pb-1 text-[10px] font-semibold tracking-wider text-muted-2">
+                <h2 className="px-2 pb-1 text-[0.625rem] font-semibold tracking-wider text-muted-2">
                   {t('sidebar.quickAccess')}
                 </h2>
                 {quickPlaces.map((place) => (
@@ -1869,7 +1880,7 @@ export default function App() {
                 ))}
               </section>
               <section>
-                <h2 className="px-2 pb-1 text-[10px] font-semibold tracking-wider text-muted-2">
+                <h2 className="px-2 pb-1 text-[0.625rem] font-semibold tracking-wider text-muted-2">
                   {t('sidebar.thisPc')}
                 </h2>
                 <SidebarTree
@@ -1914,7 +1925,7 @@ export default function App() {
 
       {drag?.started && ws && (
         <div
-          className="pointer-events-none fixed z-50 max-w-[220px] truncate rounded-md border border-blue-300 bg-surface/95 px-2 py-1 text-[11px] text-fg shadow-lg"
+          className="pointer-events-none fixed z-50 max-w-[13.75rem] truncate rounded-md border border-blue-300 bg-surface/95 px-2 py-1 text-[0.6875rem] text-fg shadow-lg"
           style={{ left: drag.x + 12, top: drag.y + 10 }}
         >
           {ws.tabs[drag.tabId]?.path
@@ -1924,7 +1935,7 @@ export default function App() {
       )}
 
       {toast && (
-        <div className="pointer-events-none fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-md bg-slate-900/90 px-3 py-1.5 text-[11.5px] text-white shadow-lg dark:bg-slate-100/95 dark:text-slate-900">
+        <div className="pointer-events-none fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-md bg-slate-900/90 px-3 py-1.5 text-[0.71875rem] text-white shadow-lg dark:bg-slate-100/95 dark:text-slate-900">
           {toast}
         </div>
       )}
@@ -1933,6 +1944,7 @@ export default function App() {
         <SearchOverlay
           root={activeTab.path || homeRef.current}
           lang={lang}
+          fontSize={settings.fontSize}
           preferEverything={settings.useEverything}
           onClose={() => setSearchOpen(false)}
           onOpen={(folder) => navigate(activeTab.id, folder)}
@@ -2092,13 +2104,13 @@ function SidebarItem({
       type="button"
       onClick={onClick}
       onContextMenu={onContextMenu}
-      className={`flex w-full items-center gap-2 rounded-md px-2 py-[5px] text-left text-[12px] ${
+      className={`flex w-full items-center gap-2 rounded-md px-2 py-[0.3125rem] text-left text-[0.75rem] ${
         active ? 'bg-sel font-medium text-fg-strong' : 'text-fg hover:bg-surface-3'
       }`}
     >
       {icon}
       <span className="min-w-0 flex-1 truncate">{label}</span>
-      {hint && <span className="shrink-0 text-[10px] text-muted-2">{hint}</span>}
+      {hint && <span className="shrink-0 text-[0.625rem] text-muted-2">{hint}</span>}
     </button>
   )
 }
@@ -2118,7 +2130,7 @@ function CaptionButton({ label, danger, onClick, children }: CaptionButtonProps)
       title={label}
       aria-label={label}
       onClick={onClick}
-      className={`grid w-[46px] place-items-center text-muted transition-colors ${
+      className={`grid w-[2.875rem] place-items-center text-muted transition-colors ${
         danger ? 'hover:bg-[#c42b1c] hover:text-white' : 'hover:bg-surface-3 hover:text-fg'
       }`}
     >

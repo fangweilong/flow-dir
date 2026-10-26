@@ -86,7 +86,7 @@ const TreeRow = memo(function TreeRow({
     <>
       <div
         data-tree-key={key}
-        className={`flex h-[22px] items-center rounded pr-1 ${
+        className={`flex h-[1.375rem] items-center rounded pr-1 ${
           selected
             ? 'bg-sel font-medium text-fg-strong'
             : current
@@ -119,7 +119,7 @@ const TreeRow = memo(function TreeRow({
           type="button"
           onClick={() => onOpen(path)}
           title={path}
-          className="flex min-w-0 flex-1 items-center gap-1.5 py-[3px] text-left text-[12px]"
+          className="flex min-w-0 flex-1 items-center gap-1.5 py-[3px] text-left text-[0.75rem]"
         >
           <Glyph kind={glyph} active={selected} />
           <span className="truncate">{name}</span>

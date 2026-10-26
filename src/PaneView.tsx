@@ -10,6 +10,7 @@ import type { ShortcutId } from './shortcuts'
 import { EMPTY_LIST } from './types'
 import type { Drive, Entry, GitStatus, Lang, ListData, SortKey, SortState } from './types'
 import { driveKindLabel, makeT } from './i18n'
+import { BASE_FONT_SIZE, clampFontSize } from './fonts'
 import type { Translate } from './i18n'
 import type { DropMode, PaneState, TabState } from './workspace'
 
@@ -29,9 +30,14 @@ const gitTone = (code: string) =>
         ? 'text-sky-500'
         : 'text-amber-500'
 
+/** Metrics at the default 13 px text size; every pane scales them by the settings font size. */
 const ROW_H = 28
-const GRID_FULL = 'minmax(0,1fr) 96px 142px'
-const GRID_NO_TIME = 'minmax(0,1fr) 84px'
+const COL_SIZE = 96
+const COL_TIME = 142
+const COL_SIZE_NARROW = 84
+const MIN_WIDTH_TIME = 380
+const MIN_WIDTH_SIZE = 250
+const MIN_WIDTH_FILTER = 420
 const GRID_NAME = 'minmax(0,1fr)'
 
 /** Screen/client coordinates for a context-menu request. */
@@ -59,6 +65,8 @@ type Props = {
   git: GitStatus | null
   active: boolean
   lang: Lang
+  /** Base UI text size, shared with the root CSS variables. */
+  fontSize: number
   dropHint: DropMode | null
   draggingTabId: string | null
   onFocusPane: () => void
@@ -99,6 +107,7 @@ export function PaneView({
   git,
   active,
   lang,
+  fontSize,
   dropHint,
   draggingTabId,
   onFocusPane,
@@ -156,10 +165,21 @@ export function PaneView({
     return () => observer.disconnect()
   }, [])
 
-  const showTime = width === 0 || width >= 380
-  const showSize = width === 0 || width >= 250
-  const showFilter = width === 0 || width >= 420
-  const grid = showTime ? GRID_FULL : showSize ? GRID_NO_TIME : GRID_NAME
+  // Text and rem spacing grow with the setting, so rows, columns and the responsive
+  // breakpoints that hide them must grow by the same factor or the layout overlaps.
+  const fontScale = clampFontSize(fontSize) / BASE_FONT_SIZE
+  const rowHeight = Math.round(ROW_H * fontScale)
+  const sizeCol = Math.round(COL_SIZE * fontScale)
+  const timeCol = Math.round(COL_TIME * fontScale)
+  const narrowSizeCol = Math.round(COL_SIZE_NARROW * fontScale)
+  const showTime = width === 0 || width >= Math.round(MIN_WIDTH_TIME * fontScale)
+  const showSize = width === 0 || width >= Math.round(MIN_WIDTH_SIZE * fontScale)
+  const showFilter = width === 0 || width >= Math.round(MIN_WIDTH_FILTER * fontScale)
+  const grid = showTime
+    ? `minmax(0,1fr) ${sizeCol}px ${timeCol}px`
+    : showSize
+      ? `minmax(0,1fr) ${narrowSizeCol}px`
+      : GRID_NAME
 
   const view = useMemo(() => {
     const q = list.filter.trim().toLowerCase()
@@ -169,9 +189,15 @@ export function PaneView({
   const virtualizer = useVirtualizer({
     count: view.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => ROW_H,
+    estimateSize: () => rowHeight,
     overscan: 10,
   })
+
+  // Constant-size rows: a new estimate must invalidate the cached offsets, otherwise the
+  // scrollbar and spacer keep the old row height after the font size changes.
+  useEffect(() => {
+    virtualizer.measure()
+  }, [rowHeight, virtualizer])
 
   const selectedSize = useMemo(
     () =>
@@ -373,7 +399,7 @@ export function PaneView({
                   onActivateTab(id)
                   onTabContextMenu(id, pointOf(ev))
                 }}
-                className={`group flex h-7 max-w-[220px] shrink-0 cursor-default items-center gap-1 rounded-t-md border border-b-0 px-2 text-[11.5px] ${
+                className={`group flex h-7 max-w-[13.75rem] shrink-0 cursor-default items-center gap-1 rounded-t-md border border-b-0 px-2 text-[0.71875rem] ${
                   selected
                     ? 'border-line bg-surface font-medium text-fg-strong'
                     : 'border-transparent text-muted hover:bg-surface-3'
@@ -381,13 +407,13 @@ export function PaneView({
                 title={tabState.path || t('sidebar.thisPc')}
               >
                 {tabState.path ? (
-                  <FileIcon name={tabState.path} dir path={tabState.path} />
+                  <FileIcon name={tabState.path} dir path={tabState.path} scale={fontScale} />
                 ) : (
                   <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 shrink-0 text-muted-2" fill="currentColor">
                     <path d="M2 5.5C2 4.7 2.7 4 3.5 4h9c.8 0 1.5.7 1.5 1.5v5c0 .8-.7 1.5-1.5 1.5h-9C2.7 12 2 11.3 2 10.5v-5Zm2 4.3h8v.7H4v-.7Z" />
                   </svg>
                 )}
-                <span className="max-w-[150px] truncate">
+                <span className="max-w-[9.375rem] truncate">
                   {tabState.path
                     ? (tabState.path.split('\\').filter(Boolean).pop() ?? tabState.path)
                     : t('sidebar.thisPc')}
@@ -470,7 +496,7 @@ export function PaneView({
               shiftKey: false,
             })
           }}
-          className="ml-1 flex h-6 shrink-0 items-center gap-0.5 rounded border border-line bg-surface-2 px-1.5 text-[11.5px] leading-none text-fg hover:bg-surface-3"
+          className="ml-1 flex h-6 shrink-0 items-center gap-0.5 rounded border border-line bg-surface-2 px-1.5 text-[0.71875rem] leading-none text-fg hover:bg-surface-3"
         >
           <span className="font-medium">
             {location ? location.name : root ? t('sidebar.thisPc') : driveRoot(tab?.path)}
@@ -499,12 +525,12 @@ export function PaneView({
                 setAddressDraft(null)
               }
             }}
-            className="mx-0.5 h-6 min-w-0 flex-1 rounded border border-blue-400 bg-surface px-1.5 text-[11.5px] outline-none"
+            className="mx-0.5 h-6 min-w-0 flex-1 rounded border border-blue-400 bg-surface px-1.5 text-[0.71875rem] outline-none"
           />
         ) : (
-        <div className="no-bar mx-0.5 flex h-6 min-w-0 flex-1 items-center overflow-x-auto overflow-y-hidden rounded border border-line bg-surface-2 px-1 text-[11.5px] leading-none">
+        <div className="no-bar mx-0.5 flex h-6 min-w-0 flex-1 items-center overflow-x-auto overflow-y-hidden rounded border border-line bg-surface-2 px-1 text-[0.71875rem] leading-none">
           {root && (
-            <span className="shrink-0 px-1 py-1 text-[11.5px] font-medium leading-none text-fg-strong">
+            <span className="shrink-0 px-1 py-1 text-[0.71875rem] font-medium leading-none text-fg-strong">
               {t('sidebar.thisPc')}
             </span>
           )}
@@ -514,7 +540,7 @@ export function PaneView({
               <button
                 type="button"
                 onClick={() => tab && onNavigate(tab.id, part.path)}
-                className={`max-w-[160px] truncate rounded px-1 py-1 leading-none hover:bg-surface-3 ${
+                className={`max-w-[10rem] truncate rounded px-1 py-1 leading-none hover:bg-surface-3 ${
                   i === parts.length - 1 ? 'font-medium text-fg-strong' : 'text-muted'
                 }`}
               >
@@ -530,7 +556,7 @@ export function PaneView({
             value={list.filter}
             onChange={(e) => tab && update(tab.id, (d) => ({ ...d, filter: e.target.value }))}
             placeholder={t('list.filter')}
-            className="h-6 w-[84px] shrink-0 rounded border border-line bg-surface-2 px-1.5 text-[11px] outline-none placeholder:text-muted-2 focus:border-blue-400 focus:bg-surface"
+            className="h-6 w-[5.25rem] shrink-0 rounded border border-line bg-surface-2 px-1.5 text-[0.6875rem] outline-none placeholder:text-muted-2 focus:border-blue-400 focus:bg-surface"
           />
         )}
         <button
@@ -582,14 +608,14 @@ export function PaneView({
       >
         {list.error && !root && (
           <div className="m-3 flex items-start gap-2 rounded-md border border-red-300 bg-red-50 p-2 text-red-800 dark:border-red-900 dark:bg-red-950/50 dark:text-red-200">
-            <div className="font-mono text-[10px] font-semibold">{list.error.code}</div>
-            <div className="min-w-0 flex-1 break-words text-[11px]">
+            <div className="font-mono text-[0.625rem] font-semibold">{list.error.code}</div>
+            <div className="min-w-0 flex-1 break-words text-[0.6875rem]">
               {list.error.detail || t('list.readError')}
             </div>
             <button
               type="button"
               onClick={() => tab && onNavigate(tab.id, tab.path)}
-              className="rounded border border-red-300 px-1.5 py-0.5 text-[10px] hover:bg-red-100 dark:border-red-800 dark:hover:bg-red-900/40"
+              className="rounded border border-red-300 px-1.5 py-0.5 text-[0.625rem] hover:bg-red-100 dark:border-red-800 dark:hover:bg-red-900/40"
             >
               {t('list.retry')}
             </button>
@@ -610,11 +636,11 @@ export function PaneView({
                 }
                 onContextMenu={(ev) => ev.preventDefault()}
                 title={drive.root}
-                className="flex h-7 cursor-default items-center gap-1.5 border-b border-line/60 px-1.5 text-[12.5px] hover:bg-surface-3"
+                className="flex h-7 cursor-default items-center gap-1.5 border-b border-line/60 px-1.5 text-[0.78125rem] hover:bg-surface-3"
               >
-                <FileIcon name={drive.name} dir path={drive.root} />
+                <FileIcon name={drive.name} dir path={drive.root} scale={fontScale} />
                 <span className="truncate font-medium text-fg-strong">{drive.name}</span>
-                <span className="shrink-0 text-[11px] text-muted-2">{driveKindLabel(t, drive.kind)}</span>
+                <span className="shrink-0 text-[0.6875rem] text-muted-2">{driveKindLabel(t, drive.kind)}</span>
               </div>
             ))}
           </div>
@@ -640,26 +666,26 @@ export function PaneView({
                   onRowContextMenu(entry, pointOf(e))
                 }}
                 onDoubleClick={() => activate(entry)}
-                className={`absolute left-0 top-0 grid w-full items-center border-b border-line/60 pr-1.5 text-[12.5px] ${
+                className={`absolute left-0 top-0 grid w-full items-center border-b border-line/60 pr-1.5 text-[0.78125rem] ${
                   isSelected ? 'bg-sel text-fg-strong' : 'hover:bg-surface-3'
                 }`}
-                style={{ height: ROW_H, transform: `translateY(${vi.start}px)`, gridTemplateColumns: grid }}
+                style={{ height: rowHeight, transform: `translateY(${vi.start}px)`, gridTemplateColumns: grid }}
               >
                 <div className="flex min-w-0 items-center gap-1.5 pl-1.5">
                   <span className="relative shrink-0">
-                    <FileIcon name={entry.name} dir={dir} path={joinPath(tab.path, entry.name)} />
+                    <FileIcon name={entry.name} dir={dir} path={joinPath(tab.path, entry.name)} scale={fontScale} />
                     <GitRepoBadge name={entry.name} dir={dir} badges={gitBadges} t={t} />
                   </span>
                   <span className={`truncate ${dir ? 'font-medium text-fg-strong' : ''}`}>{entry.name}</span>
                   <GitBadge name={entry.name} dir={dir} badges={gitBadges} />
                 </div>
                 {showSize && (
-                  <div className="tabular pr-1.5 text-right text-[11px] text-muted">
+                  <div className="tabular pr-1.5 text-right text-[0.6875rem] text-muted">
                     {formatSize(entry.size, dir)}
                   </div>
                 )}
                 {showTime && (
-                  <div className="tabular pl-1.5 text-[11px] text-muted">{formatTime(entry.mtime)}</div>
+                  <div className="tabular pl-1.5 text-[0.6875rem] text-muted">{formatTime(entry.mtime)}</div>
                 )}
               </div>
             )
@@ -671,14 +697,14 @@ export function PaneView({
             {list.loading ? (
               <div className="flex flex-col items-center gap-2">
                 <div className="h-4 w-4 animate-spin rounded-full border-2 border-line border-t-blue-500" />
-                <div className="text-[11px]">
+                <div className="text-[0.6875rem]">
                   {t('list.loading')} {list.scanned > 0 && t('list.scanned', { count: list.scanned })}
                 </div>
               </div>
             ) : list.filter ? (
-              <div className="text-[11px]">{t('list.noMatch', { query: list.filter })}</div>
+              <div className="text-[0.6875rem]">{t('list.noMatch', { query: list.filter })}</div>
             ) : (
-              <div className="text-[11px]">{t('list.empty')}</div>
+              <div className="text-[0.6875rem]">{t('list.empty')}</div>
             )}
           </div>
         )}
@@ -686,7 +712,7 @@ export function PaneView({
 
       <div
         data-status
-        className="flex h-6 shrink-0 items-center justify-between border-t border-line bg-surface-2 px-2 text-[10.5px] text-muted"
+        className="flex h-6 shrink-0 items-center justify-between border-t border-line bg-surface-2 px-2 text-[0.65625rem] text-muted"
       >
         <div className="flex min-w-0 items-center gap-2">
           {git?.root && <GitChip git={git} t={t} />}
@@ -704,7 +730,7 @@ export function PaneView({
             <span>{t('list.scanning', { count: list.scanned })}</span>
           )}
         </div>
-        <span className="max-w-[45%] truncate font-mono text-[9.5px] text-muted-2">{tab?.path}</span>
+        <span className="max-w-[45%] truncate font-mono text-[0.59375rem] text-muted-2">{tab?.path}</span>
       </div>
 
       {dropHint && (
@@ -750,9 +776,9 @@ function GitChip({ git, t }: { git: GitStatus; t: Translate }) {
     .filter(Boolean)
     .join(' · ')
   return (
-    <span className="flex min-w-0 max-w-[180px] shrink-0 items-center gap-1" title={title}>
+    <span className="flex min-w-0 max-w-[11.25rem] shrink-0 items-center gap-1" title={title}>
       <GitBranchIcon className="h-3 w-3 shrink-0 text-blue-500" />
-      <span className="truncate font-mono text-[10px] text-fg-strong">{git.branch || t('git.detached')}</span>
+      <span className="truncate font-mono text-[0.625rem] text-fg-strong">{git.branch || t('git.detached')}</span>
       {!git.upstream && <span className="shrink-0 text-muted-2">{t('git.upstreamMissingShort')}</span>}
       {git.dirty && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" />}
       {git.ahead > 0 && <span className="shrink-0 text-emerald-500">↑{git.ahead}</span>}
@@ -802,7 +828,7 @@ function GitRepoBadge({
       className={`absolute -bottom-0.5 -right-1 grid h-3 w-3 place-items-center rounded-full text-white ring-1 ring-surface ${tone}`}
     >
       {repo.conflict ? (
-        <span className="text-[9px] font-bold leading-none">!</span>
+        <span className="text-[0.5625rem] font-bold leading-none">!</span>
       ) : repo.dirty ? (
         <svg viewBox="0 0 16 16" className="h-2 w-2" fill="currentColor" aria-hidden>
           <path d="M4 12.4l.9-3.3 5.9-5.9a1.3 1.3 0 0 1 1.8 0l.2.2a1.3 1.3 0 0 1 0 1.8L6.9 11.1 2.9 12.4Z" />
@@ -864,7 +890,7 @@ function GitBadge({
   const code = badges.changed.get(key)
   if (code) {
     return (
-      <span title={code} className={`shrink-0 text-[10px] font-semibold ${gitTone(code)}`}>
+      <span title={code} className={`shrink-0 text-[0.625rem] font-semibold ${gitTone(code)}`}>
         {code}
       </span>
     )
@@ -893,12 +919,12 @@ function HeaderCell({
     <button
       type="button"
       onClick={() => onSort(k)}
-      className={`flex h-full items-center gap-1 px-1.5 text-[10.5px] font-medium tracking-wide text-muted hover:text-fg ${
+      className={`flex h-full items-center gap-1 px-1.5 text-[0.65625rem] font-medium tracking-wide text-muted hover:text-fg ${
         align === 'right' ? 'justify-end' : 'justify-start'
       }`}
     >
       {label}
-      <span className={`text-[8px] ${active ? 'text-blue-500' : 'text-transparent'}`}>
+      <span className={`text-[0.5rem] ${active ? 'text-blue-500' : 'text-transparent'}`}>
         {sort.dir === 'asc' ? '▲' : '▼'}
       </span>
     </button>

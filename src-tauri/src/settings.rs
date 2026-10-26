@@ -80,6 +80,10 @@ pub struct Settings {
     /// Automatic update check interval in hours; `0` disables background checks and
     /// leaves only the manual button in Settings.
     pub update_interval_hours: u32,
+    /// Single UI font family, assembled into a stack by the frontend.
+    pub font_family: String,
+    /// Base UI font size in px; drives the rem scale of the whole interface.
+    pub font_size: u32,
 }
 
 fn default_language() -> String {
@@ -88,6 +92,41 @@ fn default_language() -> String {
 
 fn default_theme() -> String {
     "system".to_string()
+}
+
+fn default_font_family() -> String {
+    "Segoe UI Variable Text".to_string()
+}
+
+fn default_font_size() -> u32 {
+    13
+}
+
+const FONT_SIZE_MIN: u32 = 12;
+const FONT_SIZE_MAX: u32 = 20;
+
+/// A font family, not a stack: quotes, commas and separators would change the generated
+/// CSS or let a hand-edited file break out of the property.
+fn sanitize_font_family(value: &str) -> String {
+    let trimmed = value.trim();
+    let valid = !trimmed.is_empty()
+        && trimmed.len() <= 64
+        && !trimmed
+            .chars()
+            .any(|c| c.is_control() || matches!(c, ';' | '{' | '}' | '"' | '\'' | ',' | '\\'));
+    if valid {
+        trimmed.to_string()
+    } else {
+        default_font_family()
+    }
+}
+
+fn sanitize_font_size(value: u32) -> u32 {
+    if (FONT_SIZE_MIN..=FONT_SIZE_MAX).contains(&value) {
+        value
+    } else {
+        default_font_size()
+    }
 }
 
 impl Default for Settings {
@@ -107,7 +146,18 @@ impl Default for Settings {
             shortcuts: Vec::new(),
             gpu_accel: true,
             update_interval_hours: 24,
+            font_family: default_font_family(),
+            font_size: default_font_size(),
         }
+    }
+}
+
+impl Settings {
+    /// Repairs values that a hand-edited file or an older build may carry.
+    pub fn normalize(mut self) -> Self {
+        self.font_family = sanitize_font_family(&self.font_family);
+        self.font_size = sanitize_font_size(self.font_size);
+        self
     }
 }
 
@@ -123,6 +173,10 @@ language = "zh-CN"
 
 # 主题 / theme: "system" | "light" | "dark"
 theme = "system"
+
+# 界面字体与字号（像素，12–20）/ UI font family and size in px
+font_family = "Segoe UI Variable Text"
+font_size = 13
 
 # 启动时展开预览面板 / show the preview panel on launch
 preview_open = true
@@ -179,6 +233,8 @@ struct FileSettings {
     preview_width: u32,
     gpu_accel: bool,
     update_interval_hours: u32,
+    font_family: String,
+    font_size: u32,
     custom_places: Vec<QuickPlace>,
     hidden_places: Vec<String>,
     external_preview: Vec<ExternalPreview>,
@@ -199,6 +255,8 @@ impl Default for FileSettings {
             preview_width: base.preview_width,
             gpu_accel: base.gpu_accel,
             update_interval_hours: base.update_interval_hours,
+            font_family: base.font_family,
+            font_size: base.font_size,
             custom_places: base.custom_places,
             hidden_places: base.hidden_places,
             external_preview: base.external_preview,
@@ -220,6 +278,8 @@ impl From<FileSettings> for Settings {
             preview_width: file.preview_width,
             gpu_accel: file.gpu_accel,
             update_interval_hours: file.update_interval_hours,
+            font_family: file.font_family,
+            font_size: file.font_size,
             custom_places: file.custom_places,
             hidden_places: file.hidden_places,
             external_preview: file.external_preview,
@@ -236,8 +296,7 @@ pub fn load<R: Runtime>(app: &AppHandle<R>) -> Settings {
     if let Ok(text) = std::fs::read_to_string(&path) {
         match toml_edit::de::from_str::<FileSettings>(&text) {
             Ok(file) => {
-                let settings: Settings = file.into();
-                return settings;
+                return Settings::from(file).normalize();
             }
             Err(_) => {
                 // Keep whatever the user had instead of letting the next save overwrite it.
@@ -249,6 +308,7 @@ pub fn load<R: Runtime>(app: &AppHandle<R>) -> Settings {
     let legacy = dir.join("settings.json");
     if let Ok(bytes) = std::fs::read(&legacy) {
         if let Ok(settings) = serde_json::from_slice::<Settings>(&bytes) {
+            let settings = settings.normalize();
             if save(app, &settings).is_ok() {
                 let _ = std::fs::remove_file(&legacy);
             }
@@ -284,6 +344,8 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), A
         "update_interval_hours",
         Value::from(settings.update_interval_hours as i64),
     );
+    set_value(&mut doc, "font_family", Value::from(settings.font_family.as_str()));
+    set_value(&mut doc, "font_size", Value::from(settings.font_size as i64));
 
     let mut hidden = toml_edit::Array::new();
     for key in &settings.hidden_places {
@@ -360,6 +422,36 @@ fn set_value(doc: &mut DocumentMut, key: &str, value: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_font_values_fall_back() {
+        let parsed = Settings {
+            font_family: "  Segoe UI  ".to_string(),
+            font_size: 18,
+            ..Settings::default()
+        }
+        .normalize();
+        assert_eq!(parsed.font_family, "Segoe UI");
+        assert_eq!(parsed.font_size, 18);
+
+        for bad in ["", "Bad; color: red", "\"Arial\", serif", "Arial}"] {
+            let parsed = Settings {
+                font_family: bad.to_string(),
+                ..Settings::default()
+            }
+            .normalize();
+            assert_eq!(parsed.font_family, "Segoe UI Variable Text", "{bad}");
+        }
+
+        for bad in [0, 11, 21, u32::MAX] {
+            let parsed = Settings {
+                font_size: bad,
+                ..Settings::default()
+            }
+            .normalize();
+            assert_eq!(parsed.font_size, 13, "{bad}");
+        }
+    }
 
     #[test]
     fn template_and_inline_rules_parse() {

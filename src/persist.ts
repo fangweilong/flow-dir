@@ -24,6 +24,10 @@ export type Settings = {
   shortcuts: ShortcutOverride[]
   gpuAccel: boolean
   updateIntervalHours: number
+  /** Single UI font family; the frontend appends fallbacks. */
+  fontFamily: string
+  /** Base UI font size in px (12–20); drives the whole rem scale. */
+  fontSize: number
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -41,6 +45,8 @@ export const DEFAULT_SETTINGS: Settings = {
   shortcuts: [],
   gpuAccel: true,
   updateIntervalHours: 24,
+  fontFamily: 'Segoe UI Variable Text',
+  fontSize: 13,
 }
 
 type Snapshot = {
