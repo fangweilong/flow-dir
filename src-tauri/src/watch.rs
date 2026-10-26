@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Mutex;
 
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify::event::ModifyKind;
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Runtime};
 
@@ -15,6 +16,9 @@ pub struct Watchers(pub Mutex<HashMap<String, RecommendedWatcher>>);
 #[serde(rename_all = "camelCase")]
 pub struct DirChanged {
     pub pane_id: String,
+    /// False for writes that cannot add, remove or rename a row; the listed names stay
+    /// valid and re-enumerating the folder would only cost a flash.
+    pub structural: bool,
 }
 
 pub fn set<R: Runtime>(
@@ -48,6 +52,7 @@ pub fn set<R: Runtime>(
         });
         let payload = DirChanged {
             pane_id: id.clone(),
+            structural: is_structural(event.kind),
         };
         let _ = if git_only {
             handle.emit("flowdir:git-changed", payload)
@@ -72,6 +77,21 @@ pub fn set<R: Runtime>(
 
 pub fn clear(watchers: &Watchers, pane_id: &str) {
     watchers.0.lock().unwrap().remove(pane_id);
+}
+
+/// A change that can add, remove or rename a top-level row. Everything else rewrites an
+/// existing entry only, so the pane keeps its rows instead of re-enumerating the folder.
+///
+/// Windows reports in-place writes and attribute updates as `Modify(Any)`; creations,
+/// deletions and the temp-file rename used by atomic saves arrive as `Create`, `Remove`
+/// and `Modify(Name)`.
+fn is_structural(kind: EventKind) -> bool {
+    !matches!(
+        kind,
+        EventKind::Modify(ModifyKind::Data(_))
+            | EventKind::Modify(ModifyKind::Any)
+            | EventKind::Access(_)
+    )
 }
 
 /// Nearest ancestor carrying git metadata, resolving the `.git` file used by linked
@@ -104,6 +124,27 @@ fn metadata_dir(dir: &FsPath) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use notify::event::{CreateKind, DataChange, MetadataKind, RenameMode, RemoveKind};
+
+    #[test]
+    fn only_name_changes_are_structural() {
+        assert!(!is_structural(EventKind::Modify(ModifyKind::Any)));
+        assert!(!is_structural(EventKind::Modify(ModifyKind::Data(
+            DataChange::Content
+        ))));
+        assert!(!is_structural(EventKind::Access(
+            notify::event::AccessKind::Any
+        )));
+        assert!(is_structural(EventKind::Create(CreateKind::Any)));
+        assert!(is_structural(EventKind::Remove(RemoveKind::Any)));
+        assert!(is_structural(EventKind::Modify(ModifyKind::Name(
+            RenameMode::Both
+        ))));
+        // Attribute changes can hide or reveal a row under the hidden-files setting.
+        assert!(is_structural(EventKind::Modify(ModifyKind::Metadata(
+            MetadataKind::Any
+        ))));
+    }
 
     #[test]
     fn metadata_dir_finds_the_metadata_of_a_parent_repository() {

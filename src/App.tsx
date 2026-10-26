@@ -79,6 +79,19 @@ import type { DropMode, Node, PaneState, TabState, Workspace } from './workspace
 /** Folders whose full change list stays cached; older ones refetch on demand. */
 const GIT_CACHE_LIMIT = 64
 
+/** Same rows in the same order; a quiet rescan must not replace the state object. */
+const sameEntries = (a: Entry[], b: Entry[]): boolean => {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i]
+    const y = b[i]
+    if (x.name !== y.name || x.size !== y.size || x.mtime !== y.mtime || x.attrs !== y.attrs || x.id !== y.id) {
+      return false
+    }
+  }
+  return true
+}
+
 type DragState = {
   tabId: string
   fromPane: string
@@ -158,6 +171,10 @@ export default function App() {
   const readyRef = useRef(false)
   const watched = useRef(new Map<string, string>())
   const rescanTimers = useRef(new Map<string, number>())
+  /** Strongest pending change per pane: a content event must not swallow a structural one. */
+  const pendingStructural = useRef(new Map<string, boolean>())
+  /** Latest git cache, so the event listener can skip probes for folders outside a repository. */
+  const gitByDirRef = useRef<Record<string, GitStatus>>({})
   const toastTimer = useRef<number | null>(null)
   const notifiedUpdate = useRef<string | null>(null)
   const previewRequest = useRef(0)
@@ -171,6 +188,10 @@ export default function App() {
   const gitSeq = useRef(new Map<string, number>())
   const sidebarRef = useRef<HTMLElement | null>(null)
   const treeNodesRef = useRef<Record<string, string[]>>({})
+
+  useEffect(() => {
+    gitByDirRef.current = gitByDir
+  }, [gitByDir])
 
   const lang: Lang = settings.language
   const t = useMemo(() => makeT(lang), [lang])
@@ -331,58 +352,92 @@ export default function App() {
     [showToast, t],
   )
 
-  const startScan = useCallback((tabId: string, path: string, sort: SortState, hidden: boolean) => {
-    // The drive overview is rendered from the drive list, not from a directory scan:
-    // retire the previous folder's scan so it stops enumerating and cannot write into
-    // this tab any more.
-    if (!path) {
-      gens.current[tabId] = (gens.current[tabId] ?? 0) + 1
-      void cancelDir(tabId).catch(() => undefined)
-      setListData((prev) => ({ ...prev, [tabId]: { ...emptyList(), loading: false } }))
-      return
-    }
-    const gen = (gens.current[tabId] ?? 0) + 1
-    gens.current[tabId] = gen
-    const acc: Entry[] = []
-    setListData((prev) => ({
-      ...prev,
-      [tabId]: { ...emptyList(), filter: prev[tabId]?.filter ?? '' },
-    }))
-    void cancelDir(tabId).catch(() => undefined)
-    listDir(path, tabId, gen, sort.key, sort.dir, hidden, (batch) => {
-      if (gens.current[tabId] !== gen) return
-      if (batch.error) {
-        setListData((prev) => ({
-          ...prev,
-          [tabId]: { ...(prev[tabId] ?? emptyList()), loading: false, error: batch.error },
-        }))
+  /**
+   * `keep` re-reads the same folder behind the rows already on screen: batches accumulate
+   * silently and swap in once the listing is complete, so a background write never
+   * collapses the pane, drops the selection or scrolls to the top.
+   */
+  const startScan = useCallback(
+    (tabId: string, path: string, sort: SortState, hidden: boolean, keep = false) => {
+      // The drive overview is rendered from the drive list, not from a directory scan:
+      // retire the previous folder's scan so it stops enumerating and cannot write into
+      // this tab any more.
+      if (!path) {
+        gens.current[tabId] = (gens.current[tabId] ?? 0) + 1
+        void cancelDir(tabId).catch(() => undefined)
+        setListData((prev) => ({ ...prev, [tabId]: { ...emptyList(), loading: false } }))
         return
       }
-      for (const [name, size, mtime, attrs, id] of batch.items) {
-        acc.push({ name, size, mtime, attrs, id })
+      const gen = (gens.current[tabId] ?? 0) + 1
+      gens.current[tabId] = gen
+      const acc: Entry[] = []
+      if (!keep) {
+        setListData((prev) => ({
+          ...prev,
+          [tabId]: { ...emptyList(), filter: prev[tabId]?.filter ?? '' },
+        }))
       }
-      setListData((prev) => ({
-        ...prev,
-        [tabId]: {
-          ...(prev[tabId] ?? emptyList()),
-          entries: batch.items.length ? acc.slice() : (prev[tabId]?.entries ?? []),
-          scanned: batch.scanned,
-          loading: !batch.done,
-          error: null,
-        },
-      }))
-    }).catch((e: unknown) => {
-      if (gens.current[tabId] !== gen) return
-      setListData((prev) => ({
-        ...prev,
-        [tabId]: {
-          ...(prev[tabId] ?? emptyList()),
-          loading: false,
-          error: { code: 'IPC', detail: String(e) },
-        },
-      }))
-    })
-  }, [])
+      void cancelDir(tabId).catch(() => undefined)
+      listDir(path, tabId, gen, sort.key, sort.dir, hidden, (batch) => {
+        if (gens.current[tabId] !== gen) return
+        if (batch.error) {
+          setListData((prev) => ({
+            ...prev,
+            [tabId]: { ...(prev[tabId] ?? emptyList()), loading: false, error: batch.error },
+          }))
+          return
+        }
+        for (const [name, size, mtime, attrs, id] of batch.items) {
+          acc.push({ name, size, mtime, attrs, id })
+        }
+        if (keep && !batch.done) return
+        setListData((prev) => {
+          const old = prev[tabId] ?? emptyList()
+          if (!keep) {
+            return {
+              ...prev,
+              [tabId]: {
+                ...old,
+                entries: batch.items.length ? acc.slice() : old.entries,
+                scanned: batch.scanned,
+                loading: !batch.done,
+                error: null,
+              },
+            }
+          }
+          if (!old.loading && sameEntries(old.entries, acc)) return prev
+          // Rows that vanished while the pane was idle must not stay selected: the next
+          // action targets names, so a stale set would act on something no longer there.
+          const names = new Set(acc.map((entry) => entry.name))
+          const selected = new Set<string>()
+          for (const name of old.selected) if (names.has(name)) selected.add(name)
+          return {
+            ...prev,
+            [tabId]: {
+              ...old,
+              entries: acc,
+              scanned: batch.scanned,
+              loading: false,
+              error: null,
+              selected,
+              anchor: old.anchor < acc.length ? old.anchor : -1,
+            },
+          }
+        })
+      }).catch((e: unknown) => {
+        if (gens.current[tabId] !== gen) return
+        setListData((prev) => ({
+          ...prev,
+          [tabId]: {
+            ...(prev[tabId] ?? emptyList()),
+            loading: false,
+            error: { code: 'IPC', detail: String(e) },
+          },
+        }))
+      })
+    },
+    [],
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -543,21 +598,34 @@ export default function App() {
   useEffect(() => {
     let disposed = false
     let unlisten: (() => void) | undefined
-    void listen<{ paneId: string }>('flowdir:dir-changed', (event) => {
+    void listen<{ paneId: string; structural: boolean }>('flowdir:dir-changed', (event) => {
       const paneId = event.payload.paneId
+      // A burst can mix creations with writes; the structural one decides the reaction.
+      pendingStructural.current.set(
+        paneId,
+        event.payload.structural || pendingStructural.current.get(paneId) === true,
+      )
       const existing = rescanTimers.current.get(paneId)
       if (existing) window.clearTimeout(existing)
       rescanTimers.current.set(
         paneId,
         window.setTimeout(() => {
           rescanTimers.current.delete(paneId)
+          const structural = pendingStructural.current.get(paneId) === true
+          pendingStructural.current.delete(paneId)
           const current = wsRef.current
           if (!current) return
           const pane = current.panes[paneId]
           const tab = pane ? current.tabs[pane.activeTabId] : undefined
           if (!pane || !tab) return
           if (watched.current.get(paneId) !== tab.path) return
-          startScan(tab.id, tab.path, pane.sort, pane.hidden)
+          if (!structural) {
+            // Writes leave the row list intact; only git badges can go stale, and only
+            // when this folder already resolved to a repository.
+            if (gitByDirRef.current[pathKey(tab.path)]?.root) invalidateGit(tab.path)
+            return
+          }
+          startScan(tab.id, tab.path, pane.sort, pane.hidden, true)
           invalidateTree(tab.path)
           invalidateGit(tab.path)
         }, 250),
@@ -571,6 +639,7 @@ export default function App() {
       unlisten?.()
       for (const timer of rescanTimers.current.values()) window.clearTimeout(timer)
       rescanTimers.current.clear()
+      pendingStructural.current.clear()
     }
   }, [invalidateGit, invalidateTree, startScan])
 
