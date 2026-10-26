@@ -15,6 +15,7 @@ mod search;
 mod settings;
 mod shell_menu;
 mod store;
+mod taskbar;
 mod theme;
 mod titlebar;
 mod update;
@@ -507,6 +508,39 @@ async fn restore_recycle(paths: Vec<String>) -> Result<restore::RestoreReport, A
         .map_err(|e| ApiError::new("RESTORE_TASK", e.to_string()))?
 }
 
+/// Taskbar progress for long operations; `state` is normal/error/paused/none.
+#[tauri::command]
+fn taskbar_progress(
+    app: tauri::AppHandle,
+    state: String,
+    completed: u64,
+    total: u64,
+) -> Result<(), ApiError> {
+    let hwnd = app
+        .get_webview_window("main")
+        .and_then(|window| window.hwnd().ok())
+        .ok_or_else(|| ApiError::new("NO_WINDOW", "main window is gone"))?;
+    taskbar::progress(hwnd.0 as isize, &state, completed, total)
+}
+
+/// Background completion reminder: a system toast plus a taskbar-button flash.
+#[tauri::command]
+fn notify_op(app: tauri::AppHandle, title: String, body: String) -> Result<(), ApiError> {
+    use tauri_plugin_notification::NotificationExt;
+    if let Some(hwnd) = app
+        .get_webview_window("main")
+        .and_then(|window| window.hwnd().ok())
+    {
+        taskbar::flash(hwnd.0 as isize);
+    }
+    app.notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
+        .map_err(|e| ApiError::new("NOTIFY", e.to_string()))
+}
+
 #[tauri::command]
 fn search_cancel(state: tauri::State<'_, search::SearchState>) {
     state.cancel();
@@ -630,6 +664,7 @@ fn init_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             show_main(app);
         }))
@@ -753,6 +788,8 @@ fn main() {
             shell_properties,
             drive_eject,
             restore_recycle,
+            taskbar_progress,
+            notify_op,
             app_info,
             update_check,
             update_install

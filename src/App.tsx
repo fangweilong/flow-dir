@@ -26,6 +26,7 @@ import {
   layoutPreserve,
   layoutSave,
   listDir,
+  notifyOp,
   openPath,
   opCancel,
   opStart,
@@ -39,6 +40,7 @@ import {
   shellMenuBackgroundShow,
   shellMenuShow,
   shellProperties,
+  taskbarProgress,
   titlebarMenu,
   treeDirs,
   updateCheck,
@@ -219,6 +221,10 @@ export default function App() {
   /** A permanent delete succeeded last, so an empty stack is not "nothing happened". */
   const lastIrreversible = useRef(false)
   const notifiedUpdate = useRef<string | null>(null)
+  /** Latest taskbar aggregate; IPC is coalesced so progress ticks do not spawn threads. */
+  const taskbarWant = useRef<{ state: string; done: number; total: number } | null>(null)
+  const taskbarTimer = useRef<number | null>(null)
+  const taskbarSentAt = useRef(0)
   const previewRequest = useRef(0)
   const treePending = useRef(new Set<string>())
   /** Per-folder request generation; a reply from an older mode is dropped. */
@@ -382,6 +388,48 @@ export default function App() {
     if (toastTimer.current) window.clearTimeout(toastTimer.current)
     toastTimer.current = window.setTimeout(() => setToast(null), 2200)
   }, [])
+
+  /**
+   * Taskbar progress mirrors the aggregate of running operations: one bar for the batch,
+   * error/paused when a tick failed or was canceled, cleared once nothing is running.
+   */
+  useEffect(() => {
+    const active = Object.values(ops).filter((op) => !op.done)
+    const state = !active.length
+      ? 'none'
+      : active.some((op) => op.failedCount > 0 || op.error)
+        ? 'error'
+        : active.some((op) => op.aborted)
+          ? 'paused'
+          : 'normal'
+    let done = 0
+    let total = 0
+    for (const op of active) {
+      const each = Math.max(op.total, 1)
+      done += Math.min(op.current, each)
+      total += each
+    }
+    taskbarWant.current = { state, done, total }
+    const flush = () => {
+      taskbarTimer.current = null
+      const want = taskbarWant.current
+      if (!want) return
+      taskbarSentAt.current = Date.now()
+      void taskbarProgress(want.state, want.done, want.total).catch(() => undefined)
+    }
+    // A pending trailing flush already sends the newest value when it fires.
+    if (taskbarTimer.current) return
+    const wait = 160 - (Date.now() - taskbarSentAt.current)
+    if (wait <= 0) flush()
+    else taskbarTimer.current = window.setTimeout(flush, wait)
+  }, [ops])
+
+  useEffect(
+    () => () => {
+      if (taskbarTimer.current) window.clearTimeout(taskbarTimer.current)
+    },
+    [],
+  )
 
   /** Shared by F3 and the preview panel button; the backend owns the per-extension rules. */
   const openExternalPreview = useCallback(
@@ -1253,6 +1301,16 @@ export default function App() {
             return next
           })
         }, delay)
+      // With the window in the background the toast and the card are invisible, so the
+      // completion is pushed to a system notification (and the taskbar button flashes).
+      const remind = (text: string) => {
+        if (!settingsRef.current.notifyOps || document.hasFocus()) return
+        void notifyOp(t('notify.title'), text).catch(() => undefined)
+      }
+      const announce = (text: string) => {
+        showToast(text)
+        remind(text)
+      }
       opStart(
         {
           opId,
@@ -1266,21 +1324,21 @@ export default function App() {
           setOps((prev) => (prev[opId] ? { ...prev, [opId]: progress } : prev))
           if (!progress.done) return
           if (progress.error) {
-            showToast(t('op.failed', { code: progress.error.code }))
+            announce(t('op.failed', { code: progress.error.code }))
             drop(5000)
             return
           }
           // Cancellation wins over the item failures it produced: those items were not
           // attempted, so they are not "failed" from the user's point of view.
           if (progress.aborted) {
-            showToast(t('op.canceled'))
+            announce(t('op.canceled'))
             drop(2500)
             return
           }
           if (progress.failedCount > 0) {
             const failed = progress.failedCount
             const ok = Math.max(0, progress.total - failed)
-            showToast(t('op.partial', { ok, failed }))
+            announce(t('op.partial', { ok, failed }))
             // Rows that did make it are on disk; a stale list would hide them.
             options?.after?.()
             refreshPanes()
@@ -1301,6 +1359,7 @@ export default function App() {
           }
           options?.after?.()
           refreshPanes()
+          remind(t('op.done'))
           drop(800)
         },
       ).catch((e: unknown) => {

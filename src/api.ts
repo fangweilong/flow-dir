@@ -69,6 +69,12 @@ export function opStart(request: OpRequest, onProgress: (progress: OpProgress) =
 
 export const opCancel = (opId: string) => invoke<void>('op_cancel', { opId })
 
+/** Taskbar progress for long operations; `state` is normal/error/paused/none. */
+export const taskbarProgress = (state: string, completed: number, total: number) =>
+  invoke<void>('taskbar_progress', { state, completed, total })
+/** System toast plus a taskbar flash, for an operation that finished in the background. */
+export const notifyOp = (title: string, body: string) => invoke<void>('notify_op', { title, body })
+
 export const shellMenuShow = (paths: string[], x: number, y: number, extended: boolean) =>
   invoke<MenuOutcome>('shell_menu_show', { paths, x, y, extended })
 export const shellMenuBackgroundShow = (

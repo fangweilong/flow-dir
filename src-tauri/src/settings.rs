@@ -80,6 +80,8 @@ pub struct Settings {
     /// Automatic update check interval in hours; `0` disables background checks and
     /// leaves only the manual button in Settings.
     pub update_interval_hours: u32,
+    /// System notification when a long operation finishes in the background.
+    pub notify_ops: bool,
     /// Single UI font family, assembled into a stack by the frontend.
     pub font_family: String,
     /// Base UI font size in px; drives the rem scale of the whole interface.
@@ -220,6 +222,7 @@ impl Default for Settings {
             shortcuts: Vec::new(),
             gpu_accel: true,
             update_interval_hours: 24,
+            notify_ops: true,
             font_family: default_font_family(),
             font_size: default_font_size(),
             tab_font_family: String::new(),
@@ -312,6 +315,9 @@ gpu_accel = true
 # automatic update check interval in hours; 0 = manual checks only
 update_interval_hours = 24
 
+# 长任务在后台完成时发系统通知 / system notification when a long operation finishes
+notify_ops = true
+
 # 额外的快速访问项 / extra quick-access entries
 # custom_places = [{ name = "项目", path = 'D:\Codes' }]
 custom_places = []
@@ -344,6 +350,7 @@ struct FileSettings {
     preview_width: u32,
     gpu_accel: bool,
     update_interval_hours: u32,
+    notify_ops: bool,
     font_family: String,
     font_size: u32,
     tab_font_family: String,
@@ -374,6 +381,7 @@ impl Default for FileSettings {
             preview_width: base.preview_width,
             gpu_accel: base.gpu_accel,
             update_interval_hours: base.update_interval_hours,
+            notify_ops: base.notify_ops,
             font_family: base.font_family,
             font_size: base.font_size,
             tab_font_family: base.tab_font_family,
@@ -405,6 +413,7 @@ impl From<FileSettings> for Settings {
             preview_width: file.preview_width,
             gpu_accel: file.gpu_accel,
             update_interval_hours: file.update_interval_hours,
+            notify_ops: file.notify_ops,
             font_family: file.font_family,
             font_size: file.font_size,
             tab_font_family: file.tab_font_family,

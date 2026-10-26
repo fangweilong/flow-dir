@@ -24,6 +24,8 @@ export type Settings = {
   shortcuts: ShortcutOverride[]
   gpuAccel: boolean
   updateIntervalHours: number
+  /** System notification when a long operation finishes while the window is unfocused. */
+  notifyOps: boolean
   /** Single UI font family; the frontend appends fallbacks. */
   fontFamily: string
   /** Base UI font size in px (12–20); drives the whole rem scale. */
@@ -61,6 +63,7 @@ export const DEFAULT_SETTINGS: Settings = {
   shortcuts: [],
   gpuAccel: true,
   updateIntervalHours: 24,
+  notifyOps: true,
   fontFamily: 'Segoe UI Variable Text',
   fontSize: 13,
   tabFontFamily: '',

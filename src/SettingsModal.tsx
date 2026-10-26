@@ -526,6 +526,12 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
                 onChange={(value) => onChange({ ...settings, showHidden: value })}
               />
               <ToggleRow
+                label={t('settings.notifyOps')}
+                hint={t('settings.notifyOpsHint')}
+                value={settings.notifyOps}
+                onChange={(value) => onChange({ ...settings, notifyOps: value })}
+              />
+              <ToggleRow
                 label={t('settings.useEverything')}
                 hint={
                   everything
