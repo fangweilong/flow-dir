@@ -84,6 +84,18 @@ pub struct Settings {
     pub font_family: String,
     /// Base UI font size in px; drives the rem scale of the whole interface.
     pub font_size: u32,
+    /// Tab-strip font family; empty inherits `font_family`.
+    pub tab_font_family: String,
+    /// Tab-strip font size in px; drives the strip height and tab icons.
+    pub tab_font_size: u32,
+    /// File-list font family; empty inherits `font_family`.
+    pub list_font_family: String,
+    /// File-list font size in px; drives rows, columns and icons.
+    pub list_font_size: u32,
+    /// Navigation-bar font family; empty inherits `font_family`.
+    pub nav_font_family: String,
+    /// Navigation-bar font size in px; drives its controls.
+    pub nav_font_size: u32,
     /// File-list size column width in px at the default font size; drag-resizable.
     pub list_size_width: u32,
     /// File-list modified column width in px at the default font size; drag-resizable.
@@ -106,6 +118,18 @@ fn default_font_size() -> u32 {
     13
 }
 
+fn default_tab_font_size() -> u32 {
+    12
+}
+
+fn default_list_font_size() -> u32 {
+    13
+}
+
+fn default_nav_font_size() -> u32 {
+    12
+}
+
 fn default_list_size_width() -> u32 {
     96
 }
@@ -116,6 +140,8 @@ fn default_list_time_width() -> u32 {
 
 const FONT_SIZE_MIN: u32 = 12;
 const FONT_SIZE_MAX: u32 = 20;
+/// Region sizes may go below the global floor: compact tab strips stay usable.
+const REGION_FONT_SIZE_MIN: u32 = 10;
 
 /// Column widths are stored unscaled; the frontend multiplies them by the font scale.
 /// The lower bounds keep the header labels and the longest "[123,456 items]" readable.
@@ -125,17 +151,31 @@ const LIST_COL_MAX: u32 = 480;
 
 /// A font family, not a stack: quotes, commas and separators would change the generated
 /// CSS or let a hand-edited file break out of the property.
+fn valid_font_family(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && !value
+            .chars()
+            .any(|c| c.is_control() || matches!(c, ';' | '{' | '}' | '"' | '\'' | ',' | '\\'))
+}
+
 fn sanitize_font_family(value: &str) -> String {
     let trimmed = value.trim();
-    let valid = !trimmed.is_empty()
-        && trimmed.len() <= 64
-        && !trimmed
-            .chars()
-            .any(|c| c.is_control() || matches!(c, ';' | '{' | '}' | '"' | '\'' | ',' | '\\'));
-    if valid {
+    if valid_font_family(trimmed) {
         trimmed.to_string()
     } else {
         default_font_family()
+    }
+}
+
+/// Region families may be empty, which means "inherit the UI font"; invalid input falls
+/// back to inherit rather than silently switching to a different installed face.
+fn sanitize_region_font_family(value: &str) -> String {
+    let trimmed = value.trim();
+    if valid_font_family(trimmed) {
+        trimmed.to_string()
+    } else {
+        String::new()
     }
 }
 
@@ -144,6 +184,14 @@ fn sanitize_font_size(value: u32) -> u32 {
         value
     } else {
         default_font_size()
+    }
+}
+
+fn sanitize_region_font_size(value: u32, fallback: u32) -> u32 {
+    if (REGION_FONT_SIZE_MIN..=FONT_SIZE_MAX).contains(&value) {
+        value
+    } else {
+        fallback
     }
 }
 
@@ -174,6 +222,12 @@ impl Default for Settings {
             update_interval_hours: 24,
             font_family: default_font_family(),
             font_size: default_font_size(),
+            tab_font_family: String::new(),
+            tab_font_size: default_tab_font_size(),
+            list_font_family: String::new(),
+            list_font_size: default_list_font_size(),
+            nav_font_family: String::new(),
+            nav_font_size: default_nav_font_size(),
             list_size_width: default_list_size_width(),
             list_time_width: default_list_time_width(),
         }
@@ -185,6 +239,12 @@ impl Settings {
     pub fn normalize(mut self) -> Self {
         self.font_family = sanitize_font_family(&self.font_family);
         self.font_size = sanitize_font_size(self.font_size);
+        self.tab_font_family = sanitize_region_font_family(&self.tab_font_family);
+        self.tab_font_size = sanitize_region_font_size(self.tab_font_size, default_tab_font_size());
+        self.list_font_family = sanitize_region_font_family(&self.list_font_family);
+        self.list_font_size = sanitize_region_font_size(self.list_font_size, default_list_font_size());
+        self.nav_font_family = sanitize_region_font_family(&self.nav_font_family);
+        self.nav_font_size = sanitize_region_font_size(self.nav_font_size, default_nav_font_size());
         self.list_size_width = sanitize_list_col(
             self.list_size_width,
             LIST_COL_MIN,
@@ -215,6 +275,14 @@ theme = "system"
 # 界面字体与字号（像素，12–20）/ UI font family and size in px
 font_family = "Segoe UI Variable Text"
 font_size = 13
+
+# 标签页、文件列表、导航栏的字体（留空跟随界面字体）与字号（10–20）/ per-region font and size
+tab_font_family = ""
+tab_font_size = 12
+list_font_family = ""
+list_font_size = 13
+nav_font_family = ""
+nav_font_size = 12
 
 # 启动时展开预览面板 / show the preview panel on launch
 preview_open = true
@@ -278,6 +346,12 @@ struct FileSettings {
     update_interval_hours: u32,
     font_family: String,
     font_size: u32,
+    tab_font_family: String,
+    tab_font_size: u32,
+    list_font_family: String,
+    list_font_size: u32,
+    nav_font_family: String,
+    nav_font_size: u32,
     list_size_width: u32,
     list_time_width: u32,
     custom_places: Vec<QuickPlace>,
@@ -302,6 +376,12 @@ impl Default for FileSettings {
             update_interval_hours: base.update_interval_hours,
             font_family: base.font_family,
             font_size: base.font_size,
+            tab_font_family: base.tab_font_family,
+            tab_font_size: base.tab_font_size,
+            list_font_family: base.list_font_family,
+            list_font_size: base.list_font_size,
+            nav_font_family: base.nav_font_family,
+            nav_font_size: base.nav_font_size,
             list_size_width: base.list_size_width,
             list_time_width: base.list_time_width,
             custom_places: base.custom_places,
@@ -327,6 +407,12 @@ impl From<FileSettings> for Settings {
             update_interval_hours: file.update_interval_hours,
             font_family: file.font_family,
             font_size: file.font_size,
+            tab_font_family: file.tab_font_family,
+            tab_font_size: file.tab_font_size,
+            list_font_family: file.list_font_family,
+            list_font_size: file.list_font_size,
+            nav_font_family: file.nav_font_family,
+            nav_font_size: file.nav_font_size,
             list_size_width: file.list_size_width,
             list_time_width: file.list_time_width,
             custom_places: file.custom_places,
@@ -395,6 +481,12 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), A
     );
     set_value(&mut doc, "font_family", Value::from(settings.font_family.as_str()));
     set_value(&mut doc, "font_size", Value::from(settings.font_size as i64));
+    set_value(&mut doc, "tab_font_family", Value::from(settings.tab_font_family.as_str()));
+    set_value(&mut doc, "tab_font_size", Value::from(settings.tab_font_size as i64));
+    set_value(&mut doc, "list_font_family", Value::from(settings.list_font_family.as_str()));
+    set_value(&mut doc, "list_font_size", Value::from(settings.list_font_size as i64));
+    set_value(&mut doc, "nav_font_family", Value::from(settings.nav_font_family.as_str()));
+    set_value(&mut doc, "nav_font_size", Value::from(settings.nav_font_size as i64));
     set_value(
         &mut doc,
         "list_size_width",
@@ -513,6 +605,36 @@ mod tests {
     }
 
     #[test]
+    fn region_fonts_normalize() {
+        let parsed = Settings {
+            tab_font_family: "  Consolas  ".to_string(),
+            tab_font_size: 11,
+            list_font_family: "".to_string(),
+            list_font_size: 18,
+            nav_font_family: "Bad; color: red".to_string(),
+            nav_font_size: 9,
+            ..Settings::default()
+        }
+        .normalize();
+        assert_eq!(parsed.tab_font_family, "Consolas");
+        assert_eq!(parsed.tab_font_size, 11);
+        assert_eq!(parsed.list_font_family, "");
+        assert_eq!(parsed.list_font_size, 18);
+        // Invalid families and out-of-range sizes fall back to inherit/defaults.
+        assert_eq!(parsed.nav_font_family, "");
+        assert_eq!(parsed.nav_font_size, 12);
+
+        for bad in [0, 9, 21, u32::MAX] {
+            let parsed = Settings {
+                tab_font_size: bad,
+                ..Settings::default()
+            }
+            .normalize();
+            assert_eq!(parsed.tab_font_size, 12, "{bad}");
+        }
+    }
+
+    #[test]
     fn list_column_widths_fall_back() {
         let parsed = Settings {
             list_size_width: 56,
@@ -548,9 +670,16 @@ mod tests {
         assert!(seed.external_preview.is_empty());
         assert_eq!(seed.list_size_width, 96);
         assert_eq!(seed.list_time_width, 142);
+        assert_eq!(seed.tab_font_family, "");
+        assert_eq!(seed.tab_font_size, 12);
+        assert_eq!(seed.list_font_size, 13);
+        assert_eq!(seed.nav_font_size, 12);
         let legacy: FileSettings = toml_edit::de::from_str("language = \"en\"").unwrap();
         assert_eq!(legacy.list_size_width, 96);
         assert_eq!(legacy.list_time_width, 142);
+        assert_eq!(legacy.tab_font_size, 12);
+        assert_eq!(legacy.list_font_size, 13);
+        assert_eq!(legacy.nav_font_size, 12);
 
         let text = r#"external_preview = [{ ext = "docx", command = '"C:\Tools\WINWORD.EXE" "{path}"' }]"#;
         let parsed: FileSettings = toml_edit::de::from_str(text).unwrap();

@@ -40,12 +40,12 @@ export function FileIcon({
   name: string
   dir: boolean
   path?: string
-  /** Base-text multiplier used only for the requested raster size; CSS keeps the icon at 1rem. */
+  /** Base-text multiplier used only for the requested raster size; CSS keeps the icon at 1.25em. */
   scale?: number
 }) {
   const [failed, setFailed] = useState(false)
   if (path && !failed) {
-    const px = Math.max(16, Math.round(16 * scale * (window.devicePixelRatio || 1)))
+    const px = Math.max(16, Math.round(20 * scale * (window.devicePixelRatio || 1)))
     return (
       <img
         src={`http://fd.localhost/icon?path=${encodeURIComponent(path)}&s=${px}`}
@@ -54,14 +54,14 @@ export function FileIcon({
         alt=""
         draggable={false}
         className="shrink-0"
-        style={{ width: '1rem', height: '1rem' }}
+        style={{ width: '1.25em', height: '1.25em' }}
         onError={() => setFailed(true)}
       />
     )
   }
   if (dir) {
     return (
-      <svg viewBox="0 0 16 16" className={`h-4 w-4 shrink-0 ${COLOR.folder}`} aria-hidden>
+      <svg viewBox="0 0 16 16" className={`h-[1.25em] w-[1.25em] shrink-0 ${COLOR.folder}`} aria-hidden>
         <path
           fill="currentColor"
           d="M1.5 3.6c0-.6.5-1.1 1.1-1.1h3.2c.4 0 .7.15.95.42l.85.93h6.3c.6 0 1.1.5 1.1 1.1v7.4c0 .6-.5 1.1-1.1 1.1H2.6c-.6 0-1.1-.5-1.1-1.1V3.6Z"
@@ -71,7 +71,7 @@ export function FileIcon({
   }
   const group = EXT_GROUP[extOf(name)] ?? 'file'
   return (
-    <svg viewBox="0 0 16 16" className={`h-4 w-4 shrink-0 ${COLOR[group] ?? COLOR.file}`} aria-hidden>
+    <svg viewBox="0 0 16 16" className={`h-[1.25em] w-[1.25em] shrink-0 ${COLOR[group] ?? COLOR.file}`} aria-hidden>
       <path
         fill="currentColor"
         d="M3.2 1.5h6.05L13 5.25v9.25c0 .55-.45 1-1 1h-8.8c-.55 0-1-.45-1-1v-12c0-.55.45-1 1-1Z"

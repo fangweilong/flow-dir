@@ -28,6 +28,18 @@ export type Settings = {
   fontFamily: string
   /** Base UI font size in px (12–20); drives the whole rem scale. */
   fontSize: number
+  /** Tab-strip font family; empty inherits `fontFamily`. */
+  tabFontFamily: string
+  /** Tab-strip text size in px (10–20); drives the strip height and row icons. */
+  tabFontSize: number
+  /** File-list font family; empty inherits `fontFamily`. */
+  listFontFamily: string
+  /** File-list text size in px (10–20); drives rows, columns and icons. */
+  listFontSize: number
+  /** Navigation-bar font family; empty inherits `fontFamily`. */
+  navFontFamily: string
+  /** Navigation-bar text size in px (10–20); drives its controls. */
+  navFontSize: number
   /** File-list "size" column width in px at the default font size; drag-resizable. */
   listSizeWidth: number
   /** File-list "modified" column width in px at the default font size; drag-resizable. */
@@ -51,6 +63,12 @@ export const DEFAULT_SETTINGS: Settings = {
   updateIntervalHours: 24,
   fontFamily: 'Segoe UI Variable Text',
   fontSize: 13,
+  tabFontFamily: '',
+  tabFontSize: 12,
+  listFontFamily: '',
+  listFontSize: 13,
+  navFontFamily: '',
+  navFontSize: 12,
   listSizeWidth: 96,
   listTimeWidth: 142,
 }

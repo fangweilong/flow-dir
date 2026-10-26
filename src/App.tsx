@@ -57,7 +57,14 @@ import type {
   UpdateStatus,
 } from './types'
 import { driveKindLabel, makeT } from './i18n'
-import { clampFontSize, fontStack } from './fonts'
+import {
+  DEFAULT_LIST_FONT_SIZE,
+  DEFAULT_NAV_FONT_SIZE,
+  DEFAULT_TAB_FONT_SIZE,
+  clampFontSize,
+  clampRegionFontSize,
+  fontStack,
+} from './fonts'
 import { DEFAULT_SETTINGS, fromSnapshot, toSnapshot } from './persist'
 import type { Settings } from './persist'
 import { isDir, isFsPath, joinPath, pathKey, treeChain } from './paths'
@@ -554,13 +561,32 @@ export default function App() {
     }
   }, [showToast])
 
-  // One source for the whole UI: the root vars drive body text, the rem-derived
-  // spacing/icons, and each pane's row metrics (see PaneView's fontScale).
+  // Global typography plus per-surface overrides: body/rem scale stays global, while the
+  // tab strip, file list and navigation bar read their own family and size variables.
   useEffect(() => {
     const root = document.documentElement
     root.style.setProperty('--font-ui', fontStack(settings.fontFamily))
     root.style.setProperty('--font-size-base', `${clampFontSize(settings.fontSize)}px`)
-  }, [settings.fontFamily, settings.fontSize])
+    const regions = [
+      ['tab', settings.tabFontFamily, clampRegionFontSize(settings.tabFontSize, DEFAULT_TAB_FONT_SIZE)],
+      ['list', settings.listFontFamily, clampRegionFontSize(settings.listFontSize, DEFAULT_LIST_FONT_SIZE)],
+      ['nav', settings.navFontFamily, clampRegionFontSize(settings.navFontSize, DEFAULT_NAV_FONT_SIZE)],
+    ] as const
+    for (const [region, family, size] of regions) {
+      root.style.setProperty(`--font-size-${region}`, `${size}px`)
+      if (family.trim()) root.style.setProperty(`--font-${region}`, fontStack(family))
+      else root.style.removeProperty(`--font-${region}`)
+    }
+  }, [
+    settings.fontFamily,
+    settings.fontSize,
+    settings.tabFontFamily,
+    settings.tabFontSize,
+    settings.listFontFamily,
+    settings.listFontSize,
+    settings.navFontFamily,
+    settings.navFontSize,
+  ])
 
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)')
@@ -1779,7 +1805,9 @@ export default function App() {
               git={gitByDir[pathKey(ws.tabs[pane.activeTabId]?.path ?? '')] ?? null}
               active={ws.activePaneId === pane.id}
               lang={lang}
-              fontSize={settings.fontSize}
+              tabFontSize={settings.tabFontSize}
+              listFontSize={settings.listFontSize}
+              navFontSize={settings.navFontSize}
               colSize={settings.listSizeWidth}
               colTime={settings.listTimeWidth}
               onColWidths={setColWidths}
@@ -1845,7 +1873,9 @@ export default function App() {
       gitByDir,
       driveList,
       openDriveMenu,
-      settings.fontSize,
+      settings.tabFontSize,
+      settings.listFontSize,
+      settings.navFontSize,
       settings.listSizeWidth,
       settings.listTimeWidth,
       setColWidths,

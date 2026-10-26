@@ -8,10 +8,15 @@ import type { AppInfo, EverythingStatus, Lang, Theme, UpdateStatus } from './typ
 import type { Settings } from './persist'
 import {
   DEFAULT_FONT_FAMILY,
+  DEFAULT_LIST_FONT_SIZE,
+  DEFAULT_NAV_FONT_SIZE,
+  DEFAULT_TAB_FONT_SIZE,
   FONT_FAMILIES,
   FONT_SIZE_MAX,
   FONT_SIZE_MIN,
+  REGION_FONT_SIZE_MIN,
   clampFontSize,
+  clampRegionFontSize,
 } from './fonts'
 
 type Props = {
@@ -79,6 +84,48 @@ function ToggleRow({
   )
 }
 
+/** One region's family (empty = inherit) and size; the list select is the shared datalist. */
+function RegionFontRow({
+  label,
+  family,
+  size,
+  inheritHint,
+  onChangeFamily,
+  onChangeSize,
+}: {
+  label: string
+  family: string
+  size: number
+  inheritHint: string
+  onChangeFamily: (family: string) => void
+  onChangeSize: (size: number) => void
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="w-14 shrink-0 text-[0.71875rem] text-fg">{label}</span>
+      <input
+        list="font-family-options"
+        value={family}
+        placeholder={inheritHint}
+        aria-label={label}
+        onChange={(ev) => onChangeFamily(ev.target.value)}
+        className="h-6 min-w-0 flex-1 rounded border border-line bg-surface-2 px-1.5 text-[0.6875rem] outline-none placeholder:text-muted-2 focus:border-blue-400 focus:bg-surface"
+      />
+      <input
+        type="range"
+        min={REGION_FONT_SIZE_MIN}
+        max={FONT_SIZE_MAX}
+        step={1}
+        value={size}
+        aria-label={label}
+        onChange={(ev) => onChangeSize(Number(ev.target.value))}
+        className="h-4 w-[5rem] shrink-0 cursor-pointer accent-blue-600"
+      />
+      <span className="tabular w-9 shrink-0 text-right text-[0.71875rem] text-muted">{size} px</span>
+    </div>
+  )
+}
+
 export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
   const t = makeT(lang)
   const [info, setInfo] = useState<AppInfo | null>(null)
@@ -103,6 +150,9 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
     FONT_FAMILIES.includes(settings.fontFamily) ? '' : settings.fontFamily,
   )
   const fontSize = clampFontSize(settings.fontSize)
+  const tabFontSize = clampRegionFontSize(settings.tabFontSize, DEFAULT_TAB_FONT_SIZE)
+  const listFontSize = clampRegionFontSize(settings.listFontSize, DEFAULT_LIST_FONT_SIZE)
+  const navFontSize = clampRegionFontSize(settings.navFontSize, DEFAULT_NAV_FONT_SIZE)
 
   const keys = useMemo(() => resolveShortcuts(settings.shortcuts), [settings.shortcuts])
   const needle = query.trim().toLowerCase()
@@ -120,6 +170,10 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
       t('settings.font'),
       t('settings.fontSize'),
       t('settings.fontCustom'),
+      t('settings.fontRegionsHint'),
+      t('settings.fontTab'),
+      t('settings.fontList'),
+      t('settings.fontNav'),
       t('settings.language'),
       t('settings.behavior'),
       t('settings.previewOpen'),
@@ -394,6 +448,38 @@ export function SettingsModal({ settings, lang, onChange, onClose }: Props) {
                   />
                   <span className="tabular w-9 text-right text-[0.71875rem] text-muted">{fontSize} px</span>
                 </div>
+              </div>
+              <div className="space-y-1.5 rounded-lg border border-line px-3 py-2">
+                <div className="text-[0.65625rem] text-muted-2">{t('settings.fontRegionsHint')}</div>
+                <RegionFontRow
+                  label={t('settings.fontTab')}
+                  family={settings.tabFontFamily}
+                  size={tabFontSize}
+                  inheritHint={t('settings.fontInherit')}
+                  onChangeFamily={(family) => onChange({ ...settings, tabFontFamily: family })}
+                  onChangeSize={(size) => onChange({ ...settings, tabFontSize: size })}
+                />
+                <RegionFontRow
+                  label={t('settings.fontList')}
+                  family={settings.listFontFamily}
+                  size={listFontSize}
+                  inheritHint={t('settings.fontInherit')}
+                  onChangeFamily={(family) => onChange({ ...settings, listFontFamily: family })}
+                  onChangeSize={(size) => onChange({ ...settings, listFontSize: size })}
+                />
+                <RegionFontRow
+                  label={t('settings.fontNav')}
+                  family={settings.navFontFamily}
+                  size={navFontSize}
+                  inheritHint={t('settings.fontInherit')}
+                  onChangeFamily={(family) => onChange({ ...settings, navFontFamily: family })}
+                  onChangeSize={(size) => onChange({ ...settings, navFontSize: size })}
+                />
+                <datalist id="font-family-options">
+                  {FONT_FAMILIES.map((family) => (
+                    <option key={family} value={family} />
+                  ))}
+                </datalist>
               </div>
             </div>
           </section>

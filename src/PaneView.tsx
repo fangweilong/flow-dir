@@ -11,7 +11,13 @@ import { EMPTY_LIST } from './types'
 import { DEFAULT_SETTINGS } from './persist'
 import type { Drive, Entry, GitStatus, Lang, ListData, SortKey, SortState } from './types'
 import { driveKindLabel, makeT } from './i18n'
-import { BASE_FONT_SIZE, clampFontSize } from './fonts'
+import {
+  BASE_FONT_SIZE,
+  DEFAULT_LIST_FONT_SIZE,
+  DEFAULT_NAV_FONT_SIZE,
+  DEFAULT_TAB_FONT_SIZE,
+  clampRegionFontSize,
+} from './fonts'
 import type { Translate } from './i18n'
 import type { DropMode, PaneState, TabState } from './workspace'
 
@@ -33,6 +39,8 @@ const gitTone = (code: string) =>
 
 /** Metrics at the default 13 px text size; every pane scales them by the settings font size. */
 const ROW_H = 26
+/** List header row height at the default text size. */
+const HEADER_H = 24
 /** Column bounds in px at the default font size; the stored widths are clamped to them. */
 const MIN_COL_SIZE = 56
 const MIN_COL_TIME = 84
@@ -67,8 +75,12 @@ type Props = {
   git: GitStatus | null
   active: boolean
   lang: Lang
-  /** Base UI text size, shared with the root CSS variables. */
-  fontSize: number
+  /** Tab-strip text size in px; drives strip height and tab icons. */
+  tabFontSize: number
+  /** File-list text size in px; drives rows, columns and icons. */
+  listFontSize: number
+  /** Navigation-bar text size in px; drives the toolbar controls. */
+  navFontSize: number
   /** Stored "size" column width in px at the base font size; shared by every pane. */
   colSize: number
   /** Stored "modified" column width in px at the base font size; shared by every pane. */
@@ -119,7 +131,9 @@ export function PaneView({
   git,
   active,
   lang,
-  fontSize,
+  tabFontSize,
+  listFontSize,
+  navFontSize,
   colSize,
   colTime,
   onColWidths,
@@ -188,16 +202,25 @@ export function PaneView({
     return () => observer.disconnect()
   }, [])
 
-  // Text and rem spacing grow with the setting, so rows, columns and the responsive
-  // breakpoints that hide them must grow by the same factor or the layout overlaps.
-  const fontScale = clampFontSize(fontSize) / BASE_FONT_SIZE
-  const rowHeight = Math.round(ROW_H * fontScale)
-  const nameMin = Math.round(MIN_COL_NAME * fontScale)
-  const minSizeCol = Math.round(MIN_COL_SIZE * fontScale)
-  const minTimeCol = Math.round(MIN_COL_TIME * fontScale)
+  // Each surface scales from its own text size. The global size still drives rem spacing;
+  // the list scale also keeps stored column widths proportional to the list text.
+  const tabFont = clampRegionFontSize(tabFontSize, DEFAULT_TAB_FONT_SIZE)
+  const listFont = clampRegionFontSize(listFontSize, DEFAULT_LIST_FONT_SIZE)
+  const navFont = clampRegionFontSize(navFontSize, DEFAULT_NAV_FONT_SIZE)
+  const tabScale = tabFont / BASE_FONT_SIZE
+  const listScale = listFont / BASE_FONT_SIZE
+  const tabBarHeight = Math.round(tabFont * 1.75) + 3
+  const tabItemHeight = tabBarHeight - 3
+  const navBarHeight = Math.round(navFont * 2)
+  const navControlHeight = navBarHeight - 4
+  const rowHeight = Math.round(ROW_H * listScale)
+  const headerHeight = Math.round(HEADER_H * listScale)
+  const nameMin = Math.round(MIN_COL_NAME * listScale)
+  const minSizeCol = Math.round(MIN_COL_SIZE * listScale)
+  const minTimeCol = Math.round(MIN_COL_TIME * listScale)
   // Dragged widths stay local until release, so one gesture writes settings once.
-  const wantSize = Math.round((draft?.size ?? colSize) * fontScale)
-  const wantTime = Math.round((draft?.time ?? colTime) * fontScale)
+  const wantSize = Math.round((draft?.size ?? colSize) * listScale)
+  const wantTime = Math.round((draft?.time ?? colTime) * listScale)
   // A column stays visible while its minimum plus the name floor fit; the stored width is
   // clamped to what the pane can spare, so neither column ever squeezes the name to zero.
   const showSize = width === 0 || width >= nameMin + minSizeCol
@@ -210,12 +233,14 @@ export function PaneView({
     width === 0
       ? wantTime
       : Math.min(wantTime, Math.max(minTimeCol, width - nameMin - wantSize))
-  const showFilter = width === 0 || width >= Math.round(MIN_WIDTH_FILTER * fontScale)
+  const showFilter = width === 0 || width >= Math.round(MIN_WIDTH_FILTER * listScale)
   const grid = showTime
     ? `minmax(0,1fr) ${sizeCol}px ${timeCol}px`
     : showSize
       ? `minmax(0,1fr) ${sizeCol}px`
       : GRID_NAME
+  const navButtonStyle = { width: navControlHeight, height: navControlHeight }
+  const navFieldStyle = { height: navControlHeight }
 
   const view = useMemo(() => {
     const q = list.filter.trim().toLowerCase()
@@ -269,18 +294,18 @@ export function PaneView({
     ev.stopPropagation()
     onFocusPane()
     const startX = ev.clientX
-    const start = (key === 'size' ? sizeCol : timeCol) / fontScale
+    const start = (key === 'size' ? sizeCol : timeCol) / listScale
     const min = key === 'size' ? MIN_COL_SIZE : MIN_COL_TIME
     // The other column keeps its rendered width, so only the name column can give room.
     const fixed = key === 'size' ? (showTime ? timeCol : 0) : sizeCol
     const max =
       width === 0
         ? MAX_COL_WIDTH
-        : Math.max(min, Math.min(MAX_COL_WIDTH, (width - nameMin - fixed) / fontScale))
+        : Math.max(min, Math.min(MAX_COL_WIDTH, (width - nameMin - fixed) / listScale))
     let next = start
     let moved = false
     const move = (e: PointerEvent) => {
-      next = Math.min(max, Math.max(min, start - (e.clientX - startX) / fontScale))
+      next = Math.min(max, Math.max(min, start - (e.clientX - startX) / listScale))
       const delta = Math.abs(e.clientX - startX)
       if (delta > 1) moved = true
       setDraft({ size: key === 'size' ? next : colSize, time: key === 'time' ? next : colTime })
@@ -521,7 +546,8 @@ export function PaneView({
           if ((ev.target as HTMLElement).closest('[data-tab]')) return
           onNewTab()
         }}
-        className="flex h-7 shrink-0 items-stretch gap-0.5 border-b border-line bg-surface-2 px-1 pt-0.5"
+        className="typo-tab flex shrink-0 items-stretch gap-0.5 border-b border-line bg-surface-2 px-1 pt-[2px]"
+        style={{ height: tabBarHeight }}
       >
         <div className="no-bar flex min-w-0 flex-1 items-stretch gap-0.5 overflow-x-auto">
           {pane.tabIds.map((id) => {
@@ -543,17 +569,18 @@ export function PaneView({
                   onActivateTab(id)
                   onTabContextMenu(id, pointOf(ev))
                 }}
-                className={`group flex h-[1.625rem] max-w-[13.75rem] shrink-0 cursor-default items-center gap-1 rounded-t-md border border-b-0 px-1.5 text-[0.71875rem] ${
+                className={`group flex max-w-[13.75rem] shrink-0 cursor-default items-center gap-1 rounded-t-md border border-b-0 px-1.5 leading-none ${
                   selected
                     ? 'border-line bg-surface font-medium text-fg-strong'
                     : 'border-transparent text-muted hover:bg-surface-3'
                 } ${draggingTabId === id ? 'opacity-40' : ''}`}
+                style={{ height: tabItemHeight }}
                 title={tabState.path || t('sidebar.thisPc')}
               >
                 {tabState.path ? (
-                  <FileIcon name={tabState.path} dir path={tabState.path} scale={fontScale} />
+                  <FileIcon name={tabState.path} dir path={tabState.path} scale={tabScale} />
                 ) : (
-                  <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 shrink-0 text-muted-2" fill="currentColor">
+                  <svg viewBox="0 0 16 16" className="h-[1.17em] w-[1.17em] shrink-0 text-muted-2" fill="currentColor">
                     <path d="M2 5.5C2 4.7 2.7 4 3.5 4h9c.8 0 1.5.7 1.5 1.5v5c0 .8-.7 1.5-1.5 1.5h-9C2.7 12 2 11.3 2 10.5v-5Zm2 4.3h8v.7H4v-.7Z" />
                   </svg>
                 )}
@@ -569,7 +596,7 @@ export function PaneView({
                     ev.stopPropagation()
                     onCloseTab(id)
                   }}
-                  className="grid h-4 w-4 shrink-0 place-items-center rounded text-muted-2 hover:bg-surface-3 hover:text-fg"
+                  className="grid h-[1.33em] w-[1.33em] shrink-0 place-items-center rounded text-muted-2 hover:bg-surface-3 hover:text-fg"
                   title={t('tab.close')}
                 >
                   ×
@@ -581,24 +608,28 @@ export function PaneView({
         <button
           type="button"
           onClick={onNewTab}
-          className="grid h-5 w-5 shrink-0 place-items-center self-center rounded text-muted hover:bg-surface-3 hover:text-fg"
+          className="grid h-[1.67em] w-[1.67em] shrink-0 place-items-center self-center rounded text-muted hover:bg-surface-3 hover:text-fg"
           title={t('tab.new')}
         >
-          <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.6">
+          <svg viewBox="0 0 16 16" className="h-[1.17em] w-[1.17em]" fill="none" stroke="currentColor" strokeWidth="1.6">
             <path d="M8 3.5v9M3.5 8h9" strokeLinecap="round" />
           </svg>
         </button>
       </div>
 
-      <div className="flex h-7 shrink-0 items-center gap-0.5 border-b border-line bg-surface px-1">
+      <div
+        className="typo-nav flex shrink-0 items-center gap-0.5 border-b border-line bg-surface px-1"
+        style={{ height: navBarHeight }}
+      >
         <button
           type="button"
           title={t('nav.back')}
           onClick={() => tab && tab.histIdx > 0 && onNavigate(tab.id, tab.history[tab.histIdx - 1])}
           disabled={!tab || tab.histIdx <= 0}
-          className="grid h-6 w-6 place-items-center rounded text-muted hover:bg-surface-3 disabled:opacity-30"
+          style={navButtonStyle}
+          className="grid place-items-center rounded text-muted hover:bg-surface-3 disabled:opacity-30"
         >
-          <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.6">
+          <svg viewBox="0 0 16 16" className="h-[1.17em] w-[1.17em]" fill="none" stroke="currentColor" strokeWidth="1.6">
             <path d="M10 3 5.5 8 10 13" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </button>
@@ -609,9 +640,10 @@ export function PaneView({
             tab && tab.histIdx < tab.history.length - 1 && onNavigate(tab.id, tab.history[tab.histIdx + 1])
           }
           disabled={!tab || tab.histIdx >= tab.history.length - 1}
-          className="grid h-6 w-6 place-items-center rounded text-muted hover:bg-surface-3 disabled:opacity-30"
+          style={navButtonStyle}
+          className="grid place-items-center rounded text-muted hover:bg-surface-3 disabled:opacity-30"
         >
-          <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.6">
+          <svg viewBox="0 0 16 16" className="h-[1.17em] w-[1.17em]" fill="none" stroke="currentColor" strokeWidth="1.6">
             <path d="M6 3l4.5 5L6 13" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </button>
@@ -620,9 +652,10 @@ export function PaneView({
           title={t('nav.up')}
           onClick={() => tab && onNavigate(tab.id, upTarget)}
           disabled={!tab || upTarget === tab.path}
-          className="grid h-6 w-6 place-items-center rounded text-muted hover:bg-surface-3 disabled:opacity-30"
+          style={navButtonStyle}
+          className="grid place-items-center rounded text-muted hover:bg-surface-3 disabled:opacity-30"
         >
-          <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.6">
+          <svg viewBox="0 0 16 16" className="h-[1.17em] w-[1.17em]" fill="none" stroke="currentColor" strokeWidth="1.6">
             <path d="M8 12.5V4M8 4 4.2 7.8M8 4l3.8 3.8" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </button>
@@ -640,12 +673,13 @@ export function PaneView({
               shiftKey: false,
             })
           }}
-          className="ml-1 flex h-6 shrink-0 items-center gap-0.5 rounded border border-line bg-surface-2 px-1.5 text-[0.71875rem] leading-none text-fg hover:bg-surface-3"
+          style={navFieldStyle}
+          className="ml-1 flex shrink-0 items-center gap-0.5 rounded border border-line bg-surface-2 px-1.5 leading-none text-fg hover:bg-surface-3"
         >
           <span className="font-medium">
             {location ? location.name : root ? t('sidebar.thisPc') : driveRoot(tab?.path)}
           </span>
-          <svg viewBox="0 0 16 16" className="h-3 w-3 text-muted-2" fill="none" stroke="currentColor" strokeWidth="1.6">
+          <svg viewBox="0 0 16 16" className="h-[1em] w-[1em] text-muted-2" fill="none" stroke="currentColor" strokeWidth="1.6">
             <path d="m4 6.5 4 4 4-4" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </button>
@@ -671,13 +705,15 @@ export function PaneView({
               }
             }}
             title={addressBad ? t('address.invalidPath') : undefined}
-            className={`mx-0.5 h-6 min-w-0 flex-1 rounded border bg-surface px-1.5 text-[0.71875rem] outline-none ${
+            style={navFieldStyle}
+            className={`mx-0.5 min-w-0 flex-1 rounded border bg-surface px-1.5 outline-none ${
               addressBad ? 'border-red-400 text-red-500' : 'border-blue-400'
             }`}
           />
         ) : (
         <div
-          className="mx-0.5 flex h-6 min-w-0 flex-1 items-center rounded border border-line bg-surface-2 text-[0.71875rem] leading-none"
+          style={navFieldStyle}
+          className="mx-0.5 flex min-w-0 flex-1 items-center rounded border border-line bg-surface-2 leading-none"
           // Blank space opens the full-path editor; crumbs and the copy button keep their clicks.
           onClick={(ev) => {
             if (!tab?.path || (ev.target as HTMLElement).closest('button')) return
@@ -686,7 +722,7 @@ export function PaneView({
         >
           <div className="no-bar flex h-full min-w-0 flex-1 items-center overflow-x-auto overflow-y-hidden px-1">
             {root && (
-              <span className="shrink-0 px-1 py-1 text-[0.71875rem] font-medium leading-none text-fg-strong">
+              <span className="shrink-0 px-1 py-[0.25em] font-medium leading-none text-fg-strong">
                 {t('sidebar.thisPc')}
               </span>
             )}
@@ -699,7 +735,7 @@ export function PaneView({
                   // A crumb jumps straight to that folder, like Explorer's breadcrumbs.
                   onClick={() => tab && pathKey(part.path) !== pathKey(tab.path) && onNavigate(tab.id, part.path)}
                   title={part.path}
-                  className={`max-w-[10rem] truncate rounded px-1 py-1 leading-none hover:bg-surface-3 ${
+                  className={`max-w-[10rem] truncate rounded px-1 py-[0.25em] leading-none hover:bg-surface-3 ${
                     i === parts.length - 1 ? 'font-medium text-fg-strong' : 'text-muted'
                   }`}
                 >
@@ -714,9 +750,9 @@ export function PaneView({
               data-copy-path
               onClick={() => onCopyPath(tab.path)}
               title={t('address.copyPath')}
-              className="grid h-full w-5 shrink-0 place-items-center border-l border-line text-muted-2 hover:bg-surface-3 hover:text-fg"
+              className="grid h-full w-[1.67em] shrink-0 place-items-center border-l border-line text-muted-2 hover:bg-surface-3 hover:text-fg"
             >
-              <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.4">
+              <svg viewBox="0 0 16 16" className="h-[1em] w-[1em]" fill="none" stroke="currentColor" strokeWidth="1.4">
                 <rect x="3.5" y="3.5" width="7" height="9" rx="1.2" />
                 <path d="M6 3.5v-.7a1 1 0 0 1 1-1h4.3a1 1 0 0 1 1 1v7.4a1 1 0 0 1-1 1H9.5" />
               </svg>
@@ -730,18 +766,20 @@ export function PaneView({
             value={list.filter}
             onChange={(e) => tab && update(tab.id, (d) => ({ ...d, filter: e.target.value }))}
             placeholder={t('list.filter')}
-            className="h-6 w-[5.25rem] shrink-0 rounded border border-line bg-surface-2 px-1.5 text-[0.6875rem] outline-none placeholder:text-muted-2 focus:border-blue-400 focus:bg-surface"
+            style={navFieldStyle}
+            className="w-[5.25rem] shrink-0 rounded border border-line bg-surface-2 px-1.5 text-[0.92em] outline-none placeholder:text-muted-2 focus:border-blue-400 focus:bg-surface"
           />
         )}
         <button
           type="button"
           onClick={onToggleHidden}
           title={pane.hidden ? t('list.hideHidden') : t('list.showHidden')}
-          className={`grid h-6 w-6 shrink-0 place-items-center rounded hover:bg-surface-3 ${
+          style={navButtonStyle}
+          className={`grid shrink-0 place-items-center rounded hover:bg-surface-3 ${
             pane.hidden ? 'text-blue-500' : 'text-muted-2'
           }`}
         >
-          <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.4">
+          <svg viewBox="0 0 16 16" className="h-[1.17em] w-[1.17em]" fill="none" stroke="currentColor" strokeWidth="1.4">
             <path d="M1.5 8s2.4-4 6.5-4 6.5 4 6.5 4-2.4 4-6.5 4-6.5-4-6.5-4Z" />
             <circle cx="8" cy="8" r="1.8" />
           </svg>
@@ -750,8 +788,8 @@ export function PaneView({
 
       {!root && (
         <div
-          className="grid h-6 shrink-0 items-center border-b border-line bg-surface-2 text-muted"
-          style={{ gridTemplateColumns: grid }}
+          className="typo-list grid shrink-0 items-center border-b border-line bg-surface-2 text-muted"
+          style={{ height: headerHeight, gridTemplateColumns: grid }}
         >
           <HeaderCell label={t('list.name')} k="name" sort={pane.sort} onSort={changeSort} align="left" />
           {showSize && (
@@ -792,18 +830,18 @@ export function PaneView({
           if (tab) update(tab.id, (d) => ({ ...d, selected: new Set(), anchor: -1 }))
           onBlankContextMenu(pointOf(e))
         }}
-        className="relative min-h-0 flex-1 overflow-auto outline-none"
+        className="typo-list relative min-h-0 flex-1 overflow-auto outline-none"
       >
         {list.error && !root && (
           <div className="m-3 flex items-start gap-2 rounded-md border border-red-300 bg-red-50 p-2 text-red-800 dark:border-red-900 dark:bg-red-950/50 dark:text-red-200">
-            <div className="font-mono text-[0.625rem] font-semibold">{list.error.code}</div>
-            <div className="min-w-0 flex-1 break-words text-[0.6875rem]">
+            <div className="font-mono text-[0.8em] font-semibold">{list.error.code}</div>
+            <div className="min-w-0 flex-1 break-words text-[0.88em]">
               {list.error.detail || t('list.readError')}
             </div>
             <button
               type="button"
               onClick={() => tab && onNavigate(tab.id, tab.path)}
-              className="rounded border border-red-300 px-1.5 py-0.5 text-[0.625rem] hover:bg-red-100 dark:border-red-800 dark:hover:bg-red-900/40"
+              className="rounded border border-red-300 px-1.5 py-0.5 text-[0.8em] hover:bg-red-100 dark:border-red-800 dark:hover:bg-red-900/40"
             >
               {t('list.retry')}
             </button>
@@ -824,11 +862,12 @@ export function PaneView({
                 }
                 onContextMenu={(ev) => ev.preventDefault()}
                 title={drive.root}
-                className="flex h-7 cursor-default items-center gap-1.5 border-b border-line/60 px-1.5 text-[0.78125rem] hover:bg-surface-3"
+                style={{ height: rowHeight }}
+                className="flex cursor-default items-center gap-1.5 border-b border-line/60 px-1.5 hover:bg-surface-3"
               >
-                <FileIcon name={drive.name} dir path={drive.root} scale={fontScale} />
+                <FileIcon name={drive.name} dir path={drive.root} scale={listScale} />
                 <span className="truncate font-medium text-fg-strong">{drive.name}</span>
-                <span className="shrink-0 text-[0.6875rem] text-muted-2">{driveKindLabel(t, drive.kind)}</span>
+                <span className="shrink-0 text-[0.88em] text-muted-2">{driveKindLabel(t, drive.kind)}</span>
               </div>
             ))}
           </div>
@@ -854,26 +893,26 @@ export function PaneView({
                   onRowContextMenu(entry, pointOf(e))
                 }}
                 onDoubleClick={() => activate(entry)}
-                className={`absolute left-0 top-0 grid w-full items-center border-b border-line/60 pr-1.5 text-[0.78125rem] ${
+                className={`absolute left-0 top-0 grid w-full items-center border-b border-line/60 pr-1.5 ${
                   isSelected ? 'bg-sel text-fg-strong' : 'hover:bg-surface-3'
                 }`}
                 style={{ height: rowHeight, transform: `translateY(${vi.start}px)`, gridTemplateColumns: grid }}
               >
                 <div className="flex min-w-0 items-center gap-1.5 pl-1.5">
                   <span className="relative shrink-0">
-                    <FileIcon name={entry.name} dir={dir} path={joinPath(tab.path, entry.name)} scale={fontScale} />
+                    <FileIcon name={entry.name} dir={dir} path={joinPath(tab.path, entry.name)} scale={listScale} />
                     <GitRepoBadge name={entry.name} dir={dir} badges={gitBadges} t={t} />
                   </span>
                   <span className={`truncate ${dir ? 'font-medium text-fg-strong' : ''}`}>{entry.name}</span>
                   <GitBadge name={entry.name} dir={dir} badges={gitBadges} />
                 </div>
                 {showSize && (
-                  <div className="tabular pr-1.5 text-right text-[0.6875rem] text-muted">
+                  <div className="tabular pr-1.5 text-right text-[0.88em] text-muted">
                     {formatSize(entry.size, dir)}
                   </div>
                 )}
                 {showTime && (
-                  <div className="tabular pl-1.5 text-[0.6875rem] text-muted">{formatTime(entry.mtime)}</div>
+                  <div className="tabular pl-1.5 text-[0.88em] text-muted">{formatTime(entry.mtime)}</div>
                 )}
               </div>
             )
@@ -885,14 +924,14 @@ export function PaneView({
             {list.loading ? (
               <div className="flex flex-col items-center gap-2">
                 <div className="h-4 w-4 animate-spin rounded-full border-2 border-line border-t-blue-500" />
-                <div className="text-[0.6875rem]">
+                <div className="text-[0.88em]">
                   {t('list.loading')} {list.scanned > 0 && t('list.scanned', { count: list.scanned })}
                 </div>
               </div>
             ) : list.filter ? (
-              <div className="text-[0.6875rem]">{t('list.noMatch', { query: list.filter })}</div>
+              <div className="text-[0.88em]">{t('list.noMatch', { query: list.filter })}</div>
             ) : (
-              <div className="text-[0.6875rem]">{t('list.empty')}</div>
+              <div className="text-[0.88em]">{t('list.empty')}</div>
             )}
           </div>
         )}
@@ -1107,12 +1146,12 @@ function HeaderCell({
     <button
       type="button"
       onClick={() => onSort(k)}
-      className={`flex h-full w-full min-w-0 items-center gap-1 px-1.5 text-[0.65625rem] font-medium tracking-wide text-muted hover:text-fg ${
+      className={`flex h-full w-full min-w-0 items-center gap-1 px-1.5 text-[0.84em] font-medium tracking-wide text-muted hover:text-fg ${
         align === 'right' ? 'justify-end' : 'justify-start'
       }`}
     >
       <span className="truncate">{label}</span>
-      <span className={`shrink-0 text-[0.5rem] ${active ? 'text-blue-500' : 'text-transparent'}`}>
+      <span className={`shrink-0 text-[0.64em] ${active ? 'text-blue-500' : 'text-transparent'}`}>
         {sort.dir === 'asc' ? '▲' : '▼'}
       </span>
     </button>

@@ -52,6 +52,26 @@ body {
   overflow: hidden;
 }
 
+/*
+ * Per-surface typography: tabs, file list and navigation bar own their family and size.
+ * An empty family leaves `--font-<region>` unset, so it falls back to the global UI font.
+ * Descendants use em/percent sizes to stay proportional to the region size.
+ */
+.typo-tab {
+  font-family: var(--font-tab, var(--font-ui, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif));
+  font-size: var(--font-size-tab, 12px);
+}
+
+.typo-list {
+  font-family: var(--font-list, var(--font-ui, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif));
+  font-size: var(--font-size-list, 13px);
+}
+
+.typo-nav {
+  font-family: var(--font-nav, var(--font-ui, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif));
+  font-size: var(--font-size-nav, 12px);
+}
+
 ::-webkit-scrollbar {
   width: 0.625rem;
   height: 0.625rem;

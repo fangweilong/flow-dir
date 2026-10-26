@@ -3,7 +3,12 @@
 export const BASE_FONT_SIZE = 13
 export const FONT_SIZE_MIN = 12
 export const FONT_SIZE_MAX = 20
+/** Region text may go one step below the global floor: compact tab strips stay usable. */
+export const REGION_FONT_SIZE_MIN = 10
 export const DEFAULT_FONT_FAMILY = 'Segoe UI Variable Text'
+export const DEFAULT_TAB_FONT_SIZE = 12
+export const DEFAULT_LIST_FONT_SIZE = 13
+export const DEFAULT_NAV_FONT_SIZE = 12
 
 /** Common Windows families; any other installed family can be typed in. */
 export const FONT_FAMILIES = [
@@ -21,6 +26,12 @@ const DEFAULT_STACK = `"${DEFAULT_FONT_FAMILY}", "Segoe UI", system-ui, sans-ser
 export function clampFontSize(size: number): number {
   if (!Number.isFinite(size)) return BASE_FONT_SIZE
   return Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, Math.round(size)))
+}
+
+/** Same repair for per-region sizes, with the wider floor the compact surfaces allow. */
+export function clampRegionFontSize(size: number, fallback: number): number {
+  if (!Number.isFinite(size)) return fallback
+  return Math.min(FONT_SIZE_MAX, Math.max(REGION_FONT_SIZE_MIN, Math.round(size)))
 }
 
 /**
