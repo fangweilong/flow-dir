@@ -28,6 +28,12 @@ export const pathIsDir = (path: string) => invoke<boolean>('path_is_dir', { path
 export const gitStatus = (path: string) => invoke<GitStatus>('git_status', { path })
 export const quickAccess = () => invoke<Place[]>('quick_access')
 export const openPath = (path: string) => invoke<void>('open_path', { path })
+/** System "Open with" dialog, for a file with no default program. */
+export const openWith = (path: string) => invoke<void>('open_with', { path })
+/** Which of the paths already exist on disk; used before a rename overwrites one. */
+export const pathsExist = (paths: string[]) => invoke<boolean[]>('paths_exist', { paths })
+/** Free `name (n)` variants, in the same order, for conflict-free batch renames. */
+export const uniquePaths = (paths: string[]) => invoke<string[]>('unique_paths', { paths })
 export const revealPath = (path: string) => invoke<void>('reveal_path', { path })
 export const explorerOpen = (path: string) => invoke<void>('explorer_open', { path })
 
@@ -171,6 +177,7 @@ export const restoreRecycle = (paths: string[]) =>
   invoke<{ restored: string[]; missing: string[] }>('restore_recycle', { paths })
 
 export const searchCancel = () => invoke<void>('search_cancel')
-export const previewInfo = (path: string, width: number, bg: string) =>
-  invoke<PreviewInfo>('preview_info', { path, width, bg })
+/** Preview payload; `hydrate` reads a cloud placeholder, which downloads it. */
+export const previewInfo = (path: string, width: number, bg: string, hydrate = false) =>
+  invoke<PreviewInfo>('preview_info', { path, width, bg, hydrate })
 export const previewExternal = (path: string) => invoke<void>('preview_external', { path })

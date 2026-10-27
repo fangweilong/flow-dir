@@ -34,6 +34,7 @@ import {
   listDir,
   notifyOp,
   openPath,
+  openWith,
   opCancel,
   opRetryElevated,
   opStart,
@@ -203,7 +204,7 @@ export default function App() {
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null)
   const [prompt, setPrompt] = useState<{ title: string; initial: string; submit: (value: string) => void } | null>(null)
   /** Multi-selection waiting for the batch rename preview. */
-  const [batchRename, setBatchRename] = useState<{ paneId: string; names: string[] } | null>(null)
+  const [batchRename, setBatchRename] = useState<{ paneId: string; dir: string; names: string[] } | null>(null)
   /** Pending delete waiting for the confirmation dialog; nothing leaves the disk until it closes. */
   const [deleteConfirm, setDeleteConfirm] = useState<{
     paneId: string
@@ -435,6 +436,29 @@ export default function App() {
     if (toastTimer.current) window.clearTimeout(toastTimer.current)
     toastTimer.current = window.setTimeout(() => setToast(null), 2200)
   }, [])
+
+  /**
+   * Opens a file or non-filesystem location. A missing association is no longer silent: the
+   * shell's "Open with" dialog runs instead, and every other failure becomes a toast. Only
+   * an unassociated type is retried through the dialog, so a real error is not masked.
+   */
+  const openTarget = useCallback(
+    (path: string) => {
+      void openPath(path).catch((err: unknown) => {
+        const code = errorCode(err)
+        if (code === 'NO_ASSOCIATION') {
+          showToast(t('toast.noAssociation', { name: baseName(path) }))
+          void openWith(path).catch((openErr: unknown) => {
+            if (errorCode(openErr) === 'CANCELED') return
+            showToast(t('op.failed', { code: errorCode(openErr) }))
+          })
+          return
+        }
+        showToast(t('toast.openFailed', { code }))
+      })
+    },
+    [showToast, t],
+  )
 
   // A failing config write would otherwise stay invisible (disk full, read-only folder).
   // Identical failures are collapsed to one toast per ten seconds.
@@ -1154,12 +1178,12 @@ export default function App() {
       const tab = pane ? current.tabs[pane.activeTabId] : undefined
       if (!tab) return
       if (!isFsPath(path)) {
-        void openPath(path).catch(() => undefined)
+        openTarget(path)
         return
       }
       navigate(tab.id, path)
     },
-    [navigate],
+    [navigate, openTarget],
   )
 
   const setPaneSort = useCallback(
@@ -2125,11 +2149,15 @@ export default function App() {
 
   const startRenameMany = useCallback(
     (paneId: string, names: string[]) => {
+      const current = wsRef.current
+      const pane = current?.panes[paneId]
+      const tab = pane ? current.tabs[pane.activeTabId] : undefined
+      if (!tab?.path) return
       if (names.length < 2) {
         if (names[0]) startRename(paneId, names[0])
         return
       }
-      setBatchRename({ paneId, names })
+      setBatchRename({ paneId, dir: tab.path, names })
     },
     [startRename],
   )
@@ -2176,7 +2204,7 @@ export default function App() {
       void navigator.clipboard
         .writeText(text)
         .then(() => showToast(t('toast.copied', { count: paths.length })))
-        .catch(() => undefined)
+        .catch(() => showToast(t('toast.copyFailed')))
     },
     [showToast, t],
   )
@@ -2265,7 +2293,7 @@ export default function App() {
             if (!tab) return
             const target = joinPath(tab.path, entry.name)
             if (dir) navigate(tab.id, target)
-            else void openPath(target).catch(() => undefined)
+            else openTarget(target)
           },
         },
         {
@@ -2274,7 +2302,7 @@ export default function App() {
           onSelect: () => {
             clipboardCopy(paths, false)
               .then(() => showToast(t('toast.copied', { count: paths.length })))
-              .catch(() => undefined)
+              .catch(() => showToast(t('toast.copyFailed')))
           },
         },
         {
@@ -2283,7 +2311,7 @@ export default function App() {
           onSelect: () => {
             clipboardCopy(paths, true)
               .then(() => showToast(t('toast.cut', { count: paths.length })))
-              .catch(() => undefined)
+              .catch(() => showToast(t('toast.copyFailed')))
           },
         },
         { kind: 'item', label: t('menu.paste'), onSelect: () => pasteInto(paneId) },
@@ -2315,7 +2343,7 @@ export default function App() {
         { kind: 'item', label: t('menu.copyPath'), onSelect: () => copyPaths(paths) },
       ]
     },
-    [copyPaths, deleteEntries, openInNewPane, pasteInto, showToast, startRename, startRenameMany, t],
+    [copyPaths, deleteEntries, openInNewPane, openTarget, pasteInto, showToast, startRename, startRenameMany, t],
   )
 
   const openRowMenu = useCallback(
@@ -2379,7 +2407,10 @@ export default function App() {
             {
               kind: 'item',
               label: t('menu.openInExplorer'),
-              onSelect: () => void explorerOpen(tab.path).catch(() => undefined),
+              onSelect: () =>
+                void explorerOpen(tab.path).catch((e: unknown) =>
+                  showToast(t('op.failed', { code: errorCode(e) })),
+                ),
             },
             {
               kind: 'item',
@@ -2451,7 +2482,7 @@ export default function App() {
       ]
       setMenu({ x: point.clientX, y: point.clientY, items })
     },
-    [closeOthers, closeRight, closeTab, copyPaths, openInNewPane, t],
+    [closeOthers, closeRight, closeTab, copyPaths, openInNewPane, showToast, t],
   )
 
   const activePane = ws?.panes[ws.activePaneId]
@@ -2546,6 +2577,9 @@ export default function App() {
 
   useEffect(() => {
     if (!previewOpen || !activeTab || !previewName) {
+      // Invalidate in-flight requests: a reply that arrives after the selection cleared
+      // must not paint the panel again.
+      previewRequest.current += 1
       setPreview({ info: null, loading: false, error: null })
       return
     }
@@ -2554,7 +2588,9 @@ export default function App() {
     setPreview({ info: null, loading: true, error: null })
     const timer = window.setTimeout(() => {
       const dark = document.documentElement.classList.contains('dark')
-      previewInfo(target, 320, dark ? '0f172a' : 'ffffff')
+      // Ask for the pixels the panel can actually show; the backend caps the value.
+      const width = Math.max(64, Math.round(previewWidth - 24))
+      previewInfo(target, width, dark ? '0f172a' : 'ffffff')
         .then((info) => {
           if (previewRequest.current === request) setPreview({ info, loading: false, error: null })
         })
@@ -2569,7 +2605,29 @@ export default function App() {
         })
     }, 120)
     return () => window.clearTimeout(timer)
-  }, [previewOpen, previewName, activeTab, settings.theme, settings.externalPreview, selectionKey])
+  }, [previewOpen, previewName, activeTab, settings.theme, settings.externalPreview, selectionKey, previewWidth])
+
+  /** Explicit "download and preview" for a cloud placeholder; the only path that reads it. */
+  const downloadPreview = useCallback(() => {
+    if (!activeTab || !previewName) return
+    const target = joinPath(activeTab.path, previewName)
+    const request = ++previewRequest.current
+    setPreview({ info: null, loading: true, error: null })
+    const dark = document.documentElement.classList.contains('dark')
+    const width = Math.max(64, Math.round(previewWidth - 24))
+    previewInfo(target, width, dark ? '0f172a' : 'ffffff', true)
+      .then((info) => {
+        if (previewRequest.current === request) setPreview({ info, loading: false, error: null })
+      })
+      .catch((e: unknown) => {
+        if (previewRequest.current !== request) return
+        const error =
+          e && typeof e === 'object' && 'code' in e
+            ? (e as { code: string; detail?: string })
+            : { code: 'PREVIEW', detail: typeof e === 'string' ? e : '' }
+        setPreview({ info: null, loading: false, error })
+      })
+  }, [activeTab, previewName, previewWidth])
 
   // Window-level shortcuts all go through the registry, so a rebind in Settings applies to
   // the global commands and the panes alike. Overlays return early to keep the background
@@ -2751,7 +2809,7 @@ export default function App() {
           onSelect: () => {
             if (!tab) return
             if (isFsPath(drive.root)) navigate(tab.id, drive.root)
-            else void openPath(drive.root).catch(() => undefined)
+            else openTarget(drive.root)
           },
         },
         {
@@ -2781,7 +2839,7 @@ export default function App() {
       }
       setMenu({ x: point.clientX, y: point.clientY, items })
     },
-    [navigate, refreshDrives, showToast, t],
+    [navigate, openTarget, refreshDrives, showToast, t],
   )
 
   const openDriveMenu = useCallback(
@@ -2797,11 +2855,11 @@ export default function App() {
         onSelect: () =>
           isFsPath(drive.root)
             ? navigate(tab.id, drive.root)
-            : void openPath(drive.root).catch(() => undefined),
+            : openTarget(drive.root),
       }))
       setMenu({ x: point.clientX, y: point.clientY, items })
     },
-    [driveList, navigate, lang],
+    [driveList, navigate, openTarget, lang],
   )
 
   const renderNode = useCallback(
@@ -2837,6 +2895,7 @@ export default function App() {
               onNewTab={() => newTab(pane.id)}
               onCloseTab={(tabId) => closeTab(pane.id, tabId)}
               onActivateTab={(tabId) => activateTab(pane.id, tabId)}
+              onOpenTarget={openTarget}
               onNavigate={(tabId, path) => navigate(tabId, path)}
               onHistoryMove={historyMove}
               onTabDragStart={startTabDrag}
@@ -2884,6 +2943,7 @@ export default function App() {
       copySelection,
       copyCurrentPath,
       reportInvalidPath,
+      openTarget,
       update,
       registerPane,
       applyRatio,
@@ -3132,6 +3192,7 @@ export default function App() {
               externalKey={formatBinding(keys.externalPreview)}
               onClose={() => setPreviewOpen(false)}
               onOpenExternal={openExternalPreview}
+              onDownload={downloadPreview}
             />
           </>
         )}
@@ -3164,7 +3225,7 @@ export default function App() {
           onClose={() => setSearchOpen(false)}
           onActivate={(item) => {
             if (item.isDir) navigate(activeTab.id, item.path)
-            else void openPath(item.path).catch((e: unknown) => showToast(t('op.failed', { code: errorCode(e) })))
+            else openTarget(item.path)
           }}
           onOpen={(folder) => navigate(activeTab.id, folder)}
         />
@@ -3241,20 +3302,17 @@ export default function App() {
 
       {batchRename && (
         <BatchRenameDialog
+          dir={batchRename.dir}
           names={batchRename.names}
           lang={lang}
           onClose={() => setBatchRename(null)}
           onConfirm={(pairs) => {
-            const current = wsRef.current
-            const pane = current?.panes[batchRename.paneId]
-            const tab = pane ? current?.tabs[pane.activeTabId] : undefined
-            if (tab?.path) {
-              runOp(
-                'rename',
-                pairs.map((pair) => joinPath(tab.path, pair.from)),
-                { newNames: pairs.map((pair) => pair.to) },
-              )
-            }
+            const dir = batchRename.dir
+            runOp(
+              'rename',
+              pairs.map((pair) => joinPath(dir, pair.from)),
+              { newNames: pairs.map((pair) => pair.to) },
+            )
             setBatchRename(null)
           }}
         />

@@ -137,7 +137,8 @@ export const EMPTY_LIST: ListData = emptyList()
 export type ArchiveEntry = { name: string; size: number }
 export type MetaRow = { label: string; value: string }
 export type PreviewInfo = {
-  kind: 'image' | 'pdf' | 'video' | 'text' | 'archive' | 'binary' | 'folder' | 'unsupported'
+  /** `cloud` marks a placeholder whose bytes are still in the cloud; nothing was read. */
+  kind: 'image' | 'pdf' | 'video' | 'text' | 'archive' | 'binary' | 'folder' | 'unsupported' | 'cloud'
   url?: string | null
   text?: string | null
   entries?: ArchiveEntry[] | null

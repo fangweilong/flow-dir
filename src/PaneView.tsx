@@ -4,7 +4,7 @@ import { FileIcon } from './icons'
 import { crumbs, formatSize, formatTime, isDir, isFsPath, joinPath, parentPath, pathKey, resolveAddress, underPath } from './paths'
 import { buildGitBadges } from './git'
 import type { GitBadges } from './git'
-import { openPath, pathIsDir } from './api'
+import { pathIsDir } from './api'
 import { matchBinding } from './shortcuts'
 import type { ShortcutId } from './shortcuts'
 import { matchTypeAhead } from './typeahead'
@@ -106,6 +106,8 @@ type Props = {
   onNewTab: () => void
   onCloseTab: (tabId: string) => void
   onActivateTab: (tabId: string) => void
+  /** Opens a file or non-filesystem drive root with the shell, reporting failures. */
+  onOpenTarget: (path: string) => void
   onNavigate: (tabId: string, path: string) => void
   /** Steps the tab's history cursor without touching the stack (back/forward). */
   onHistoryMove: (tabId: string, delta: number) => void
@@ -168,6 +170,7 @@ export function PaneView({
   onNewTab,
   onCloseTab,
   onActivateTab,
+  onOpenTarget,
   onNavigate,
   onHistoryMove,
   onTabDragStart,
@@ -379,7 +382,7 @@ export function PaneView({
     if (!tab) return
     const full = joinPath(tab.path, entry.name)
     if (isDir(entry.attrs)) onNavigate(tab.id, full)
-    else void openPath(full).catch(() => undefined)
+    else onOpenTarget(full)
   }
 
   /** Row names only; rebuilt when the view changes, not on every keystroke. */
@@ -1187,7 +1190,7 @@ export function PaneView({
                     tab &&
                     (isFsPath(drive.root)
                       ? onNavigate(tab.id, drive.root)
-                      : void openPath(drive.root).catch(() => undefined))
+                      : onOpenTarget(drive.root))
                   }
                   onContextMenu={(ev) => {
                     ev.preventDefault()

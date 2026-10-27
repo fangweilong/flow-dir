@@ -1002,6 +1002,69 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
                 </button>
               </div>
             </div>
+            <div className="mt-2 space-y-2 rounded-lg border border-line px-3 py-2" data-preview-limits>
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-[0.71875rem] text-fg">{t('settings.previewMaxFile')}</div>
+                  <div className="text-[0.625rem] text-muted-2">{t('settings.previewMaxFileHint')}</div>
+                </div>
+                <input
+                  type="number"
+                  min={1}
+                  max={4096}
+                  value={settings.previewMaxFileMb}
+                  onChange={(ev) => {
+                    const next = Number(ev.target.value)
+                    if (!Number.isFinite(next)) return
+                    onChange({ ...settings, previewMaxFileMb: Math.min(4096, Math.max(1, Math.round(next))) })
+                  }}
+                  data-preview-max-file
+                  className="h-6 w-16 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-blue-400"
+                />
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-[0.71875rem] text-fg">{t('settings.previewMaxDimension')}</div>
+                  <div className="text-[0.625rem] text-muted-2">{t('settings.previewMaxDimensionHint')}</div>
+                </div>
+                <input
+                  type="number"
+                  min={256}
+                  max={16384}
+                  step={64}
+                  value={settings.previewMaxDimension}
+                  onChange={(ev) => {
+                    const next = Number(ev.target.value)
+                    if (!Number.isFinite(next)) return
+                    onChange({
+                      ...settings,
+                      previewMaxDimension: Math.min(16384, Math.max(256, Math.round(next))),
+                    })
+                  }}
+                  data-preview-max-dimension
+                  className="h-6 w-20 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-blue-400"
+                />
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-[0.71875rem] text-fg">{t('settings.previewTextKb')}</div>
+                  <div className="text-[0.625rem] text-muted-2">{t('settings.previewTextKbHint')}</div>
+                </div>
+                <input
+                  type="number"
+                  min={1}
+                  max={1024}
+                  value={settings.previewTextKb}
+                  onChange={(ev) => {
+                    const next = Number(ev.target.value)
+                    if (!Number.isFinite(next)) return
+                    onChange({ ...settings, previewTextKb: Math.min(1024, Math.max(1, Math.round(next))) })
+                  }}
+                  data-preview-text-kb
+                  className="h-6 w-16 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-blue-400"
+                />
+              </div>
+            </div>
           </section>
 
           <section className={sectionClass('config')}>

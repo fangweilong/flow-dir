@@ -115,6 +115,12 @@ pub struct Settings {
     pub drive_free_width: u32,
     /// Undo/redo history depth, 1–100.
     pub undo_limit: u32,
+    /// Largest file the preview will read, in MB (1–4096).
+    pub preview_max_file_mb: u32,
+    /// Largest width/height a rendered image or PDF page may use (256–16384).
+    pub preview_max_dimension: u32,
+    /// How much of a text file is shown, in KB (1–1024).
+    pub preview_text_kb: u32,
 }
 
 fn default_language() -> String {
@@ -261,6 +267,9 @@ impl Default for Settings {
             drive_capacity_width: default_drive_capacity_width(),
             drive_free_width: default_drive_free_width(),
             undo_limit: 10,
+            preview_max_file_mb: 64,
+            preview_max_dimension: 4096,
+            preview_text_kb: 8,
         }
     }
 }
@@ -322,6 +331,11 @@ impl Settings {
         self.drive_free_width =
             sanitize_list_col(self.drive_free_width, DRIVE_FREE_MIN, default_drive_free_width());
         self.undo_limit = self.undo_limit.clamp(1, 100);
+        // Preview caps: the file cap also bounds what the fd:// handler will read, so the
+        // upper bound keeps one accidental keystroke from reserving gigabytes.
+        self.preview_max_file_mb = self.preview_max_file_mb.clamp(1, 4096);
+        self.preview_max_dimension = self.preview_max_dimension.clamp(256, 16384);
+        self.preview_text_kb = self.preview_text_kb.clamp(1, 1024);
         self
     }
 }
@@ -409,6 +423,12 @@ shortcuts = []
 
 # 撤销/重做历史深度（1–100）/ undo and redo history depth, 1–100
 undo_limit = 10
+
+# 预览上限：最大文件（MB，1–4096）、最大渲染边长（像素，256–16384）、文本预览长度（KB，1–1024）
+# preview caps: largest file in MB, largest rendered edge in px, text preview size in KB
+preview_max_file_mb = 64
+preview_max_dimension = 4096
+preview_text_kb = 8
 "#;
 
 /// On-disk shape: snake_case keys, no coupling to the camelCase IPC payload.
@@ -444,6 +464,9 @@ struct FileSettings {
     external_preview: Vec<ExternalPreview>,
     shortcuts: Vec<ShortcutOverride>,
     undo_limit: u32,
+    preview_max_file_mb: u32,
+    preview_max_dimension: u32,
+    preview_text_kb: u32,
 }
 
 impl Default for FileSettings {
@@ -479,6 +502,9 @@ impl Default for FileSettings {
             external_preview: base.external_preview,
             shortcuts: base.shortcuts,
             undo_limit: base.undo_limit,
+            preview_max_file_mb: base.preview_max_file_mb,
+            preview_max_dimension: base.preview_max_dimension,
+            preview_text_kb: base.preview_text_kb,
         }
     }
 }
@@ -515,6 +541,9 @@ impl From<FileSettings> for Settings {
             external_preview: file.external_preview,
             shortcuts: file.shortcuts,
             undo_limit: file.undo_limit,
+            preview_max_file_mb: file.preview_max_file_mb,
+            preview_max_dimension: file.preview_max_dimension,
+            preview_text_kb: file.preview_text_kb,
         }
     }
 }
@@ -630,6 +659,21 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), A
         Value::from(settings.drive_free_width as i64),
     );
     set_value(&mut doc, "undo_limit", Value::from(settings.undo_limit as i64));
+    set_value(
+        &mut doc,
+        "preview_max_file_mb",
+        Value::from(settings.preview_max_file_mb as i64),
+    );
+    set_value(
+        &mut doc,
+        "preview_max_dimension",
+        Value::from(settings.preview_max_dimension as i64),
+    );
+    set_value(
+        &mut doc,
+        "preview_text_kb",
+        Value::from(settings.preview_text_kb as i64),
+    );
 
     let mut hidden = toml_edit::Array::new();
     for key in &settings.hidden_places {

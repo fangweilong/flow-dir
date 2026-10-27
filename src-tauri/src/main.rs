@@ -10,6 +10,7 @@ mod git;
 mod icons;
 mod layout;
 mod logging;
+mod naming;
 mod ops;
 mod preview;
 mod restore;
@@ -343,6 +344,24 @@ async fn quick_access() -> Vec<fs::Place> {
         .unwrap_or_default()
 }
 
+/// Which of `paths` already exist, for a rename/move preview that must not overwrite.
+#[tauri::command]
+async fn paths_exist(paths: Vec<String>) -> Vec<bool> {
+    let count = paths.len();
+    tauri::async_runtime::spawn_blocking(move || naming::existing(&paths))
+        .await
+        .unwrap_or_else(|_| vec![false; count])
+}
+
+/// Free "name (n)" variants of every path, in the same order as the input.
+#[tauri::command]
+async fn unique_paths(paths: Vec<String>) -> Vec<String> {
+    let fallback = paths.clone();
+    tauri::async_runtime::spawn_blocking(move || naming::unique(&paths))
+        .await
+        .unwrap_or(fallback)
+}
+
 #[tauri::command]
 fn layout_save(app: tauri::AppHandle, workspace: serde_json::Value) -> Result<(), ApiError> {
     layout::save(&app, workspace)
@@ -567,13 +586,16 @@ async fn preview_info(
     path: String,
     width: u32,
     bg: String,
+    hydrate: Option<bool>,
 ) -> Result<preview::PreviewInfo, ApiError> {
     let bg = u32::from_str_radix(bg.trim_start_matches('#'), 16).unwrap_or(0xffffff);
     // Archive central directories and version resources can sit on a network share:
     // never inspect a file on the IPC thread.
-    let external = cache.get(&app).external_preview.clone();
+    let settings = cache.get(&app);
+    let external = settings.external_preview.clone();
+    let limits = preview::Limits::from_settings(&settings);
     tauri::async_runtime::spawn_blocking(move || {
-        preview::info(path, width.clamp(64, 2048), bg, &external)
+        preview::info(path, width, bg, &external, limits, hydrate.unwrap_or(false))
     })
     .await
     .map_err(|e| ApiError::new("THREAD", e.to_string()))?
@@ -799,13 +821,65 @@ fn open_path(path: String) -> Result<(), ApiError> {
             SW_SHOWNORMAL,
         )
     };
-    if (result.0 as isize) <= 32 {
-        return Err(ApiError::new(
-            "SHELL_FAILED",
-            format!("ShellExecuteW 返回 {}", result.0 as isize),
-        ));
+    // ShellExecuteW reports failure through its return value, not GetLastError.
+    let code = result.0 as isize;
+    if code > 32 {
+        return Ok(());
     }
-    Ok(())
+    Err(match code {
+        // The shell has no default handler for this extension; the caller offers the
+        // system "Open with" dialog instead of leaving the double-click silent.
+        31 => ApiError::new("NO_ASSOCIATION", path),
+        2 => ApiError::new("NOT_FOUND", path),
+        5 => ApiError::new("ACCESS_DENIED", path),
+        _ => ApiError::new("SHELL_FAILED", format!("ShellExecuteW 返回 {code}")),
+    })
+}
+
+/// Shows the system "Open with" dialog for a file that has no default program.
+///
+/// `SHOpenWithDialog` is modal and needs a single-threaded apartment, so it runs on a
+/// blocking thread with its own COM initialisation instead of a shared runtime worker.
+#[tauri::command]
+async fn open_with(path: String) -> Result<(), ApiError> {
+    use windows::Win32::System::Com::{
+        CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
+    };
+    use windows::Win32::UI::Shell::{
+        SHOpenWithDialog, OAIF_ALLOW_REGISTRATION, OAIF_EXEC, OPENASINFO,
+    };
+    let join = tauri::async_runtime::spawn_blocking(move || {
+        let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        unsafe {
+            let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+            if hr.is_err() && hr.0 as u32 != 0x8001_0106 {
+                // S_FALSE means the apartment was already initialised on this thread; any
+                // other failure leaves no working COM, so the dialog cannot be shown.
+                return Err(ApiError::new("SHELL_FAILED", hr.message()));
+            }
+            let info = OPENASINFO {
+                pcszFile: PCWSTR(wide.as_ptr()),
+                pcszClass: PCWSTR::null(),
+                // Registration stays allowed so "always use this app" works, and
+                // OAIF_EXEC launches the chosen program immediately.
+                oaifInFlags: OAIF_ALLOW_REGISTRATION | OAIF_EXEC,
+            };
+            let result = SHOpenWithDialog(None, &info);
+            CoUninitialize();
+            result.map_err(|err| {
+                let raw = err.code().0 as u32;
+                if raw == 0x8007_04C7 {
+                    // The user dismissed the dialog; not a failure worth reporting.
+                    ApiError::new("CANCELED", "open-with dialog dismissed")
+                } else {
+                    ApiError::new("SHELL_FAILED", err.message())
+                }
+            })
+        }
+    })
+    .await
+    .map_err(|err| ApiError::new("IO", err.to_string()))?;
+    join
 }
 
 #[tauri::command]
@@ -1024,9 +1098,12 @@ fn main() {
             drives,
             tree_dirs,
             path_is_dir,
+            paths_exist,
+            unique_paths,
             git_status,
             quick_access,
             open_path,
+            open_with,
             explorer_open,
             reveal_path,
             layout_save,

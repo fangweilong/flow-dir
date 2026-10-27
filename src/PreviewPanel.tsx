@@ -18,6 +18,8 @@ type Props = {
   externalKey: string
   onClose: () => void
   onOpenExternal: (path: string) => void
+  /** Reads the cloud file, which downloads it; only ever called from an explicit click. */
+  onDownload: () => void
 }
 
 /** Maps raw error codes/details to a human sentence; never prints `[object Object]`. */
@@ -28,6 +30,8 @@ function friendlyError(error: ApiError, t: Translate) {
       return t('preview.errorAccess')
     case 'TOO_LARGE':
       return t('preview.tooLarge')
+    case 'CLOUD_PLACEHOLDER':
+      return t('preview.cloud')
     case 'IS_DIR':
       return t('preview.folder')
     case 'NOT_FOUND':
@@ -49,6 +53,7 @@ export function PreviewPanel({
   externalKey,
   onClose,
   onOpenExternal,
+  onDownload,
 }: Props) {
   const t = makeT(lang)
 
@@ -148,6 +153,27 @@ export function PreviewPanel({
                     </div>
                   ))}
                   {!info.meta?.length && <div className="text-muted-2">—</div>}
+                </div>
+              </div>
+            )}
+
+            {info.kind === 'cloud' && (
+              <div className="grid h-full place-items-center px-4 text-center">
+                <div>
+                  <svg viewBox="0 0 48 48" className="mx-auto h-11 w-11 text-sky-400" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                    <path d="M14 34h20a8 8 0 0 0 1.6-15.8A11 11 0 0 0 14.5 16 9 9 0 0 0 14 34Z" />
+                    <path d="M24 24v10M20 30l4 4 4-4" />
+                  </svg>
+                  <div className="mt-2 text-[0.75rem] text-fg">{t('preview.cloud')}</div>
+                  <div className="mt-1 text-[0.6875rem] text-muted-2">{t('preview.cloudHint')}</div>
+                  <button
+                    type="button"
+                    data-preview-download
+                    onClick={onDownload}
+                    className="mt-3 rounded-md border border-line bg-surface-2 px-2.5 py-1 text-[0.6875rem] text-fg hover:bg-surface-3"
+                  >
+                    {t('preview.cloudDownload')}
+                  </button>
                 </div>
               </div>
             )}

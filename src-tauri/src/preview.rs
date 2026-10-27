@@ -31,14 +31,58 @@ use windows::Win32::System::Com::{
 };
 
 use crate::error::ApiError;
-use crate::settings::ExternalPreview;
+use crate::settings::{ExternalPreview, Settings};
 
 /// Icon and thumbnail payloads are small and cheap to regenerate; a generous cache
 /// only inflates the resident set of a file manager that is meant to stay small.
 const MAX_CACHE_BYTES: usize = 12 * 1024 * 1024;
-const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_TEXT_BYTES: usize = 8 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 50;
+
+/// Cloud-provider attributes. A file carrying any of them is a placeholder whose bytes
+/// live only in the cloud; touching it would download it, which the preview must not do
+/// until the user asks for it explicitly.
+const ATTR_OFFLINE: u32 = 0x0000_1000;
+const ATTR_RECALL_ON_OPEN: u32 = 0x0004_0000;
+const ATTR_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+
+/// Hard ceiling for one decoded preview bitmap (32bpp BGRA). A 4096×4096 image is 64 MB,
+/// which is the largest frame the panel can show anyway.
+const MAX_RENDER_BYTES: usize = 64 * 1024 * 1024;
+
+/// Caps applied to every preview read. They come from settings so a slow volume or a
+/// very large PDF can be tuned without a rebuild.
+#[derive(Clone, Copy, Debug)]
+pub struct Limits {
+    pub max_bytes: u64,
+    pub max_dimension: u32,
+    pub text_bytes: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_bytes: 64 * 1024 * 1024,
+            max_dimension: 4096,
+            text_bytes: 8 * 1024,
+        }
+    }
+}
+
+impl Limits {
+    pub fn from_settings(settings: &Settings) -> Self {
+        Self {
+            max_bytes: u64::from(settings.preview_max_file_mb) * 1024 * 1024,
+            max_dimension: settings.preview_max_dimension,
+            text_bytes: settings.preview_text_kb as usize * 1024,
+        }
+    }
+
+    /// Width a rendered image/PDF may use; never above the configured pixel cap, so a
+    /// dragged-out panel cannot ask for a bitmap larger than the limit.
+    pub fn width(&self, requested: u32) -> u32 {
+        requested.clamp(64, self.max_dimension.max(64))
+    }
+}
 
 const IMAGE_EXT: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff", "ico", "heic", "avif",
@@ -176,7 +220,14 @@ fn has_ads_or_device(path: &str) -> bool {
     false
 }
 
-fn validate(path: &str) -> Result<(), ApiError> {
+/// True when the bytes for this file are still in the cloud. Reading such a file would
+/// pull the whole thing down, so the preview stops at a "download first" state instead.
+fn is_cloud_placeholder(meta: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    meta.file_attributes() & (ATTR_OFFLINE | ATTR_RECALL_ON_OPEN | ATTR_RECALL_ON_DATA_ACCESS) != 0
+}
+
+fn validate(path: &str, limits: Limits) -> Result<(), ApiError> {
     if path.is_empty() || path.len() > 1024 {
         return Err(ApiError::new("INVALID_PATH", "path length"));
     }
@@ -201,7 +252,11 @@ fn validate(path: &str) -> Result<(), ApiError> {
     if meta.is_dir() {
         return Err(ApiError::new("IS_DIR", path));
     }
-    if meta.len() > MAX_SOURCE_BYTES {
+    if is_cloud_placeholder(&meta) {
+        // The metadata call above does not hydrate; only a data read would.
+        return Err(ApiError::new("CLOUD_PLACEHOLDER", path));
+    }
+    if meta.len() > limits.max_bytes {
         return Err(ApiError::new("TOO_LARGE", path));
     }
     Ok(())
@@ -223,14 +278,18 @@ pub fn handle_request<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) ->
     let Some(path) = params.get("path") else {
         return status(StatusCode::BAD_REQUEST);
     };
-    if let Err(err) = validate(path) {
-        return plain(StatusCode::BAD_REQUEST, &err.code);
+    let limits = Limits::from_settings(&app.state::<crate::settings::SettingsCache>().get(app));
+    if let Err(err) = validate(path, limits) {
+        // 409 tells the <img> nothing, but the frontend never builds a URL for a
+        // placeholder: it shows the "download first" state instead.
+        return plain(StatusCode::CONFLICT, &err.code);
     }
-    let width = params
-        .get("w")
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(512)
-        .clamp(64, 2048);
+    let width = limits.width(
+        params
+            .get("w")
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(512),
+    );
     let bg = params
         .get("bg")
         .and_then(|v| u32::from_str_radix(v, 16).ok())
@@ -324,6 +383,8 @@ pub fn info(
     width: u32,
     bg: u32,
     external: &[ExternalPreview],
+    limits: Limits,
+    hydrate: bool,
 ) -> Result<PreviewInfo, ApiError> {
     let meta = std::fs::metadata(&path).map_err(|e| ApiError::from_io(&path, &e))?;
     let mtime = meta
@@ -342,7 +403,22 @@ pub fn info(
     let size = meta.len();
     let ext = extension(&path);
     let external = rule_for(&ext, external).map(|rule| command_label(&rule.command));
-    if size > MAX_SOURCE_BYTES {
+    // The metadata read does not touch the data stream; only the explicit hydrate path
+    // does, so a cloud file is reported as a placeholder until the user asks for it.
+    if is_cloud_placeholder(&meta) {
+        if !hydrate {
+            return Ok(PreviewInfo {
+                kind: "cloud".into(),
+                reason: Some("cloud-placeholder".into()),
+                size,
+                mtime,
+                external,
+                ..Default::default()
+            });
+        }
+        bring_online(&path)?;
+    }
+    if size > limits.max_bytes {
         return Ok(PreviewInfo {
             kind: "unsupported".into(),
             reason: Some("too-large".into()),
@@ -359,6 +435,7 @@ pub fn info(
         ..Default::default()
     };
 
+    let width = limits.width(width);
     if IMAGE_EXT.contains(&ext.as_str()) || ext == "pdf" || VIDEO_EXT.contains(&ext.as_str()) {
         let encoded =
             percent_encoding::utf8_percent_encode(&path, percent_encoding::NON_ALPHANUMERIC);
@@ -399,7 +476,7 @@ pub fn info(
         }
         _ => {
             let known = TEXT_EXT.contains(&ext.as_str());
-            match read_prefix(&path) {
+            match read_prefix(&path, limits.text_bytes) {
                 // Sniffing keeps unknown and extension-less text (Lua scripts, Dockerfile,
                 // LICENSE, …) previewable without an ever-growing extension table.
                 Ok(bytes) if known || looks_like_text(&bytes) => {
@@ -419,16 +496,28 @@ pub fn info(
     Ok(info)
 }
 
-/// Head of the file, capped at `MAX_TEXT_BYTES`: a text preview never needs more and
-/// reading a 64 MB log in full would stall the reply.
-fn read_prefix(path: &str) -> Result<Vec<u8>, ApiError> {
+/// Head of the file, capped at the configured text size: a text preview never needs more
+/// and reading a 64 MB log in full would stall the reply.
+fn read_prefix(path: &str, max: usize) -> Result<Vec<u8>, ApiError> {
     use std::io::Read;
     let file = std::fs::File::open(path).map_err(|e| ApiError::from_io(path, &e))?;
-    let mut bytes = Vec::with_capacity(MAX_TEXT_BYTES);
-    file.take(MAX_TEXT_BYTES as u64)
+    let mut bytes = Vec::with_capacity(max);
+    file.take(max as u64)
         .read_to_end(&mut bytes)
         .map_err(|e| ApiError::from_io(path, &e))?;
     Ok(bytes)
+}
+
+/// Reads one byte of the file, which is what makes a cloud provider fetch the data.
+/// It returns once the first bytes have arrived; the provider keeps streaming the rest
+/// in the background, so a large file does not block the preview for its full size.
+fn bring_online(path: &str) -> Result<(), ApiError> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).map_err(|e| ApiError::from_io(path, &e))?;
+    let mut probe = [0u8; 1];
+    file.read(&mut probe)
+        .map_err(|e| ApiError::from_io(path, &e))?;
+    Ok(())
 }
 
 /// Binary sniff: NUL bytes or more than 2% control characters mean the prefix is not
@@ -650,6 +739,16 @@ fn scale_to_bgra(
         let scale = (max_width as f64 / width as f64).min(1.0);
         let target_w = ((width as f64 * scale).round() as u32).max(1);
         let target_h = ((height as f64 * scale).round() as u32).max(1);
+        // A malformed header can claim enormous dimensions; refuse before allocating so
+        // the multiplication below cannot wrap (release) or panic (debug).
+        let stride = target_w
+            .checked_mul(4)
+            .ok_or_else(|| ApiError::new("IMAGE_TOO_LARGE", "stride overflow"))?;
+        let total = stride
+            .checked_mul(target_h)
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .filter(|bytes| *bytes <= MAX_RENDER_BYTES)
+            .ok_or_else(|| ApiError::new("IMAGE_TOO_LARGE", "pixels overflow"))?;
 
         let scaler: IWICBitmapScaler = factory
             .CreateBitmapScaler()
@@ -673,7 +772,7 @@ fn scale_to_bgra(
             .map_err(|e| ApiError::new("WIC", e.to_string()))?;
 
         let stride = target_w * 4;
-        let mut pixels = vec![0u8; (stride * target_h) as usize];
+        let mut pixels = vec![0u8; total];
         converter
             .CopyPixels(std::ptr::null(), stride, &mut pixels)
             .map_err(|e| ApiError::new("WIC", e.to_string()))?;
@@ -893,6 +992,18 @@ fn render_pdf(path: &str, width: u32) -> Result<Vec<u8>, ApiError> {
     options
         .SetDestinationWidth(width)
         .map_err(|e| ApiError::new("PDF", e.to_string()))?;
+    // Width alone leaves a tall page free to render at any height; derive the height from
+    // the page's own aspect ratio and cap it so the bitmap stays inside MAX_RENDER_BYTES.
+    if let Ok(size) = page.Size() {
+        if size.Width > 0.0 {
+            let height = (f64::from(width) * f64::from(size.Height) / f64::from(size.Width)).ceil();
+            let max_height = (MAX_RENDER_BYTES / (width as usize * 4)).max(1) as f64;
+            let height = height.clamp(1.0, max_height).min(f64::from(u32::MAX));
+            options
+                .SetDestinationHeight(height as u32)
+                .map_err(|e| ApiError::new("PDF", e.to_string()))?;
+        }
+    }
     page.RenderWithOptionsToStreamAsync(&stream, &options)
         .and_then(|op| op.join())
         .map_err(|e| ApiError::new("PDF", e.to_string()))?;
@@ -1035,7 +1146,15 @@ mod tests {
         let dir = std::env::temp_dir();
         let lua = dir.join("flowdir_preview_probe.lua");
         std::fs::write(&lua, "print('hi')\n").unwrap();
-        let text = info(lua.to_string_lossy().into_owned(), 320, 0xffffff, &[]).unwrap();
+        let text = info(
+            lua.to_string_lossy().into_owned(),
+            320,
+            0xffffff,
+            &[],
+            Limits::default(),
+            false,
+        )
+        .unwrap();
         assert_eq!(text.kind, "text");
         assert_eq!(text.text.as_deref(), Some("print('hi')\n"));
 
@@ -1050,6 +1169,8 @@ mod tests {
             320,
             0xffffff,
             std::slice::from_ref(&rule),
+            Limits::default(),
+            false,
         )
         .unwrap();
         assert_eq!(rule_info.kind, "unsupported");
@@ -1057,5 +1178,48 @@ mod tests {
 
         let _ = std::fs::remove_file(&lua);
         let _ = std::fs::remove_file(&docx);
+    }
+
+    #[test]
+    fn limits_cap_width_and_clamp_from_settings() {
+        let limits = Limits::default();
+        assert_eq!(limits.width(320), 320);
+        assert_eq!(limits.width(0), 64);
+        assert_eq!(limits.width(100_000), 4096);
+        // A hand-edited value outside the documented range must not disable the cap.
+        let settings = crate::settings::Settings {
+            preview_max_dimension: 100_000,
+            preview_max_file_mb: 0,
+            preview_text_kb: 0,
+            ..Default::default()
+        }
+        .normalize();
+        let limits = Limits::from_settings(&settings);
+        assert!(limits.max_dimension <= 16384);
+        assert!(limits.max_bytes >= 1024 * 1024);
+        assert!(limits.text_bytes >= 1024);
+    }
+
+    #[test]
+    fn a_file_that_is_too_large_is_reported_without_reading_it() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("flowdir_preview_oversize.txt");
+        std::fs::write(&path, b"hello").unwrap();
+        let limits = Limits {
+            max_bytes: 1,
+            ..Limits::default()
+        };
+        let info = info(
+            path.to_string_lossy().into_owned(),
+            320,
+            0xffffff,
+            &[],
+            limits,
+            false,
+        )
+        .unwrap();
+        assert_eq!(info.kind, "unsupported");
+        assert_eq!(info.reason.as_deref(), Some("too-large"));
+        let _ = std::fs::remove_file(&path);
     }
 }

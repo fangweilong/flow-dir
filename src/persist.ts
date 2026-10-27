@@ -57,6 +57,12 @@ export type Settings = {
   driveFreeWidth: number
   /** Undo and redo history depth (1–100). */
   undoLimit: number
+  /** Largest file the preview reads, in MB (1–4096). */
+  previewMaxFileMb: number
+  /** Largest width or height a rendered preview may use (256–16384). */
+  previewMaxDimension: number
+  /** How much of a text file the preview shows, in KB (1–1024). */
+  previewTextKb: number
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -89,6 +95,9 @@ export const DEFAULT_SETTINGS: Settings = {
   driveCapacityWidth: 150,
   driveFreeWidth: 84,
   undoLimit: 10,
+  previewMaxFileMb: 64,
+  previewMaxDimension: 4096,
+  previewTextKb: 8,
 }
 
 type Snapshot = {
