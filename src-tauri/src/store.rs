@@ -1,8 +1,16 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use tauri::{AppHandle, Manager, Runtime};
 
 use crate::error::ApiError;
+
+static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+/// Serializes writers in this process; two auto-save paths must not rotate `.bak` while
+/// the other is renaming its temporary file.
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Folder for settings and session state, deliberately independent of the bundle
 /// identifier so the on-disk location stays predictable for users.
@@ -103,18 +111,33 @@ pub fn migrate_legacy<R: Runtime>(app: &AppHandle<R>) {
 }
 
 /// Writes `bytes` to `path` atomically, keeping the previous file as `.bak`.
+///
+/// The temporary name carries the PID and a sequence number: a fixed `.tmp` let two
+/// concurrent writers truncate each other and could install a half-written JSON file.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let _guard = WRITE_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
     let tmp = path.with_file_name(format!(
-        "{}.tmp",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or("file")
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(&tmp, bytes)?;
+    {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        // Flush before the rename: a power cut must not leave an empty file in place of
+        // the previous, valid one.
+        file.sync_all()?;
+    }
     if path.exists() {
-        let backup = path.with_file_name(format!(
-            "{}.bak",
-            path.file_name().and_then(|n| n.to_str()).unwrap_or("file")
-        ));
+        let backup = path.with_file_name(format!("{name}.bak"));
         let _ = std::fs::copy(path, backup);
     }
-    std::fs::rename(&tmp, path)
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(err)
+        }
+    }
 }

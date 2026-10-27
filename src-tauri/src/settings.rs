@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -6,6 +7,10 @@ use toml_edit::{DocumentMut, Item, Value};
 
 use crate::error::ApiError;
 use crate::store;
+
+/// Set when `settings.toml` could not be parsed and the user is running on the fallback
+/// chain. The frontend asks once and shows a single toast.
+pub static CONFIG_REJECTED: AtomicBool = AtomicBool::new(false);
 
 /// User-added quick-access entry.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -509,16 +514,18 @@ pub fn load<R: Runtime>(app: &AppHandle<R>) -> Settings {
         return Settings::default();
     };
     let path = dir.join(FILE);
-    if let Ok(text) = std::fs::read_to_string(&path) {
-        match toml_edit::de::from_str::<FileSettings>(&text) {
-            Ok(file) => {
-                return Settings::from(file).normalize();
-            }
-            Err(_) => {
-                // Keep whatever the user had instead of letting the next save overwrite it.
-                let _ = std::fs::copy(&path, dir.join("settings.rejected.toml"));
-            }
+    // `settings.toml` → `settings.bak.toml` → defaults. A parse failure never writes:
+    // overwriting a hand-edited file with the template loses the user's settings for good.
+    match parse_file(&path) {
+        Parse::Ok(settings) => return settings,
+        Parse::Invalid => {
+            CONFIG_REJECTED.store(true, Ordering::Relaxed);
+            let _ = std::fs::copy(&path, dir.join("settings.rejected.toml"));
         }
+        Parse::Missing => {}
+    }
+    if let Parse::Ok(settings) = parse_file(&dir.join("settings.bak.toml")) {
+        return settings;
     }
     // One-time conversion from the JSON file used before TOML support.
     let legacy = dir.join("settings.json");
@@ -531,10 +538,28 @@ pub fn load<R: Runtime>(app: &AppHandle<R>) -> Settings {
             return settings;
         }
     }
-    // Materialize the commented template so the file is discoverable and editable.
+    // Materialize the commented template only when there is nothing to protect.
     let defaults = Settings::default();
-    let _ = save(app, &defaults);
+    if !path.exists() {
+        let _ = save(app, &defaults);
+    }
     defaults
+}
+
+enum Parse {
+    Ok(Settings),
+    Invalid,
+    Missing,
+}
+
+fn parse_file(path: &std::path::Path) -> Parse {
+    match std::fs::read_to_string(path) {
+        Ok(text) => match toml_edit::de::from_str::<FileSettings>(&text) {
+            Ok(file) => Parse::Ok(Settings::from(file).normalize()),
+            Err(_) => Parse::Invalid,
+        },
+        Err(_) => Parse::Missing,
+    }
 }
 
 pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), ApiError> {
@@ -542,9 +567,15 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), A
     std::fs::create_dir_all(&dir).map_err(|e| ApiError::new("CONFIG_DIR", e.to_string()))?;
     let path = dir.join(FILE);
     let text = std::fs::read_to_string(&path).unwrap_or_else(|_| TEMPLATE.to_string());
-    let mut doc = text
-        .parse::<DocumentMut>()
-        .unwrap_or_else(|_| TEMPLATE.parse().expect("template parses"));
+    let mut doc = match text.parse::<DocumentMut>() {
+        Ok(doc) => doc,
+        Err(_) => {
+            // An explicit save may legitimately repair a broken file, but the broken
+            // content is still kept aside instead of being silently replaced.
+            let _ = std::fs::copy(&path, dir.join("settings.rejected.toml"));
+            TEMPLATE.parse().expect("template parses")
+        }
+    };
 
     set_value(&mut doc, "language", Value::from(settings.language.as_str()));
     set_value(&mut doc, "theme", Value::from(settings.theme.as_str()));

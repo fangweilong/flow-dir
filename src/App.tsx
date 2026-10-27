@@ -22,6 +22,7 @@ import {
   cancelDir,
   clipboardCopy,
   clipboardPaste,
+  configWarnings,
   dragOut,
   driveEject,
   drives,
@@ -424,6 +425,19 @@ export default function App() {
     toastTimer.current = window.setTimeout(() => setToast(null), 2200)
   }, [])
 
+  // A failing config write would otherwise stay invisible (disk full, read-only folder).
+  // Identical failures are collapsed to one toast per ten seconds.
+  const lastSaveError = useRef(0)
+  const reportSaveError = useCallback(
+    (err: unknown) => {
+      const now = Date.now()
+      if (now - lastSaveError.current < 10_000) return
+      lastSaveError.current = now
+      showToast(makeT(settingsRef.current.language)('toast.saveFailed', { code: errorCode(err) }))
+    },
+    [showToast],
+  )
+
   /**
    * Taskbar progress mirrors the aggregate of running operations: one bar for the batch,
    * error/paused when a tick failed or was canceled, cleared once nothing is running.
@@ -572,14 +586,21 @@ export default function App() {
   useEffect(() => {
     let cancelled = false
     void (async () => {
-      const [savedSettings, placeList, driveListResult, saved] = await Promise.all([
+      const [savedSettings, placeList, driveListResult, saved, warnings] = await Promise.all([
         settingsLoad().catch(() => DEFAULT_SETTINGS),
         quickAccess().catch(() => [] as Place[]),
         drives().catch(() => [] as Drive[]),
         layoutLoad().catch(() => null),
+        configWarnings().catch(() => [] as string[]),
       ])
       if (cancelled) return
       const merged = { ...DEFAULT_SETTINGS, ...savedSettings }
+      if (warnings.includes('SETTINGS_REJECTED')) {
+        showToast(makeT(merged.language)('toast.settingsRejected'))
+      }
+      if (warnings.includes('LAYOUT_REJECTED')) {
+        showToast(makeT(merged.language)('toast.layoutRejected'))
+      }
       setSettings(merged)
       setPreviewOpen(merged.previewOpen)
       setSidebarWidth(merged.sidebarWidth >= SIDEBAR_MIN ? merged.sidebarWidth : DEFAULT_SETTINGS.sidebarWidth)
@@ -633,10 +654,10 @@ export default function App() {
   useEffect(() => {
     if (!ws || !readyRef.current) return
     const timer = window.setTimeout(() => {
-      void layoutSave(toSnapshot(ws)).catch(() => undefined)
+      void layoutSave(toSnapshot(ws)).catch(reportSaveError)
     }, 500)
     return () => window.clearTimeout(timer)
-  }, [ws])
+  }, [ws, reportSaveError])
 
   useEffect(() => {
     const announce = (status: UpdateStatus) => {
@@ -856,9 +877,9 @@ export default function App() {
       settingsSaveTimer.current = null
       const snapshot = pendingSettings.current
       pendingSettings.current = null
-      if (snapshot) void settingsSave(snapshot).catch(() => undefined)
+      if (snapshot) void settingsSave(snapshot).catch(reportSaveError)
     }, 300)
-  }, [])
+  }, [reportSaveError])
 
   /** Writes a pending change before the window closes; the debounce must not lose it. */
   const flushSettings = useCallback(() => {
@@ -868,15 +889,15 @@ export default function App() {
     }
     const snapshot = pendingSettings.current
     pendingSettings.current = null
-    if (snapshot) void settingsSave(snapshot).catch(() => undefined)
-  }, [])
+    if (snapshot) void settingsSave(snapshot).catch(reportSaveError)
+  }, [reportSaveError])
 
   useEffect(() => {
     let disposed = false
     let unlisten: (() => void) | undefined
     void listen('flowdir:flush-layout', () => {
       const current = wsRef.current
-      if (current) void layoutSave(toSnapshot(current)).catch(() => undefined)
+      if (current) void layoutSave(toSnapshot(current)).catch(reportSaveError)
       flushSettings()
     }).then((fn) => {
       if (disposed) fn()
@@ -886,7 +907,7 @@ export default function App() {
       disposed = true
       unlisten?.()
     }
-  }, [flushSettings])
+  }, [flushSettings, reportSaveError])
 
   /** Column widths are global: every pane and tab shares them. */
   const setColWidths = useCallback(

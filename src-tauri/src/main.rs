@@ -755,6 +755,18 @@ fn app_info() -> AppInfo {
 }
 
 #[tauri::command]
+fn config_warnings() -> Vec<&'static str> {
+    let mut warnings = Vec::new();
+    if settings::CONFIG_REJECTED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        warnings.push("SETTINGS_REJECTED");
+    }
+    if layout::LAYOUT_REJECTED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        warnings.push("LAYOUT_REJECTED");
+    }
+    warnings
+}
+
+#[tauri::command]
 fn open_path(path: String) -> Result<(), ApiError> {
     let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
     let result = unsafe {
@@ -984,6 +996,7 @@ fn main() {
             log_dir_path,
             diagnostics_export,
             app_info,
+            config_warnings,
             update_check,
             update_install
         ])

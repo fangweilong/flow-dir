@@ -36,6 +36,7 @@ export const layoutLoad = () => invoke<unknown>('layout_load')
 export const layoutPreserve = () => invoke<string>('layout_preserve')
 
 export const settingsLoad = () => invoke<Settings>('settings_load')
+export const configWarnings = () => invoke<string[]>('config_warnings')
 export const settingsSave = (settings: Settings) => invoke<void>('settings_save', { settings })
 export const setAppTheme = (theme: string) => invoke<void>('set_app_theme', { theme })
 export const watchSet = (paneId: string, path: string) => invoke<void>('watch_set', { paneId, path })
