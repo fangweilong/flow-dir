@@ -164,15 +164,29 @@ pub fn run(
             {
                 return;
             }
-            if total >= limit {
-                break;
+        }
+        // Checked after the flush above: the batch containing the limit-th match is sent
+        // first, but never with more items than the caller asked for.
+        if total >= limit {
+            if !batch.is_empty() {
+                let items = std::mem::take(&mut batch);
+                if on_batch
+                    .send(SearchBatch {
+                        gen,
+                        provider: "jwalk".into(),
+                        items,
+                        done: false,
+                        error: None,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
             }
+            break;
         }
     }
 
-    if total > limit {
-        batch.truncate(limit - (total - batch.len()));
-    }
     let _ = on_batch.send(SearchBatch {
         gen,
         provider: "jwalk".into(),
@@ -302,6 +316,10 @@ mod tests {
     };
 
     fn collect(root: &str, query: &str, hidden: bool) -> Vec<SearchItem> {
+        collect_with_limit(root, query, hidden, 500)
+    }
+
+    fn collect_with_limit(root: &str, query: &str, hidden: bool, limit: u32) -> Vec<SearchItem> {
         let batches: Arc<Mutex<Vec<SearchBatch>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = batches.clone();
         let channel = Channel::new(move |body| {
@@ -316,7 +334,7 @@ mod tests {
             root.to_string(),
             query.to_string(),
             1,
-            500,
+            limit,
             false,
             hidden,
             Arc::new(AtomicBool::new(false)),
@@ -364,6 +382,22 @@ mod tests {
             )
             .unwrap();
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A partial final batch must be cut to the remaining quota instead of being sent whole.
+    #[test]
+    fn builtin_scan_never_exceeds_the_limit() {
+        let root = std::env::temp_dir().join(format!("flowdir-search-limit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        for index in 0..130 {
+            std::fs::write(root.join(format!("limit-hit-{index:03}.txt")), b"x").unwrap();
+        }
+        let root_text = root.to_string_lossy();
+        assert_eq!(collect_with_limit(&root_text, "limit-hit", true, 120).len(), 120);
+        assert_eq!(collect_with_limit(&root_text, "limit-hit", true, 49).len(), 49);
+        assert_eq!(collect_with_limit(&root_text, "limit-hit", true, 1).len(), 1);
         let _ = std::fs::remove_dir_all(&root);
     }
 }
