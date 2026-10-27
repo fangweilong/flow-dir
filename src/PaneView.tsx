@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { FileIcon } from './icons'
 import { crumbs, formatSize, formatTime, isDir, isFsPath, joinPath, parentPath, pathKey, resolveAddress, underPath } from './paths'
@@ -44,7 +44,8 @@ const ROW_H = 26
 const HEADER_H = 24
 /** Column bounds in px at the default font size; the stored widths are clamped to them. */
 const MIN_COL_SIZE = 56
-const MIN_COL_TIME = 84
+/** A full `YYYY-MM-DD HH:mm` needs this much at the default 13 px list size. */
+const MIN_COL_TIME = 120
 /** "123.4 GB / 465.7 GB" plus the usage bar needs more room than a plain file size. */
 const MIN_DRIVE_CAPACITY = 120
 const MIN_DRIVE_FREE = 56
@@ -54,7 +55,6 @@ const MAX_COL_WIDTH = 480
 /** Name column floor, so dragging a divider can never starve the file names. */
 const MIN_COL_NAME = 140
 const MIN_WIDTH_FILTER = 420
-const GRID_NAME = 'minmax(0,1fr)'
 
 /** Header dividers govern the column on their right; the drive grid reuses the same drag. */
 type ColKey = 'size' | 'time' | 'capacity' | 'free'
@@ -205,6 +205,8 @@ export function PaneView({
   const atLocationRoot = !!location && tab?.path.toLowerCase() === location.root.toLowerCase()
   const upTarget = atLocationRoot ? '' : parentPath(tab?.path ?? '')
   const scrollRef = useRef<HTMLDivElement>(null)
+  /** Header grid outside the scroll port; its transform mirrors the list's scrollLeft. */
+  const headerRef = useRef<HTMLDivElement>(null)
   const sectionRef = useRef<HTMLElement>(null)
   const [width, setWidth] = useState(0)
   /** Live column widths while a header divider is dragged; committed once on release. */
@@ -267,18 +269,17 @@ export function PaneView({
   // Dragged widths stay local until release, so one gesture writes settings once.
   const wantSize = Math.round((draft?.size ?? colSize) * listScale)
   const wantTime = Math.round((draft?.time ?? colTime) * listScale)
-  // A column stays visible while its minimum plus the name floor fit; the stored width is
-  // clamped to what the pane can spare, so neither column ever squeezes the name to zero.
+  // Columns keep their stored width. A narrow pane scrolls horizontally instead of
+  // squeezing the neighbour, so dragging the size column can never deform the time column.
   const showSize = width === 0 || width >= nameMin + minSizeCol
-  const showTime = width === 0 || width >= nameMin + wantSize + minTimeCol
-  const sizeCol =
-    width === 0
-      ? wantSize
-      : Math.min(wantSize, Math.max(minSizeCol, width - nameMin - (showTime ? minTimeCol : 0)))
-  const timeCol =
-    width === 0
-      ? wantTime
-      : Math.min(wantTime, Math.max(minTimeCol, width - nameMin - wantSize))
+  const showTime = width === 0 || width >= nameMin + minSizeCol + minTimeCol
+  // Stored widths below the floor are lifted so a legacy narrow column cannot wrap its text.
+  const sizeCol = Math.max(minSizeCol, wantSize)
+  const timeCol = Math.max(minTimeCol, wantTime)
+  // Rows carry `pr-1.5` that the header repeats, so the scroll range covers both without
+  // clipping the last column; `0.375rem` is that padding at the root font size.
+  const listWidth = nameMin + (showSize ? sizeCol : 0) + (showTime ? timeCol : 0)
+  const listMinWidth = `calc(${listWidth}px + 0.375rem)`
   const showFilter = width === 0 || width >= Math.round(MIN_WIDTH_FILTER * listScale)
   // The overview drops the label column first, then the capacity pair, the same way the
   // file list drops size and modified time on a narrow pane.
@@ -309,10 +310,10 @@ export function PaneView({
     ...(showDriveCapacity ? [`${capacityCol}px`, `${freeCol}px`] : []),
   ].join(' ')
   const grid = showTime
-    ? `minmax(0,1fr) ${sizeCol}px ${timeCol}px`
+    ? `minmax(${nameMin}px, 1fr) ${sizeCol}px ${timeCol}px`
     : showSize
-      ? `minmax(0,1fr) ${sizeCol}px`
-      : GRID_NAME
+      ? `minmax(${nameMin}px, 1fr) ${sizeCol}px`
+      : `minmax(${nameMin}px, 1fr)`
   const navButtonStyle = { width: navControlHeight, height: navControlHeight }
   const navFieldStyle = { height: navControlHeight }
 
@@ -350,6 +351,17 @@ export function PaneView({
   useEffect(() => {
     virtualizer.measure()
   }, [rowHeight, virtualizer])
+
+  /**
+   * The list's vertical scrollbar eats into its content box while the header stays full
+   * width. Reclaim that strip so the header columns sit exactly over the row columns.
+   */
+  const [gutter, setGutter] = useState(0)
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    setGutter(el.offsetWidth - el.clientWidth)
+  }, [view.length, list.loading, list.error, rowHeight, width])
 
   const selectedSize = useMemo(
     () =>
@@ -403,8 +415,8 @@ export function PaneView({
 
   /**
    * Drags the divider on a column's left edge. The governed column is the one to its
-   * right, so moving right shrinks it and the divider stays under the pointer. The
-   * maximum leaves the name column its floor, so no drag can push rows into overflow.
+   * right, so moving right shrinks it and the divider stays under the pointer. The file
+   * list may outgrow the pane and scroll horizontally; drive columns still share its width.
    */
   const startColDrag = (key: ColKey, ev: React.PointerEvent<HTMLSpanElement>) => {
     ev.preventDefault()
@@ -429,23 +441,13 @@ export function PaneView({
       capacity: MIN_DRIVE_CAPACITY,
       free: MIN_DRIVE_FREE,
     }
-    // The other columns keep their rendered width, so only the name column can give room.
-    const fixed = (() => {
-      switch (key) {
-        case 'size':
-          return showTime ? timeCol : 0
-        case 'time':
-          return sizeCol
-        case 'capacity':
-          return driveTypeCol + freeCol
-        case 'free':
-          return driveTypeCol + capacityCol
-      }
-    })()
+    // Drive columns still share the pane; the file list has no such ceiling.
+    const fixed =
+      key === 'capacity' ? driveTypeCol + freeCol : key === 'free' ? driveTypeCol + capacityCol : 0
     const start = rendered[key] / listScale
     const min = floors[key]
     const max =
-      width === 0
+      key === 'size' || key === 'time' || width === 0
         ? MAX_COL_WIDTH
         : Math.max(min, Math.min(MAX_COL_WIDTH, (width - nameMin - fixed) / listScale))
     let next = start
@@ -1032,31 +1034,34 @@ export function PaneView({
       </div>
 
       {!root && (
-        <div
-          className="typo-list grid shrink-0 items-center border-b border-line bg-surface-2 text-muted"
-          style={{ height: headerHeight, gridTemplateColumns: grid }}
-        >
-          <HeaderCell label={t('list.name')} k="name" sort={pane.sort} onSort={changeSort} align="left" />
-          {showSize && (
-            <div className="relative flex h-full min-w-0">
-              <HeaderCell label={t('list.size')} k="size" sort={pane.sort} onSort={changeSort} align="right" />
-              <ColDivider
-                label={t('list.size')}
-                onPointerDown={(ev) => startColDrag('size', ev)}
-                onDoubleClick={() => resetCol('size')}
-              />
-            </div>
-          )}
-          {showTime && (
-            <div className="relative flex h-full min-w-0">
-              <HeaderCell label={t('list.mtime')} k="mtime" sort={pane.sort} onSort={changeSort} align="left" />
-              <ColDivider
-                label={t('list.mtime')}
-                onPointerDown={(ev) => startColDrag('time', ev)}
-                onDoubleClick={() => resetCol('time')}
-              />
-            </div>
-          )}
+        <div className="shrink-0 overflow-hidden" style={{ height: headerHeight, marginRight: gutter }}>
+          <div
+            ref={headerRef}
+            className="typo-list grid h-full items-center border-b border-line bg-surface-2 pr-1.5 text-muted"
+            style={{ gridTemplateColumns: grid, minWidth: listMinWidth }}
+          >
+            <HeaderCell label={t('list.name')} k="name" sort={pane.sort} onSort={changeSort} align="left" />
+            {showSize && (
+              <div className="relative flex h-full min-w-0">
+                <HeaderCell label={t('list.size')} k="size" sort={pane.sort} onSort={changeSort} align="right" />
+                <ColDivider
+                  label={t('list.size')}
+                  onPointerDown={(ev) => startColDrag('size', ev)}
+                  onDoubleClick={() => resetCol('size')}
+                />
+              </div>
+            )}
+            {showTime && (
+              <div className="relative flex h-full min-w-0">
+                <HeaderCell label={t('list.mtime')} k="mtime" sort={pane.sort} onSort={changeSort} align="left" />
+                <ColDivider
+                  label={t('list.mtime')}
+                  onPointerDown={(ev) => startColDrag('time', ev)}
+                  onDoubleClick={() => resetCol('time')}
+                />
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -1111,6 +1116,12 @@ export function PaneView({
         tabIndex={0}
         data-list
         onKeyDown={onKeyDown}
+        onScroll={(ev) => {
+          // The header lives outside the scroll port; mirror the offset so its columns stay
+          // over the rows while the file list scrolls horizontally.
+          const header = headerRef.current
+          if (header) header.style.transform = `translateX(${-ev.currentTarget.scrollLeft}px)`
+        }}
         onFocus={(ev) => {
           // IME composition needs an editable target, so the list hands focus to a hidden
           // input. Keys still bubble back to this container, so every handler is unchanged.
@@ -1228,7 +1239,7 @@ export function PaneView({
           </div>
         )}
 
-        {!root && <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
+        {!root && <div style={{ height: virtualizer.getTotalSize(), position: 'relative', minWidth: listMinWidth }}>
           {virtualizer.getVirtualItems().map((vi) => {
             const entry = view[vi.index]
             if (!entry) return null
@@ -1265,12 +1276,14 @@ export function PaneView({
                   <GitBadge name={entry.name} dir={dir} badges={gitBadges} />
                 </div>
                 {showSize && (
-                  <div className="tabular pr-1.5 text-right text-[0.88em] text-muted">
+                  <div className="tabular whitespace-nowrap pr-1.5 text-right text-[0.88em] text-muted">
                     {formatSize(entry.size, dir)}
                   </div>
                 )}
                 {showTime && (
-                  <div className="tabular pl-1.5 text-[0.88em] text-muted">{formatTime(entry.mtime)}</div>
+                  <div className="tabular whitespace-nowrap pl-1.5 text-[0.88em] text-muted">
+                    {formatTime(entry.mtime)}
+                  </div>
                 )}
               </div>
             )
