@@ -110,6 +110,16 @@ struct Outcome {
 #[derive(Clone, Default)]
 pub struct OpState {
     jobs: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    /// Op ids whose ordinary run reported `ACCESS_DENIED`, with a fingerprint of the
+    /// exact request. `op_retry_elevated` may only start from one of these; the entry is
+    /// consumed on use so a replay cannot elevate a second time.
+    denied: Arc<Mutex<HashMap<String, Denied>>>,
+}
+
+#[derive(Clone)]
+struct Denied {
+    fingerprint: String,
+    at: Instant,
 }
 
 impl OpState {
@@ -122,6 +132,14 @@ impl OpState {
         token
     }
 
+    pub(crate) fn begin_external(&self, op_id: &str) -> Arc<AtomicBool> {
+        self.begin(op_id)
+    }
+
+    pub(crate) fn finish_external(&self, op_id: &str) {
+        self.finish(op_id);
+    }
+
     fn finish(&self, op_id: &str) {
         self.jobs.lock().unwrap().remove(op_id);
     }
@@ -130,6 +148,35 @@ impl OpState {
         if let Some(token) = self.jobs.lock().unwrap().get(op_id) {
             token.store(true, Ordering::Relaxed);
         }
+    }
+
+    fn record_denied(&self, request: &Request) {
+        let mut denied = self.denied.lock().unwrap();
+        denied.retain(|_, entry| entry.at.elapsed() < std::time::Duration::from_secs(600));
+        denied.insert(
+            request.op_id.clone(),
+            Denied {
+                fingerprint: request.fingerprint(),
+                at: Instant::now(),
+            },
+        );
+    }
+
+    /// True exactly once for a request that matches a recorded `ACCESS_DENIED` run.
+    pub fn take_denied(&self, request: &Request) -> bool {
+        let mut denied = self.denied.lock().unwrap();
+        let Some(entry) = denied.get(&request.op_id) else {
+            return false;
+        };
+        if entry.fingerprint != request.fingerprint() {
+            return false;
+        }
+        if entry.at.elapsed() >= std::time::Duration::from_secs(600) {
+            denied.remove(&request.op_id);
+            return false;
+        }
+        denied.remove(&request.op_id);
+        true
     }
 }
 
@@ -176,6 +223,25 @@ pub struct Request {
     /// One new name per source for a batch rename; mutually exclusive with `new_name`.
     pub new_names: Option<Vec<String>>,
     pub permanent: bool,
+}
+
+impl Request {
+    /// Identifies the operation and its exact arguments, so an elevated retry cannot be
+    /// pointed at a different target than the run that was actually denied.
+    pub fn fingerprint(&self) -> String {
+        format!(
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            self.kind,
+            self.sources.join("\u{1f}"),
+            self.target_dir.as_deref().unwrap_or(""),
+            self.new_name.as_deref().unwrap_or(""),
+            self.new_names
+                .as_ref()
+                .map(|names| names.join("\u{1f}"))
+                .unwrap_or_default(),
+            self.permanent
+        )
+    }
 }
 
 /// Checks a request before it touches the shell; used by both the GUI path and the
@@ -282,6 +348,7 @@ pub fn start(
                     request.kind
                 ),
             }
+            let denied = outcome_denied(&outcome);
             let _ = progress.send(OpProgress {
                 op_id: op_id.clone(),
                 phase: "done".into(),
@@ -296,16 +363,22 @@ pub fn start(
                 aborted: outcome.aborted,
                 error: outcome.error,
             });
+            if denied {
+                state.record_denied(&request);
+            }
             state.finish(&op_id);
         })
         .map(|_| ())
         .map_err(|e| ApiError::new("THREAD", e.to_string()))
 }
 
+fn outcome_denied(outcome: &Outcome) -> bool {
+    outcome.failed.iter().any(|item| item.code == "ACCESS_DENIED")
+}
+
 /// Runs the operation body and turns a panic into a normal failure: `finish` still runs,
 /// so the job cannot stay in the map (and in the taskbar progress) forever.
-fn run_guarded<F: FnOnce() -> Outcome>(kind: &str, work: F) -> Outcome {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
+fn run_guarded<F: FnOnce() -> Outcome>(kind: &str, work: F) -> Outcome {    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
         Ok(outcome) => outcome,
         Err(payload) => {
             let detail = payload

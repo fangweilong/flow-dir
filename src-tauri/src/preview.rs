@@ -143,6 +143,39 @@ fn extension(path: &str) -> String {
         .to_lowercase()
 }
 
+/// Windows device names are reserved even with an extension (`CON.txt`).
+const RESERVED_NAMES: [&str; 22] = [
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
+
+/// Rejects NTFS alternate data streams (`file.txt:stream`, `::$DATA`) and device names.
+/// The drive-letter colon at index 1 is the only one a normal path may contain.
+fn has_ads_or_device(path: &str) -> bool {
+    for (index, ch) in path.char_indices() {
+        if ch == ':' && index != 1 {
+            return true;
+        }
+    }
+    for segment in path.split(['\\', '/']) {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            continue;
+        }
+        if segment.ends_with(' ') || segment.ends_with('.') {
+            return true;
+        }
+        let stem = segment
+            .split('.')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if RESERVED_NAMES.contains(&stem.as_str()) {
+            return true;
+        }
+    }
+    false
+}
+
 fn validate(path: &str) -> Result<(), ApiError> {
     if path.is_empty() || path.len() > 1024 {
         return Err(ApiError::new("INVALID_PATH", "path length"));
@@ -154,7 +187,17 @@ fn validate(path: &str) -> Result<(), ApiError> {
     if path.contains('\0') {
         return Err(ApiError::new("INVALID_PATH", "nul byte"));
     }
-    let meta = std::fs::metadata(p).map_err(|e| ApiError::from_io(path, &e))?;
+    if has_ads_or_device(path) {
+        return Err(ApiError::new("INVALID_PATH", "ads or device name"));
+    }
+    // Resolve `..`, symlinks and 8.3 aliases before touching the file so the final
+    // target is what gets validated, not the lexical spelling.
+    let canonical = std::fs::canonicalize(p).map_err(|e| ApiError::from_io(path, &e))?;
+    if has_ads_or_device(&canonical.to_string_lossy()) {
+        return Err(ApiError::new("INVALID_PATH", "ads or device name"));
+    }
+    let meta =
+        std::fs::metadata(&canonical).map_err(|e| ApiError::from_io(path, &e))?;
     if meta.is_dir() {
         return Err(ApiError::new("IS_DIR", path));
     }
@@ -950,6 +993,18 @@ fn version_rows(path: &str) -> Vec<MetaRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ads_and_device_paths_are_rejected() {
+        assert!(!has_ads_or_device(r"C:\data\file.txt"));
+        assert!(has_ads_or_device(r"C:\data\file.txt:stream"));
+        assert!(has_ads_or_device(r"C:\data\file.txt::$DATA"));
+        assert!(has_ads_or_device(r"C:\data\CON.txt"));
+        assert!(has_ads_or_device(r"C:\data\com1"));
+        assert!(has_ads_or_device("C:\\data\\trailing."));
+        assert!(has_ads_or_device("C:\\data\\trailing "));
+        assert!(!has_ads_or_device(r"C:\data\console.txt"));
+    }
 
     #[test]
     fn split_command_keeps_quoted_program_and_arguments() {

@@ -450,6 +450,7 @@ fn op_cancel(state: tauri::State<'_, ops::OpState>, op_id: String) {
 #[tauri::command]
 async fn op_retry_elevated(
     app: tauri::AppHandle,
+    state: tauri::State<'_, ops::OpState>,
     request: ops::Request,
 ) -> Result<ops::ElevatedReport, ApiError> {
     log::info!(
@@ -458,9 +459,25 @@ async fn op_retry_elevated(
         request.kind,
         request.sources.len(),
     );
-    tauri::async_runtime::spawn_blocking(move || elevated::request_elevated(&app, request))
-        .await
-        .map_err(|err| ApiError::new("THREAD", err.to_string()))?
+    // Only an operation that really failed with ACCESS_DENIED, with identical arguments,
+    // may be elevated. The denied record is consumed so a retry cannot be replayed.
+    let state = state.inner().clone();
+    if !state.take_denied(&request) {
+        return Err(ApiError::new(
+            "ELEVATED_UNBOUND",
+            "no denied operation matches this retry",
+        ));
+    }
+    let token = state.begin_external(&request.op_id);
+    let cancel = token.clone();
+    let op_id = request.op_id.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        elevated::request_elevated(&app, request, cancel)
+    })
+    .await
+    .map_err(|err| ApiError::new("THREAD", err.to_string()))?;
+    state.finish_external(&op_id);
+    result
 }
 
 #[tauri::command]
@@ -823,8 +840,8 @@ fn init_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 fn main() {
     // The elevated helper must not start Tauri: no window, no tray, no single-instance
     // mutex, and no second WebView2 process for a filesystem operation.
-    if let Some((request, result)) = elevated::helper_args() {
-        std::process::exit(elevated::run_helper(&request, &result));
+    if let Some((pipe, nonce)) = elevated::helper_args() {
+        std::process::exit(elevated::run_helper(&pipe, &nonce));
     }
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())

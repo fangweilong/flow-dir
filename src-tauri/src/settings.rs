@@ -700,7 +700,7 @@ mod tests {
     fn invalid_general_values_normalize() {
         let parsed = Settings {
             language: "fr".into(),
-            theme: "sepia".into(),
+            theme: "purple".into(),
             sidebar_width: 0,
             preview_width: 99_999,
             update_interval_hours: 48,
