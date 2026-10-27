@@ -1,5 +1,5 @@
 import { Channel, invoke } from '@tauri-apps/api/core'
-import type { AppInfo, Clip, DirBatch, Drive, MenuOutcome, OpKind, OpProgress, Place, UpdateStatus } from './types'
+import type { AppInfo, Clip, DirBatch, Drive, ElevatedReport, MenuOutcome, OpKind, OpProgress, Place, UpdateStatus } from './types'
 import type { GitStatus, PreviewInfo, SearchBatch } from './types'
 import type { Settings } from './persist'
 
@@ -51,6 +51,8 @@ export type OpRequest = {
   sources: string[]
   targetDir?: string
   newName?: string
+  /** One name per source for a batch rename; takes precedence over `newName`. */
+  newNames?: string[]
   permanent?: boolean
 }
 
@@ -63,12 +65,28 @@ export function opStart(request: OpRequest, onProgress: (progress: OpProgress) =
     sources: request.sources,
     targetDir: request.targetDir ?? null,
     newName: request.newName ?? null,
+    newNames: request.newNames ?? null,
     permanent: request.permanent ?? false,
     onProgress: channel,
   })
 }
 
 export const opCancel = (opId: string) => invoke<void>('op_cancel', { opId })
+
+/** Retries a denied operation through the elevated helper; resolves when it finishes. */
+export function opRetryElevated(request: OpRequest) {
+  return invoke<ElevatedReport>('op_retry_elevated', {
+    request: {
+      opId: request.opId,
+      kind: request.kind,
+      sources: request.sources,
+      targetDir: request.targetDir ?? null,
+      newName: request.newName ?? null,
+      newNames: request.newNames ?? null,
+      permanent: request.permanent ?? false,
+    },
+  })
+}
 
 /** Taskbar progress for long operations; `state` is normal/error/paused/none. */
 export const taskbarProgress = (state: string, completed: number, total: number) =>

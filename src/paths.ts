@@ -1,6 +1,41 @@
 /** Case-insensitive identity for a Windows path, used as a cache/render key. */
 export const pathKey = (path: string) => path.toLowerCase()
 
+/**
+ * Resolves a typed address against the current folder. Absolute drives and UNC paths pass
+ * through, while `.`, `..` and nested names are joined and normalized; quotes pasted from
+ * Explorer are stripped. Returns '' only for an empty input.
+ */
+export function resolveAddress(base: string, raw: string): string {
+  let text = raw.trim()
+  const quoted = text.match(/^"(.*)"$/)
+  if (quoted) text = quoted[1].trim()
+  if (!text) return ''
+  text = text.replace(/\//g, '\\')
+  if (/^[a-zA-Z]:$/.test(text)) return `${text}\\`
+  if (/^[a-zA-Z]:/.test(text) || text.startsWith('\\\\')) return text
+  if (!base) return text
+
+  const combined = `${base.replace(/\\+$/, '')}\\${text}`
+  const unc = combined.startsWith('\\\\')
+  const drive = /^[a-zA-Z]:/.test(combined) ? combined.slice(0, 2) : ''
+  const body = unc || drive ? combined.slice(2) : combined
+  const parts: string[] = []
+  // `..` may never climb above a drive root or a server/share pair.
+  const floor = unc ? 2 : 0
+  for (const part of body.split('\\')) {
+    if (!part || part === '.') continue
+    if (part === '..') {
+      if (parts.length > floor) parts.pop()
+      continue
+    }
+    parts.push(part)
+  }
+  if (unc) return `\\\\${parts.join('\\')}`
+  if (drive) return `${drive}\\${parts.join('\\')}`
+  return parts.join('\\')
+}
+
 export const joinPath = (dir: string, name: string) =>
   dir.endsWith('\\') ? `${dir}${name}` : `${dir}\\${name}`
 
@@ -23,6 +58,17 @@ export function parentPath(p: string): string {
   if (idx <= 1) return `${norm.slice(0, 2)}\\`
   const up = norm.slice(0, idx)
   return /^[a-zA-Z]:$/.test(up) ? `${up}\\` : up
+}
+
+/** Drive root (`C:\`) or UNC share root (`\\server\share`) that contains `p`. */
+export function volumeRoot(p: string): string {
+  const norm = p.replace(/\//g, '\\')
+  if (norm.startsWith('\\\\')) {
+    const parts = norm.slice(2).split('\\').filter(Boolean)
+    return parts.length >= 2 ? `\\\\${parts[0]}\\${parts[1]}` : norm
+  }
+  const drive = norm.match(/^[a-zA-Z]:/)
+  return drive ? `${drive[0]}\\` : ''
 }
 
 /** A folder followed by its ancestors, deepest first: the nodes a tree must expand. */

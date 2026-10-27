@@ -6,10 +6,12 @@ import { getCurrentWebview } from '@tauri-apps/api/webview'
 import iconUrl from './assets/icon.png'
 import { PaneView } from './PaneView'
 import type { MenuPoint } from './PaneView'
+import { refreshIconCache } from './icons'
 import { ContextMenu } from './ContextMenu'
 import type { MenuItem } from './ContextMenu'
 import { OpsPanel } from './OpsPanel'
 import { PromptDialog } from './PromptDialog'
+import { BatchRenameDialog } from './BatchRenameDialog'
 import { ConfirmDialog } from './ConfirmDialog'
 import { PreviewPanel } from './PreviewPanel'
 import { SearchOverlay } from './SearchOverlay'
@@ -30,6 +32,7 @@ import {
   notifyOp,
   openPath,
   opCancel,
+  opRetryElevated,
   opStart,
   previewExternal,
   previewInfo,
@@ -49,6 +52,7 @@ import {
   watchClear,
   watchSet,
 } from './api'
+import type { OpRequest } from './api'
 import { EMPTY_GIT, EMPTY_LIST, emptyList, filterMatches } from './types'
 import type {
   Drive,
@@ -74,7 +78,7 @@ import {
 } from './fonts'
 import { DEFAULT_SETTINGS, fromSnapshot, toSnapshot } from './persist'
 import type { Settings } from './persist'
-import { isDir, isFsPath, joinPath, parentPath, pathKey, sameVolume, treeChain, underPath } from './paths'
+import { baseName, isDir, isFsPath, joinPath, parentPath, pathKey, sameVolume, treeChain, underPath } from './paths'
 import { centerOffset } from './scroll'
 import { formatBinding, isTextInput, matchBinding, resolveShortcuts } from './shortcuts'
 import {
@@ -194,6 +198,8 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null)
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null)
   const [prompt, setPrompt] = useState<{ title: string; initial: string; submit: (value: string) => void } | null>(null)
+  /** Multi-selection waiting for the batch rename preview. */
+  const [batchRename, setBatchRename] = useState<{ paneId: string; names: string[] } | null>(null)
   /** Pending delete waiting for the confirmation dialog; nothing leaves the disk until it closes. */
   const [deleteConfirm, setDeleteConfirm] = useState<{
     paneId: string
@@ -201,6 +207,9 @@ export default function App() {
     permanent: boolean
   } | null>(null)
   const [ops, setOps] = useState<Record<string, OpProgress>>({})
+  /** Original request per running/finished op, so an ACCESS_DENIED result can be retried. */
+  const opRequests = useRef<Record<string, OpRequest>>({})
+  const [elevating, setElevating] = useState<string | null>(null)
   /** Sidebar tree: expanded folders (key → display path) and their cached children. */
   const [treeOpen, setTreeOpen] = useState<Record<string, string>>({})
   const [treeNodes, setTreeNodes] = useState<Record<string, string[]>>({})
@@ -214,6 +223,8 @@ export default function App() {
   const wsRef = useRef<Workspace | null>(null)
   const layoutRef = useRef<HTMLDivElement>(null)
   const settingsRef = useRef<Settings>(DEFAULT_SETTINGS)
+  const settingsSaveTimer = useRef<number | null>(null)
+  const pendingSettings = useRef<Settings | null>(null)
   const gens = useRef<Record<string, number>>({})
   const paneEls = useRef(new Map<string, HTMLDivElement>())
   const homeRef = useRef('C:\\')
@@ -627,22 +638,6 @@ export default function App() {
   }, [ws])
 
   useEffect(() => {
-    let disposed = false
-    let unlisten: (() => void) | undefined
-    void listen('flowdir:flush-layout', () => {
-      const current = wsRef.current
-      if (current) void layoutSave(toSnapshot(current)).catch(() => undefined)
-    }).then((fn) => {
-      if (disposed) fn()
-      else unlisten = fn
-    })
-    return () => {
-      disposed = true
-      unlisten?.()
-    }
-  }, [])
-
-  useEffect(() => {
     const announce = (status: UpdateStatus) => {
       if (!status.available || !status.latest) return
       setUpdateAvailable(status.latest)
@@ -845,8 +840,45 @@ export default function App() {
 
   const updateSettings = useCallback((next: Settings) => {
     setSettings(next)
-    void settingsSave(next).catch(() => undefined)
+    settingsRef.current = next
+    pendingSettings.current = next
+    if (settingsSaveTimer.current !== null) window.clearTimeout(settingsSaveTimer.current)
+    // Sliders emit one change per step; write once the values settle.
+    settingsSaveTimer.current = window.setTimeout(() => {
+      settingsSaveTimer.current = null
+      const snapshot = pendingSettings.current
+      pendingSettings.current = null
+      if (snapshot) void settingsSave(snapshot).catch(() => undefined)
+    }, 300)
   }, [])
+
+  /** Writes a pending change before the window closes; the debounce must not lose it. */
+  const flushSettings = useCallback(() => {
+    if (settingsSaveTimer.current !== null) {
+      window.clearTimeout(settingsSaveTimer.current)
+      settingsSaveTimer.current = null
+    }
+    const snapshot = pendingSettings.current
+    pendingSettings.current = null
+    if (snapshot) void settingsSave(snapshot).catch(() => undefined)
+  }, [])
+
+  useEffect(() => {
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    void listen('flowdir:flush-layout', () => {
+      const current = wsRef.current
+      if (current) void layoutSave(toSnapshot(current)).catch(() => undefined)
+      flushSettings()
+    }).then((fn) => {
+      if (disposed) fn()
+      else unlisten = fn
+    })
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [flushSettings])
 
   /** Column widths are global: every pane and tab shares them. */
   const setColWidths = useCallback(
@@ -971,6 +1003,22 @@ export default function App() {
         return { ...prev, tabs: { ...prev.tabs, [tabId]: moved } }
       })
       startScan(tabId, next, pane.sort, pane.hidden)
+    },
+    [startScan],
+  )
+
+  /**
+   * Forces a rescan of a tab's current folder. The error banner must bypass `navigate`,
+   * which intentionally ignores same-path requests.
+   */
+  const retryTab = useCallback(
+    (tabId: string) => {
+      const current = wsRef.current
+      if (!current) return
+      const pane = Object.values(current.panes).find((p) => p.tabIds.includes(tabId))
+      const tab = current.tabs[tabId]
+      if (!pane || !tab) return
+      startScan(tabId, tab.path, pane.sort, pane.hidden)
     },
     [startScan],
   )
@@ -1372,14 +1420,36 @@ export default function App() {
     if (overview) refreshDrives()
   }, [invalidateGit, invalidateTree, refreshDrives, startScan])
 
+  /** F5 and the menu refresh also re-request icons; post-operation rescans keep the cache. */
+  const manualRefresh = useCallback(() => {
+    refreshIconCache()
+    refreshPanes()
+  }, [refreshPanes])
+
   const runOp = useCallback(
     (
       kind: OpKind,
       sources: string[],
-      options?: { targetDir?: string; newName?: string; permanent?: boolean; after?: () => void; record?: boolean },
+      options?: {
+        targetDir?: string
+        newName?: string
+        newNames?: string[]
+        permanent?: boolean
+        after?: () => void
+        record?: boolean
+      },
     ) => {
       if (!sources.length) return
       const opId = uid('op')
+      opRequests.current[opId] = {
+        opId,
+        kind,
+        sources,
+        targetDir: options?.targetDir,
+        newName: options?.newName,
+        newNames: options?.newNames,
+        permanent: options?.permanent,
+      }
       setOps((prev) => ({
         ...prev,
         [opId]: {
@@ -1399,6 +1469,7 @@ export default function App() {
       }))
       const drop = (delay: number) =>
         window.setTimeout(() => {
+          delete opRequests.current[opId]
           setOps((prev) => {
             const next = { ...prev }
             delete next[opId]
@@ -1422,14 +1493,20 @@ export default function App() {
           sources,
           targetDir: options?.targetDir,
           newName: options?.newName,
+          newNames: options?.newNames,
           permanent: options?.permanent,
         },
         (progress) => {
           setOps((prev) => (prev[opId] ? { ...prev, [opId]: progress } : prev))
           if (!progress.done) return
+          // A denied operation keeps its card until dismissed: the failure list is where the
+          // "retry as administrator" action lives.
+          const denied =
+            progress.error?.code === 'ACCESS_DENIED' ||
+            progress.failed.some((failure) => failure.code === 'ACCESS_DENIED')
           if (progress.error) {
             announce(t('op.failed', { code: progress.error.code }))
-            drop(5000)
+            if (!denied) drop(5000)
             return
           }
           // Cancellation wins over the item failures it produced: those items were not
@@ -1447,7 +1524,7 @@ export default function App() {
             options?.after?.()
             refreshPanes()
             // Keep the card around so the failure list stays readable.
-            drop(15000)
+            drop(denied ? 600_000 : 15000)
             return
           }
           if (options?.record !== false) {
@@ -1475,6 +1552,54 @@ export default function App() {
   )
 
   /**
+   * The GUI stays non-elevated; this asks the backend to launch the same executable through
+   * UAC, waits for its report and then re-enumerates what the elevated run changed.
+   */
+  const retryElevated = useCallback(
+    (opId: string) => {
+      const request = opRequests.current[opId]
+      if (!request || elevating) return
+      setElevating(opId)
+      showToast(t('op.elevating'))
+      opRetryElevated(request)
+        .then((report) => {
+          refreshPanes()
+          if (report.error) {
+            showToast(t('op.failed', { code: report.error.code }))
+          } else if (report.aborted) {
+            showToast(t('op.canceled'))
+          } else if (report.failedTotal > 0) {
+            showToast(
+              t('op.partial', {
+                ok: Math.max(0, request.sources.length - report.failedTotal),
+                failed: report.failedTotal,
+              }),
+            )
+          } else {
+            showToast(t('op.done'))
+            delete opRequests.current[opId]
+            setOps((prev) => {
+              if (!(opId in prev)) return prev
+              const next = { ...prev }
+              delete next[opId]
+              return next
+            })
+          }
+        })
+        .catch((err: unknown) => {
+          const code = errorCode(err)
+          showToast(
+            code === 'ELEVATION_CANCELED'
+              ? t('op.elevationCanceled')
+              : t('op.failed', { code }),
+          )
+        })
+        .finally(() => setElevating(null))
+    },
+    [elevating, refreshPanes, showToast, t],
+  )
+
+  /**
    * Ctrl+Z: reverse the newest recorded operation. Undo operations themselves pass
    * `record: false`, so repeated undo walks back through the stack instead of ping-ponging.
    */
@@ -1492,12 +1617,16 @@ export default function App() {
     }
     switch (entry.kind) {
       case 'rename': {
-        const parent = parentPath(entry.path)
-        runOp('rename', [joinPath(parent, entry.newName)], {
-          newName: entry.oldName,
-          record: false,
-          after: afterDirs([parent]),
-        })
+        const dirs = entry.items.map((item) => parentPath(item.path))
+        runOp(
+          'rename',
+          entry.items.map((item) => joinPath(parentPath(item.path), item.newName)),
+          {
+            newNames: entry.items.map((item) => item.oldName),
+            record: false,
+            after: afterDirs(dirs),
+          },
+        )
         return
       }
       case 'move': {
@@ -1788,6 +1917,17 @@ export default function App() {
     [runOp, t],
   )
 
+  const startRenameMany = useCallback(
+    (paneId: string, names: string[]) => {
+      if (names.length < 2) {
+        if (names[0]) startRename(paneId, names[0])
+        return
+      }
+      setBatchRename({ paneId, names })
+    },
+    [startRename],
+  )
+
   const createFolder = useCallback(
     (paneId: string) => {
       const current = wsRef.current
@@ -1942,7 +2082,15 @@ export default function App() {
         },
         { kind: 'item', label: t('menu.paste'), onSelect: () => pasteInto(paneId) },
         { kind: 'sep' },
-        { kind: 'item', label: t('menu.rename'), hint: 'F2', onSelect: () => startRename(paneId, entry.name) },
+        {
+          kind: 'item',
+          label: paths.length > 1 ? t('menu.batchRename') : t('menu.rename'),
+          hint: 'F2',
+          onSelect: () =>
+            paths.length > 1
+              ? startRenameMany(paneId, paths.map(baseName))
+              : startRename(paneId, entry.name),
+        },
         {
           kind: 'item',
           label: t('menu.delete'),
@@ -1961,7 +2109,7 @@ export default function App() {
         { kind: 'item', label: t('menu.copyPath'), onSelect: () => copyPaths(paths) },
       ]
     },
-    [copyPaths, deleteEntries, openInNewPane, pasteInto, showToast, startRename, t],
+    [copyPaths, deleteEntries, openInNewPane, pasteInto, showToast, startRename, startRenameMany, t],
   )
 
   const openRowMenu = useCallback(
@@ -2007,7 +2155,7 @@ export default function App() {
             { kind: 'item', label: t('menu.newFolder'), onSelect: () => createFolder(paneId) },
             { kind: 'item', label: t('menu.paste'), hint: 'Ctrl+V', onSelect: () => pasteInto(paneId) },
             { kind: 'sep' },
-            { kind: 'item', label: t('menu.refresh'), hint: 'F5', onSelect: () => refreshPanes() },
+            { kind: 'item', label: t('menu.refresh'), hint: 'F5', onSelect: () => manualRefresh() },
             {
               kind: 'item',
               label: t('menu.selectAll'),
@@ -2033,10 +2181,10 @@ export default function App() {
               onSelect: () => toggleHidden(paneId),
             },
           ]
-        : [{ kind: 'item', label: t('menu.refresh'), hint: 'F5', onSelect: () => refreshPanes() }]
+        : [{ kind: 'item', label: t('menu.refresh'), hint: 'F5', onSelect: () => manualRefresh() }]
       setMenu({ x: point.clientX, y: point.clientY, items })
     },
-    [createFolder, listData, pasteInto, refreshPanes, t, toggleHidden, update],
+    [createFolder, listData, manualRefresh, pasteInto, t, toggleHidden, update],
   )
 
   const openBlankMenu = useCallback(
@@ -2222,9 +2370,39 @@ export default function App() {
   // list from reacting to keys typed into them.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (settingsOpen || searchOpen || deleteConfirm) return
+      if (settingsOpen || searchOpen || deleteConfirm || prompt || batchRename || menu) return
       const bare = !event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey
       if (bare && isTextInput(event.target)) return
+
+      // Tab switching is fixed, not rebindable: Ctrl+Tab cycles, Ctrl+1..9 jump, and 9
+      // selects the last tab when there are fewer than nine (Explorer's behaviour).
+      if (activePane && event.ctrlKey && !event.altKey && !event.metaKey && event.key === 'Tab') {
+        event.preventDefault()
+        const ids = activePane.tabIds
+        if (ids.length > 1) {
+          const index = ids.indexOf(activePane.activeTabId)
+          const step = event.shiftKey ? -1 : 1
+          const next = ids[(index + step + ids.length) % ids.length]
+          if (next) activateTab(activePane.id, next)
+        }
+        return
+      }
+      if (
+        activePane &&
+        event.ctrlKey &&
+        !event.altKey &&
+        !event.metaKey &&
+        !event.shiftKey &&
+        /^[1-9]$/.test(event.key)
+      ) {
+        const ids = activePane.tabIds
+        const id = event.key === '9' ? ids[ids.length - 1] : ids[Number(event.key) - 1]
+        if (id) {
+          event.preventDefault()
+          activateTab(activePane.id, id)
+        }
+        return
+      }
 
       if (matchBinding(event, keys.search)) {
         event.preventDefault()
@@ -2279,12 +2457,16 @@ export default function App() {
     settingsOpen,
     searchOpen,
     deleteConfirm,
+    prompt,
+    batchRename,
+    menu,
     activePane,
     activeTab,
     activeList,
     previewName,
     newTab,
     closeTab,
+    activateTab,
     openExternalPreview,
     undoLast,
   ])
@@ -2458,9 +2640,11 @@ export default function App() {
               onDriveRowMenu={openDriveRowMenu}
               onProperties={(names) => openProperties(pane.id, names)}
               onRename={(name) => startRename(pane.id, name)}
+              onRenameMany={(names) => startRenameMany(pane.id, names)}
               onDelete={(names, permanent) => deleteEntries(pane.id, names, permanent)}
               onPaste={() => pasteInto(pane.id)}
-              onRefresh={refreshPanes}
+              onRefresh={manualRefresh}
+              onRetry={retryTab}
               keys={keys}
               update={update}
             />
@@ -2785,15 +2969,18 @@ export default function App() {
       <OpsPanel
         ops={Object.values(ops)}
         lang={lang}
+        elevating={elevating}
+        onRetryElevated={retryElevated}
         onCancel={(opId) => void opCancel(opId)}
-        onDismiss={(opId) =>
+        onDismiss={(opId) => {
+          delete opRequests.current[opId]
           setOps((prev) => {
             if (!(opId in prev)) return prev
             const next = { ...prev }
             delete next[opId]
             return next
           })
-        }
+        }}
       />
 
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
@@ -2808,6 +2995,27 @@ export default function App() {
             setPrompt(null)
           }}
           onClose={() => setPrompt(null)}
+        />
+      )}
+
+      {batchRename && (
+        <BatchRenameDialog
+          names={batchRename.names}
+          lang={lang}
+          onClose={() => setBatchRename(null)}
+          onConfirm={(pairs) => {
+            const current = wsRef.current
+            const pane = current?.panes[batchRename.paneId]
+            const tab = pane ? current?.tabs[pane.activeTabId] : undefined
+            if (tab?.path) {
+              runOp(
+                'rename',
+                pairs.map((pair) => joinPath(tab.path, pair.from)),
+                { newNames: pairs.map((pair) => pair.to) },
+              )
+            }
+            setBatchRename(null)
+          }}
         />
       )}
 
@@ -2844,7 +3052,10 @@ export default function App() {
           lang={lang}
           onChange={updateSettings}
           onOpenLocation={openInApp}
-          onClose={() => setSettingsOpen(false)}
+          onClose={() => {
+            setSettingsOpen(false)
+            if (activePane) focusList(activePane.id)
+          }}
         />
       )}
     </div>

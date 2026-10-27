@@ -1,9 +1,11 @@
 import { baseName, joinPath } from './paths'
 import type { OpKind } from './types'
 
+export type RenameMove = { path: string; oldName: string; newName: string }
+
 /** One reversible operation; the stack is process-local and newest last. */
 export type UndoEntry =
-  | { kind: 'rename'; path: string; oldName: string; newName: string }
+  | { kind: 'rename'; items: RenameMove[] }
   | { kind: 'move'; items: { from: string; to: string }[] }
   | { kind: 'copy'; created: string[] }
   | { kind: 'delete'; paths: string[] }
@@ -18,11 +20,26 @@ export const UNDO_LIMIT = 10
 export function undoEntryFor(
   kind: OpKind,
   sources: string[],
-  options?: { targetDir?: string; newName?: string; permanent?: boolean },
+  options?: { targetDir?: string; newName?: string; newNames?: string[]; permanent?: boolean },
 ): UndoEntry | null {
   if (!sources.length) return null
-  if (kind === 'rename' && options?.newName && sources.length === 1) {
-    return { kind: 'rename', path: sources[0], oldName: baseName(sources[0]), newName: options.newName }
+  if (kind === 'rename') {
+    if (options?.newNames && options.newNames.length === sources.length) {
+      return {
+        kind: 'rename',
+        items: sources.map((path, index) => ({
+          path,
+          oldName: baseName(path),
+          newName: options.newNames![index],
+        })),
+      }
+    }
+    if (options?.newName && sources.length === 1) {
+      return {
+        kind: 'rename',
+        items: [{ path: sources[0], oldName: baseName(sources[0]), newName: options.newName }],
+      }
+    }
   }
   if (kind === 'move' && options?.targetDir) {
     const target = options.targetDir

@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
-import { appInfo, configPath, diagnosticsExport, everythingStatus, logDirPath, pickFolder, restartApp, updateCheck, updateInstall } from './api'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { appInfo, configPath, diagnosticsExport, everythingStatus, logDirPath, pickFolder, restartApp, settingsSave, updateCheck, updateInstall } from './api'
 import { makeT } from './i18n'
 import type { Key } from './i18n'
 import { DEFAULT_BINDINGS, SHORTCUTS, bindingFromEvent, formatBinding, resolveShortcuts, sameBinding } from './shortcuts'
@@ -132,6 +132,8 @@ function RegionFontRow({
 
 export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClose }: Props) {
   const t = makeT(lang)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const searchRef = useRef<HTMLInputElement>(null)
   const [info, setInfo] = useState<AppInfo | null>(null)
   const [everything, setEverything] = useState<EverythingStatus | null>(null)
   const [configDir, setConfigDir] = useState('')
@@ -274,6 +276,38 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
+  // The modal owns the keyboard while it is open: focus moves inside and Tab cycles
+  // within the panel, so pane shortcuts cannot act on the list behind it.
+  useEffect(() => {
+    searchRef.current?.focus()
+    const onTab = (ev: KeyboardEvent) => {
+      if (ev.key !== 'Tab') return
+      const panel = panelRef.current
+      if (!panel) return
+      const focusable = Array.from(
+        panel.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((el) => el.offsetParent !== null)
+      if (!focusable.length) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      const active = document.activeElement
+      if (ev.shiftKey && active === first) {
+        ev.preventDefault()
+        last.focus()
+      } else if (!ev.shiftKey && active === last) {
+        ev.preventDefault()
+        first.focus()
+      } else if (!panel.contains(active)) {
+        ev.preventDefault()
+        first.focus()
+      }
+    }
+    window.addEventListener('keydown', onTab)
+    return () => window.removeEventListener('keydown', onTab)
+  }, [])
+
   // Capture runs in the capture phase so the window shortcuts and the modal's own Escape
   // handler never see the keys being recorded.
   useEffect(() => {
@@ -332,10 +366,17 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
         if (ev.target === ev.currentTarget) onClose()
       }}
     >
-      <div className="flex h-[37.5rem] max-h-[85vh] w-[47.5rem] max-w-full flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-2xl">
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t('settings.title')}
+        className="flex h-[37.5rem] max-h-[85vh] w-[47.5rem] max-w-full flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-2xl"
+      >
         <header className="flex items-center gap-3 border-b border-line px-4 py-3">
           <h1 className="text-[0.8125rem] font-semibold text-fg-strong">{t('settings.title')}</h1>
           <input
+            ref={searchRef}
             value={query}
             onChange={(ev) => setQuery(ev.target.value)}
             placeholder={t('settings.searchPh')}
@@ -640,7 +681,13 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
                 <span className="text-[0.65625rem] text-muted-2">{t('settings.gpuRestartHint')}</span>
                 <button
                   type="button"
-                  onClick={() => void restartApp().catch(() => undefined)}
+                  onClick={() => {
+                    // The debounced save may not have run yet; persist the latest snapshot
+                    // before the process restarts.
+                    void settingsSave(settings)
+                      .catch(() => undefined)
+                      .then(() => restartApp().catch(() => undefined))
+                  }}
                   className="shrink-0 rounded-md border border-line px-2 py-1 text-[0.6875rem] text-fg hover:bg-surface-3"
                 >
                   {t('settings.restartNow')}

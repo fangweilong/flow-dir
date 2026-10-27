@@ -7,6 +7,10 @@ type Props = {
   onCancel: (opId: string) => void
   /** Removes a finished card, including one kept around to show its failure list. */
   onDismiss: (opId: string) => void
+  /** Re-runs a denied operation through the elevated helper. */
+  onRetryElevated: (opId: string) => void
+  /** Op id whose UAC prompt is open; its retry button stays disabled until it returns. */
+  elevating?: string | null
 }
 
 const PHASE_KEY = {
@@ -18,7 +22,7 @@ const PHASE_KEY = {
 } as const
 
 /** Bottom-right stack of running operations. */
-export function OpsPanel({ ops, lang, onCancel, onDismiss }: Props) {
+export function OpsPanel({ ops, lang, onCancel, onDismiss, onRetryElevated, elevating }: Props) {
   const t = makeT(lang)
   if (!ops.length) return null
   return (
@@ -98,6 +102,19 @@ export function OpsPanel({ ops, lang, onCancel, onDismiss }: Props) {
                 ))}
               </ul>
             )}
+            {op.done &&
+              (op.error?.code === 'ACCESS_DENIED' ||
+                op.failed.some((failure) => failure.code === 'ACCESS_DENIED')) && (
+                <button
+                  type="button"
+                  data-op-elevate
+                  disabled={elevating === op.opId}
+                  onClick={() => onRetryElevated(op.opId)}
+                  className="mt-1.5 w-full rounded border border-blue-500/40 bg-blue-500/10 px-1.5 py-1 text-[0.65625rem] text-blue-600 hover:bg-blue-500/20 disabled:opacity-50 dark:text-blue-300"
+                >
+                  {t('op.retryElevated')}
+                </button>
+              )}
           </div>
         )
       })}

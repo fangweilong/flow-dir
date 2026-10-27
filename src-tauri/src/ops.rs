@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use windows::core::{implement, HRESULT, Result as WinResult, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{E_ABORT, HWND};
@@ -31,7 +31,7 @@ const PHASES: [&str; 6] = ["start", "copy", "move", "delete", "rename", "newdir"
 const MAX_REPORTED_FAILURES: usize = 200;
 
 /// One item the shell refused, with the HRESULT mapped to an app error code.
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct OpFailure {
     pub path: String,
@@ -155,13 +155,85 @@ impl Kind {
     }
 }
 
+/// Result written by the elevated helper process and read back by the GUI.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ElevatedReport {
+    pub aborted: bool,
+    pub failed: Vec<OpFailure>,
+    pub failed_total: u32,
+    pub error: Option<ApiError>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Request {
     pub op_id: String,
     pub kind: String,
     pub sources: Vec<String>,
     pub target_dir: Option<String>,
     pub new_name: Option<String>,
+    /// One new name per source for a batch rename; mutually exclusive with `new_name`.
+    pub new_names: Option<Vec<String>>,
     pub permanent: bool,
+}
+
+/// Checks a request before it touches the shell; used by both the GUI path and the
+/// elevated helper, which receives the request as JSON from another process.
+fn validate(request: &Request, kind: Kind) -> Result<(), ApiError> {
+    if request.sources.is_empty() {
+        return Err(ApiError::new("EMPTY", "no source paths"));
+    }
+    if kind == Kind::Rename {
+        match &request.new_names {
+            Some(names) if names.len() != request.sources.len() => {
+                return Err(ApiError::new(
+                    "BAD_ARGS",
+                    "batch rename needs one new name per source",
+                ));
+            }
+            Some(_) => {}
+            None if request.new_name.is_none() => {
+                return Err(ApiError::new("BAD_ARGS", "rename needs newName"));
+            }
+            None => {}
+        }
+    }
+    Ok(())
+}
+
+/// Runs an operation to completion on the calling thread. This is the body of the
+/// elevated helper: it has no `AppHandle`, no window and no Channel back to a webview,
+/// so progress is discarded and only the final result matters.
+pub fn run_headless(request: Request) -> ElevatedReport {
+    let report = |error: Option<ApiError>| ElevatedReport {
+        aborted: false,
+        failed: Vec::new(),
+        failed_total: 0,
+        error,
+    };
+    let kind = match Kind::parse(&request.kind) {
+        Some(kind) => kind,
+        None => {
+            return report(Some(ApiError::new(
+                "BAD_KIND",
+                format!("unknown operation {}", request.kind),
+            )))
+        }
+    };
+    if let Err(err) = validate(&request, kind) {
+        return report(Some(err));
+    }
+    let outcome = run_guarded(&request.kind, || {
+        let sink = Channel::new(|_| Ok(()));
+        run(&request, kind, None, Arc::new(AtomicBool::new(false)), sink)
+    });
+    ElevatedReport {
+        aborted: outcome.aborted,
+        failed: outcome.failed,
+        failed_total: outcome.failed_total,
+        error: outcome.error,
+    }
 }
 
 /// Starts an operation on a fresh STA thread and returns immediately.
@@ -173,9 +245,7 @@ pub fn start(
 ) -> Result<(), ApiError> {
     let kind = Kind::parse(&request.kind)
         .ok_or_else(|| ApiError::new("BAD_KIND", format!("unknown operation {}", request.kind)))?;
-    if request.sources.is_empty() {
-        return Err(ApiError::new("EMPTY", "no source paths"));
-    }
+    validate(&request, kind)?;
     let token = state.begin(&request.op_id);
     let op_id = request.op_id.clone();
     let state = state.clone();
@@ -184,7 +254,9 @@ pub fn start(
         .name(format!("flowdir-op-{op_id}"))
         .spawn(move || {
             let total = request.sources.len() as u32;
-            let outcome = run(&request, kind, hwnd, token, progress.clone());
+            let outcome = run_guarded(&request.kind, || {
+                run(&request, kind, hwnd, token, progress.clone())
+            });
             match (&outcome.error, outcome.aborted, outcome.failed_total) {
                 (Some(err), _, _) => log::error!(
                     target: "flowdir::ops",
@@ -228,6 +300,28 @@ pub fn start(
         })
         .map(|_| ())
         .map_err(|e| ApiError::new("THREAD", e.to_string()))
+}
+
+/// Runs the operation body and turns a panic into a normal failure: `finish` still runs,
+/// so the job cannot stay in the map (and in the taskbar progress) forever.
+fn run_guarded<F: FnOnce() -> Outcome>(kind: &str, work: F) -> Outcome {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
+        Ok(outcome) => outcome,
+        Err(payload) => {
+            let detail = payload
+                .downcast_ref::<&str>()
+                .map(|text| (*text).to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "operation thread panicked".into());
+            log::error!(target: "flowdir::ops", "op {kind} panicked: {detail}");
+            Outcome {
+                aborted: false,
+                error: Some(ApiError::new("PANIC", detail)),
+                failed: Vec::new(),
+                failed_total: 0,
+            }
+        }
+    }
 }
 
 fn run(
@@ -421,7 +515,7 @@ fn queue(
         let new_name = request.new_name.as_deref().map(HSTRING::from);
         let mut queued_count = 0;
 
-        for path in &request.sources {
+        for (index, path) in request.sources.iter().enumerate() {
             let item = match shell_item(path) {
                 Ok(item) => item,
                 // One unresolvable path (deleted meanwhile, unparsable) must not abort the
@@ -464,13 +558,20 @@ fn queue(
                     ),
                 },
                 Kind::Delete => operation.DeleteItem(&item, None::<&IFileOperationProgressSink>),
-                Kind::Rename => operation.RenameItem(
-                    &item,
-                    new_name
+                Kind::Rename => {
+                    let name = request
+                        .new_names
                         .as_ref()
-                        .ok_or_else(|| ApiError::new("BAD_ARGS", "rename needs newName"))?,
-                    None::<&IFileOperationProgressSink>,
-                ),
+                        .and_then(|names| names.get(index))
+                        .map(HSTRING::from)
+                        .or_else(|| request.new_name.as_ref().map(HSTRING::from))
+                        .ok_or_else(|| ApiError::new("BAD_ARGS", "rename needs newName"))?;
+                    operation.RenameItem(
+                        &item,
+                        &name,
+                        None::<&IFileOperationProgressSink>,
+                    )
+                }
                 Kind::NewDir => unreachable!(),
             };
             if let Err(e) = queued {
@@ -718,6 +819,111 @@ mod tests {
         dir
     }
 
+    #[test]
+    fn panic_becomes_a_failed_outcome() {
+        let outcome = run_guarded("copy", || panic!("boom"));
+        let error = outcome.error.expect("a panic must surface as an error");
+        assert_eq!(error.code, "PANIC");
+        assert!(error.detail.contains("boom"), "{}", error.detail);
+        assert!(!outcome.aborted);
+    }
+
+    #[test]
+    fn headless_rename_reports_success() {
+        let dir = temp_dir("headless");
+        let source = dir.join("before.txt");
+        fs::write(&source, b"x").unwrap();
+        let report = run_headless(Request {
+            op_id: "headless".into(),
+            kind: "rename".into(),
+            sources: vec![source.to_string_lossy().into_owned()],
+            target_dir: None,
+            new_name: Some("after.txt".into()),
+            new_names: None,
+            permanent: false,
+        });
+        assert!(report.error.is_none(), "{:?}", report.error);
+        assert_eq!(report.failed_total, 0);
+        assert!(!report.aborted);
+        assert!(dir.join("after.txt").exists());
+        assert!(!source.exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn headless_rejects_an_unknown_kind() {
+        let report = run_headless(Request {
+            op_id: "headless".into(),
+            kind: "explode".into(),
+            sources: vec!["C:\\".into()],
+            target_dir: None,
+            new_name: None,
+            new_names: None,
+            permanent: false,
+        });
+        assert_eq!(report.error.unwrap().code, "BAD_KIND");
+    }
+
+    #[test]
+    fn batch_rename_rejects_mismatched_names() {
+        let channel = Channel::new(|_| Ok(()));
+        let request = Request {
+            op_id: "bad-batch".into(),
+            kind: "rename".into(),
+            sources: vec!["a".into(), "b".into()],
+            target_dir: None,
+            new_name: None,
+            new_names: Some(vec!["one".into()]),
+            permanent: false,
+        };
+        let error = start(&OpState::default(), request, None, channel).unwrap_err();
+        assert_eq!(error.code, "BAD_ARGS");
+    }
+
+    /// One IFileOperation renames the whole selection and reports per-item progress.
+    #[test]
+    fn batch_rename_renames_every_source() {
+        let dir = temp_dir("batch-rename");
+        let first = dir.join("first.txt");
+        let second = dir.join("second.txt");
+        fs::write(&first, b"a").unwrap();
+        fs::write(&second, b"b").unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let channel = Channel::new(move |body| {
+            if let tauri::ipc::InvokeResponseBody::Json(text) = body {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if value["done"] == true {
+                        let _ = tx.send(value);
+                    }
+                }
+            }
+            Ok(())
+        });
+        let request = Request {
+            op_id: "batch-rename".into(),
+            kind: "rename".into(),
+            sources: vec![
+                first.to_string_lossy().into_owned(),
+                second.to_string_lossy().into_owned(),
+            ],
+            target_dir: None,
+            new_name: None,
+            new_names: Some(vec!["one.txt".into(), "two.txt".into()]),
+            permanent: false,
+        };
+        start(&OpState::default(), request, None, channel).unwrap();
+        let done = rx
+            .recv_timeout(std::time::Duration::from_secs(15))
+            .expect("the operation must finish");
+        assert_eq!(done["failedCount"], 0, "{done}");
+        assert!(done["error"].is_null(), "{done}");
+        assert!(dir.join("one.txt").exists());
+        assert!(dir.join("two.txt").exists());
+        assert!(!first.exists() && !second.exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
     fn delete_request(path: &std::path::Path) -> Request {
         Request {
             op_id: "test".into(),
@@ -725,6 +931,7 @@ mod tests {
             sources: vec![path.to_string_lossy().into_owned()],
             target_dir: None,
             new_name: None,
+            new_names: None,
             permanent: false,
         }
     }
@@ -736,6 +943,7 @@ mod tests {
             sources: vec![path.to_string_lossy().into_owned()],
             target_dir: Some(target.to_string_lossy().into_owned()),
             new_name: Some(name.into()),
+            new_names: None,
             permanent: false,
         }
     }
@@ -830,6 +1038,7 @@ pub(crate) fn recycle_for_test(path: &str) -> u32 {
         sources: vec![path.to_string()],
         target_dir: None,
         new_name: None,
+        new_names: None,
         permanent: false,
     };
     unsafe {

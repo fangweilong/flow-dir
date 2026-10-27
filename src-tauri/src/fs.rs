@@ -169,6 +169,15 @@ fn scan(
                 buffer.resize(buffer.len() * 2, 0);
                 continue;
             }
+            if unsupported_directory_info(code) {
+                // Some SMB/NAS servers reject FileIdBothDirectoryInfo outright. Restart
+                // through read_dir instead of failing the whole folder.
+                log::warn!(
+                    target: "flowdir::fs",
+                    "FileIdBothDirectoryInfo unsupported for {path} ({code:#010x}); using read_dir"
+                );
+                return scan_fallback(path, show_hidden, dirs_only, limit, cancel, progress);
+            }
             return Err(ApiError::from_windows(path, code));
         }
 
@@ -219,6 +228,68 @@ fn scan(
         progress(entries.len());
     }
 
+    Ok(ScanOutcome { entries, truncated })
+}
+
+/// `ERROR_INVALID_FUNCTION`, `ERROR_NOT_SUPPORTED`, `ERROR_INVALID_PARAMETER` and
+/// `ERROR_INVALID_LEVEL`, i.e. the server does not implement this information class.
+fn unsupported_directory_info(code: i32) -> bool {
+    matches!(code as u32, 0x8007_0001 | 0x8007_0032 | 0x8007_0057 | 0x8007_007C)
+}
+
+/// Portable fallback for shares that reject `FileIdBothDirectoryInfo`. It is slower
+/// (one metadata query per entry) but preserves the same filtering, limit and progress
+/// semantics; entry ids are unavailable, which only affects tie-breaking in the sort.
+fn scan_fallback(
+    path: &str,
+    show_hidden: bool,
+    dirs_only: bool,
+    limit: usize,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(usize),
+) -> Result<ScanOutcome, ApiError> {
+    use std::os::windows::fs::MetadataExt;
+
+    let dir = std::fs::read_dir(path).map_err(|e| ApiError::from_io(path, &e))?;
+    let mut entries: Vec<Entry> = Vec::new();
+    let mut truncated = false;
+    let mut seen = 0usize;
+    for entry in dir {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let Ok(entry) = entry else { continue };
+        let Ok(meta) = entry.metadata() else { continue };
+        let attrs = meta.file_attributes();
+        let is_dir = attrs & ATTR_DIRECTORY != 0;
+        if dirs_only && !is_dir {
+            continue;
+        }
+        if !show_hidden && attrs & (ATTR_HIDDEN | ATTR_SYSTEM) != 0 {
+            continue;
+        }
+        let size = if is_dir { 0 } else { meta.len() };
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|elapsed| elapsed.as_millis() as u64)
+            .unwrap_or(0);
+        let name = entry.file_name().to_string_lossy().into_owned();
+        entries.push(Entry::new(name, size, mtime, attrs, 0));
+        seen += 1;
+        if seen % 200 == 0 {
+            progress(entries.len());
+        }
+        // One extra match proves there is more to read; truncating here keeps the
+        // `truncated` flag accurate for folders that hold exactly `limit` entries.
+        if entries.len() > limit {
+            entries.truncate(limit);
+            truncated = true;
+            break;
+        }
+    }
+    progress(entries.len());
     Ok(ScanOutcome { entries, truncated })
 }
 
@@ -362,23 +433,79 @@ fn letter_drives() -> Vec<Drive> {
 }
 
 /// Queries every letter in parallel with a short overall deadline: one dead network share
-/// must not stall the whole overview.
+/// must not stall the whole overview. Results are cached per root and a probe that is still
+/// blocked is not started again, so repeated refreshes cannot accumulate threads.
 fn fill_volumes(drives: &mut [Drive]) {
-    use std::sync::mpsc;
+    use std::sync::{mpsc, Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
     const DEADLINE: Duration = Duration::from_millis(1200);
+    const SUCCESS_TTL: Duration = Duration::from_secs(15);
+    const FAILURE_TTL: Duration = Duration::from_secs(60);
+
+    #[derive(Clone)]
+    struct Cached {
+        info: Option<VolumeInfo>,
+        checked: Instant,
+        inflight: bool,
+    }
+
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, Cached>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let now = Instant::now();
+    let mut spawn: Vec<String> = Vec::new();
+    {
+        let mut map = cache.lock().unwrap();
+        for drive in drives.iter_mut() {
+            let entry = map.entry(drive.root.clone()).or_insert_with(|| Cached {
+                info: None,
+                checked: now,
+                inflight: false,
+            });
+            if let Some(info) = &entry.info {
+                apply_volume(drive, info);
+            }
+            let ttl = match &entry.info {
+                Some(info) if info.available => SUCCESS_TTL,
+                _ => FAILURE_TTL,
+            };
+            let stale =
+                entry.info.is_none() || now.saturating_duration_since(entry.checked) >= ttl;
+            if stale && !entry.inflight {
+                entry.inflight = true;
+                spawn.push(drive.root.clone());
+            }
+        }
+    }
+    if spawn.is_empty() {
+        return;
+    }
+
     let (tx, rx) = mpsc::channel();
-    for drive in drives.iter() {
-        let root = drive.root.clone();
+    for root in &spawn {
+        let root = root.clone();
         let tx = tx.clone();
         std::thread::spawn(move || {
             let info = volume_info(&root);
+            if let Some(cache) = CACHE.get() {
+                if let Ok(mut map) = cache.lock() {
+                    map.insert(
+                        root.clone(),
+                        Cached {
+                            info: Some(info.clone()),
+                            checked: Instant::now(),
+                            inflight: false,
+                        },
+                    );
+                }
+            }
             let _ = tx.send((root, info));
         });
     }
+    drop(tx);
+
     let deadline = Instant::now() + DEADLINE;
-    for _ in 0..drives.len() {
+    for _ in 0..spawn.len() {
         let remaining = deadline.saturating_duration_since(Instant::now());
         let Ok((root, info)) = rx.recv_timeout(remaining) else {
             break;
@@ -386,12 +513,16 @@ fn fill_volumes(drives: &mut [Drive]) {
         let Some(drive) = drives.iter_mut().find(|drive| drive.root == root) else {
             continue;
         };
-        drive.label = info.label;
-        drive.fs = info.fs;
-        drive.total = info.total;
-        drive.free = info.free;
-        drive.available = info.available;
+        apply_volume(drive, &info);
     }
+}
+
+fn apply_volume(drive: &mut Drive, info: &VolumeInfo) {
+    drive.label = info.label.clone();
+    drive.fs = info.fs.clone();
+    drive.total = info.total;
+    drive.free = info.free;
+    drive.available = info.available;
 }
 
 /// Shortcuts from `%APPDATA%\Microsoft\Windows\Network Shortcuts`, the per-user
@@ -552,6 +683,42 @@ mod tests {
             .entries;
         sort_entries(&mut all, "name", "asc");
         assert_eq!(all.len(), 3);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The SMB fallback must produce the same rows and honour the same cap as the fast path.
+    #[test]
+    fn fallback_matches_the_fast_scan() {
+        let root = std::env::temp_dir().join(format!("flowdir-scan-fallback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("alpha")).unwrap();
+        std::fs::write(root.join("one.txt"), b"1234567890").unwrap();
+        std::fs::write(root.join("two.txt"), b"xy").unwrap();
+
+        let cancel = AtomicBool::new(false);
+        let fast = scan(root.to_str().unwrap(), true, false, 100, &cancel, &mut |_| {}).unwrap();
+        let fallback =
+            scan_fallback(root.to_str().unwrap(), true, false, 100, &cancel, &mut |_| {}).unwrap();
+        let mut fast_rows: Vec<_> = fast
+            .entries
+            .iter()
+            .map(|entry| (entry.name.clone(), entry.size, entry.is_dir()))
+            .collect();
+        let mut fallback_rows: Vec<_> = fallback
+            .entries
+            .iter()
+            .map(|entry| (entry.name.clone(), entry.size, entry.is_dir()))
+            .collect();
+        fast_rows.sort();
+        fallback_rows.sort();
+        assert_eq!(fast_rows, fallback_rows);
+        assert!(!fast.truncated && !fallback.truncated);
+
+        let capped =
+            scan_fallback(root.to_str().unwrap(), true, false, 2, &cancel, &mut |_| {}).unwrap();
+        assert_eq!(capped.entries.len(), 2);
+        assert!(capped.truncated);
 
         std::fs::remove_dir_all(root).unwrap();
     }

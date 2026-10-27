@@ -1,11 +1,30 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { searchCancel, searchStart } from './api'
 import { makeT } from './i18n'
-import { formatSize, parentPath } from './paths'
+import { formatSize, parentPath, volumeRoot } from './paths'
 import { FileIcon } from './icons'
 import { BASE_FONT_SIZE, clampFontSize } from './fonts'
 import type { ApiError, Lang } from './types'
 import type { SearchItem } from './types'
+
+type SearchScope = 'folder' | 'drive'
+type SearchSort = { key: 'name' | 'size' | 'mtime'; dir: 'asc' | 'desc' }
+
+/** Result ordering is client-side: both providers stream and stop at the same cap. */
+function sortResults(items: SearchItem[], sort: SearchSort, collator: Intl.Collator): SearchItem[] {
+  const factor = sort.dir === 'desc' ? -1 : 1
+  return [...items].sort((a, b) => {
+    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1
+    const primary =
+      sort.key === 'size'
+        ? a.size - b.size
+        : sort.key === 'mtime'
+          ? a.mtime - b.mtime
+          : collator.compare(a.name, b.name)
+    if (primary !== 0) return primary * factor
+    return collator.compare(a.name, b.name)
+  })
+}
 
 type Props = {
   root: string
@@ -39,9 +58,28 @@ export function SearchOverlay({
   const [provider, setProvider] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<ApiError | null>(null)
-  const [active, setActive] = useState(0)
+  const [activePath, setActivePath] = useState<string | null>(null)
+  const [scope, setScope] = useState<SearchScope>('folder')
+  const [sort, setSort] = useState<SearchSort>({ key: 'name', dir: 'asc' })
   const gen = useRef(0)
   const inputRef = useRef<HTMLInputElement>(null)
+
+  const driveRoot = volumeRoot(root)
+  const searchRoot = scope === 'drive' && driveRoot ? driveRoot : root
+  const collator = useMemo(
+    () => new Intl.Collator(lang === 'zh-CN' ? 'zh-CN' : 'en', { numeric: true, sensitivity: 'base' }),
+    [lang],
+  )
+  const ordered = useMemo(() => sortResults(items, sort, collator), [items, sort, collator])
+  const activeIndex = Math.max(0, ordered.findIndex((item) => item.path === activePath))
+  const current = ordered[activeIndex]
+
+  const move = (step: number) => {
+    if (!ordered.length) return
+    const base = activePath === null ? (step > 0 ? -1 : 0) : activeIndex
+    const next = Math.max(0, Math.min(ordered.length - 1, base + step))
+    setActivePath(ordered[next].path)
+  }
 
   useEffect(() => {
     inputRef.current?.focus()
@@ -51,17 +89,25 @@ export function SearchOverlay({
     const value = query.trim()
     if (!value) {
       setItems([])
+      setActivePath(null)
+      setProvider('')
       setLoading(false)
       setError(null)
       void searchCancel().catch(() => undefined)
       return
     }
     const id = ++gen.current
+    // Results belong to the previous query until this one produces its own; keeping them
+    // on screen would let Enter open a hit the user is no longer searching for.
+    setItems([])
+    setActivePath(null)
+    setProvider('')
     setLoading(true)
     setError(null)
+    void searchCancel().catch(() => undefined)
     const timer = window.setTimeout(() => {
       const acc: SearchItem[] = []
-      searchStart(root, value, id, 500, preferEverything, showHidden, (batch) => {
+      searchStart(searchRoot, value, id, 500, preferEverything, showHidden, (batch) => {
         if (batch.gen !== gen.current) return
         if (batch.error) {
           setError(batch.error)
@@ -71,7 +117,6 @@ export function SearchOverlay({
         if (batch.items.length) {
           acc.push(...batch.items)
           setItems(acc.slice())
-          setActive(0)
         }
         setProvider(batch.provider)
         if (batch.done) setLoading(false)
@@ -83,15 +128,13 @@ export function SearchOverlay({
     }, 200)
 
     return () => window.clearTimeout(timer)
-  }, [query, root, preferEverything, showHidden])
+  }, [query, searchRoot, scope, preferEverything, showHidden])
 
   useEffect(() => {
     return () => {
       void searchCancel().catch(() => undefined)
     }
   }, [])
-
-  const current = items[active]
 
   return (
     <div
@@ -114,9 +157,8 @@ export function SearchOverlay({
               if (e.key === 'Escape') onClose()
               if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
                 e.preventDefault()
-                if (!items.length) return
-                const step = e.key === 'ArrowDown' ? 1 : -1
-                setActive((prev) => Math.max(0, Math.min(items.length - 1, prev + step)))
+                if (!ordered.length) return
+                move(e.key === 'ArrowDown' ? 1 : -1)
               }
               if (e.key === 'Enter' && current) {
                 // Alt+Enter is the "open containing folder" escape hatch; plain Enter
@@ -129,8 +171,45 @@ export function SearchOverlay({
             placeholder={t('search.placeholder')}
             className="h-7 min-w-0 flex-1 bg-transparent text-[0.8125rem] outline-none placeholder:text-muted-2"
           />
+        </div>
+
+        <div className="flex items-center gap-1.5 border-b border-line px-3 py-1.5 text-[0.65625rem] text-muted-2">
+          <span>{t('search.scope')}</span>
+          <select
+            value={scope}
+            onChange={(e) => setScope(e.target.value as SearchScope)}
+            aria-label={t('search.scope')}
+            className="h-6 shrink-0 rounded border border-line bg-surface-2 px-1 text-[0.65625rem] text-fg outline-none"
+          >
+            <option value="folder">{t('search.scopeFolder')}</option>
+            {driveRoot && (
+              <option value="drive">
+                {t('search.scopeDrive', { name: driveRoot.replace(/\\$/, '') })}
+              </option>
+            )}
+          </select>
+          <span className="ml-2">{t('search.sort')}</span>
+          <select
+            value={sort.key}
+            onChange={(e) => setSort((prev) => ({ ...prev, key: e.target.value as SearchSort['key'] }))}
+            aria-label={t('search.sort')}
+            className="h-6 shrink-0 rounded border border-line bg-surface-2 px-1 text-[0.65625rem] text-fg outline-none"
+          >
+            <option value="name">{t('search.sortName')}</option>
+            <option value="size">{t('search.sortSize')}</option>
+            <option value="mtime">{t('search.sortTime')}</option>
+          </select>
+          <button
+            type="button"
+            onClick={() => setSort((prev) => ({ ...prev, dir: prev.dir === 'asc' ? 'desc' : 'asc' }))}
+            title={t(sort.dir === 'asc' ? 'search.sortAsc' : 'search.sortDesc')}
+            aria-label={t(sort.dir === 'asc' ? 'search.sortAsc' : 'search.sortDesc')}
+            className="grid h-6 w-5 shrink-0 place-items-center rounded border border-line bg-surface-2 text-fg hover:bg-surface-3"
+          >
+            {sort.dir === 'asc' ? '▲' : '▼'}
+          </button>
           {provider && (
-            <span className="shrink-0 rounded bg-surface-3 px-1.5 py-0.5 text-[0.625rem] text-muted">
+            <span className="ml-auto shrink-0 rounded bg-surface-3 px-1.5 py-0.5 text-[0.625rem] text-muted">
               {provider === 'everything' ? t('search.everything') : t('search.jwalk')}
             </span>
           )}
@@ -149,18 +228,18 @@ export function SearchOverlay({
             </div>
           )}
 
-          {items.map((item, index) => (
+          {ordered.map((item, index) => (
             <button
               key={`${item.path}-${index}`}
               type="button"
               data-result={index}
-              onMouseEnter={() => setActive(index)}
+              onMouseEnter={() => setActivePath(item.path)}
               onClick={() => {
                 onActivate(item)
                 onClose()
               }}
               className={`flex w-full items-center gap-2 border-b border-line/60 px-3 py-1.5 text-left ${
-                index === active ? 'bg-sel' : 'hover:bg-surface-3'
+                index === activeIndex ? 'bg-sel' : 'hover:bg-surface-3'
               }`}
             >
               <FileIcon name={item.name} dir={item.isDir} path={item.path} scale={iconScale} />
@@ -176,7 +255,7 @@ export function SearchOverlay({
         </div>
 
         <div className="flex h-7 items-center justify-between border-t border-line px-3 text-[0.65625rem] text-muted-2">
-          <span>{t('search.results', { count: items.length })}</span>
+          <span>{t('search.results', { count: ordered.length })}</span>
           <span>{t('search.hint')}</span>
         </div>
       </div>

@@ -260,6 +260,23 @@ impl Default for Settings {
 impl Settings {
     /// Repairs values that a hand-edited file or an older build may carry.
     pub fn normalize(mut self) -> Self {
+        self.language = match self.language.as_str() {
+            "en" => "en".to_string(),
+            _ => "zh-CN".to_string(),
+        };
+        self.theme = match self.theme.as_str() {
+            "light" => "light".to_string(),
+            "dark" => "dark".to_string(),
+            _ => "system".to_string(),
+        };
+        // The frontend enforces the same minimum; the upper bound only rejects absurd
+        // hand-edited values that would push the panes off screen.
+        self.sidebar_width = self.sidebar_width.clamp(140, 2000);
+        self.preview_width = self.preview_width.clamp(220, 2000);
+        self.update_interval_hours = match self.update_interval_hours {
+            0 | 6 | 12 | 24 | 72 => self.update_interval_hours,
+            _ => 24,
+        };
         self.log_level = match self.log_level.as_str() {
             "error" | "warn" | "info" | "debug" => self.log_level,
             _ => "info".to_string(),
@@ -671,9 +688,42 @@ mod tests {
         }
     }
 
+    /// Hand-edited values outside the UI's ranges must not leak into the layout/updater.
     #[test]
-    fn region_fonts_normalize() {
+    fn invalid_general_values_normalize() {
         let parsed = Settings {
+            language: "fr".into(),
+            theme: "sepia".into(),
+            sidebar_width: 0,
+            preview_width: 99_999,
+            update_interval_hours: 48,
+            ..Settings::default()
+        }
+        .normalize();
+        assert_eq!(parsed.language, "zh-CN");
+        assert_eq!(parsed.theme, "system");
+        assert_eq!(parsed.sidebar_width, 140);
+        assert_eq!(parsed.preview_width, 2000);
+        assert_eq!(parsed.update_interval_hours, 24);
+
+        let kept = Settings {
+            language: "en".into(),
+            theme: "dark".into(),
+            sidebar_width: 300,
+            preview_width: 480,
+            update_interval_hours: 0,
+            ..Settings::default()
+        }
+        .normalize();
+        assert_eq!(kept.language, "en");
+        assert_eq!(kept.theme, "dark");
+        assert_eq!(kept.sidebar_width, 300);
+        assert_eq!(kept.preview_width, 480);
+        assert_eq!(kept.update_interval_hours, 0);
+    }
+
+    #[test]
+    fn region_fonts_normalize() {        let parsed = Settings {
             tab_font_family: "  Consolas  ".to_string(),
             tab_font_size: 11,
             list_font_family: "".to_string(),

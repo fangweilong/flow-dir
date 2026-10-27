@@ -1,4 +1,27 @@
-import { useState } from 'react'
+import { useState, useSyncExternalStore } from 'react'
+
+/**
+ * Icon URLs are cached by WebView2, so associations changed outside the app would stick
+ * forever. A manual refresh (F5) and the daily HTTP TTL are the two invalidation points.
+ */
+let iconRevision = 0
+const iconListeners = new Set<() => void>()
+
+export function refreshIconCache() {
+  iconRevision += 1
+  for (const listener of iconListeners) listener()
+}
+
+function subscribeIconRevision(listener: () => void) {
+  iconListeners.add(listener)
+  return () => {
+    iconListeners.delete(listener)
+  }
+}
+
+function iconRevisionSnapshot() {
+  return iconRevision
+}
 
 const EXT_GROUP: Record<string, string> = {
   jpg: 'image', jpeg: 'image', png: 'image', gif: 'image', bmp: 'image', webp: 'image',
@@ -44,11 +67,12 @@ export function FileIcon({
   scale?: number
 }) {
   const [failed, setFailed] = useState(false)
+  const revision = useSyncExternalStore(subscribeIconRevision, iconRevisionSnapshot)
   if (path && !failed) {
     const px = Math.max(16, Math.round(20 * scale * (window.devicePixelRatio || 1)))
     return (
       <img
-        src={`http://fd.localhost/icon?path=${encodeURIComponent(path)}&s=${px}`}
+        src={`http://fd.localhost/icon?path=${encodeURIComponent(path)}&s=${px}&v=${revision}`}
         width={16}
         height={16}
         alt=""
