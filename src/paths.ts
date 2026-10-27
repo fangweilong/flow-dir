@@ -60,6 +60,17 @@ export function parentPath(p: string): string {
   return /^[a-zA-Z]:$/.test(up) ? `${up}\\` : up
 }
 
+/** Drive root (`C:\`) or UNC share root (`\\server\share`) that contains `p`. */
+export function volumeRoot(p: string): string {
+  const norm = p.replace(/\//g, '\\')
+  if (norm.startsWith('\\\\')) {
+    const parts = norm.slice(2).split('\\').filter(Boolean)
+    return parts.length >= 2 ? `\\\\${parts[0]}\\${parts[1]}` : norm
+  }
+  const drive = norm.match(/^[a-zA-Z]:/)
+  return drive ? `${drive[0]}\\` : ''
+}
+
 /** A folder followed by its ancestors, deepest first: the nodes a tree must expand. */
 export function treeChain(path: string): string[] {
   const out: string[] = []
