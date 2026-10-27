@@ -11,6 +11,7 @@
 use std::fs;
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -18,14 +19,16 @@ use tauri::{AppHandle, Emitter, Runtime};
 use windows::core::PCWSTR;
 use windows::Win32::Networking::WinHttp::{
     WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders,
-    WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetOption,
-    WinHttpSetTimeouts, INTERNET_DEFAULT_HTTPS_PORT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-    WINHTTP_FLAG_SECURE, WINHTTP_OPTION_REDIRECT_POLICY, WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS,
+    WinHttpQueryOption, WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest,
+    WinHttpSetOption, WinHttpSetTimeouts, INTERNET_DEFAULT_HTTPS_PORT,
+    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE, WINHTTP_OPTION_REDIRECT_POLICY,
+    WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP, WINHTTP_OPTION_URL,
     WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
 };
 use windows::Win32::Security::Cryptography::{
-    BCryptCloseAlgorithmProvider, BCryptHash, BCryptOpenAlgorithmProvider, BCRYPT_ALG_HANDLE,
-    BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS, BCRYPT_SHA256_ALGORITHM,
+    BCryptCloseAlgorithmProvider, BCryptGenRandom, BCryptHash, BCryptOpenAlgorithmProvider,
+    BCRYPT_ALG_HANDLE, BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS, BCRYPT_SHA256_ALGORITHM,
+    BCRYPT_USE_SYSTEM_PREFERRED_RNG,
 };
 
 use crate::error::ApiError;
@@ -76,9 +79,7 @@ struct State {
 #[derive(Deserialize, Clone)]
 struct Asset {
     name: String,
-    #[serde(default)]
     sha256: String,
-    #[serde(default)]
     size: u64,
 }
 
@@ -197,7 +198,22 @@ pub fn check<R: Runtime>(app: &AppHandle<R>, force: bool) -> UpdateStatus {
 
 /// Downloads the asset for the running flavor, verifies its digest, swaps it in, and
 /// relaunches through a detached helper that waits for this process to exit.
+/// Guards the whole install flow. A second click (or a second IPC call) must not replace
+/// the portable image twice or launch two helpers.
+static INSTALLING: AtomicBool = AtomicBool::new(false);
+
 pub fn install<R: Runtime>(app: &AppHandle<R>) -> Result<(), ApiError> {
+    if INSTALLING.swap(true, Ordering::SeqCst) {
+        return Err(ApiError::new("UPDATE_BUSY", "an update is already being installed"));
+    }
+    let result = install_inner(app);
+    if result.is_err() {
+        INSTALLING.store(false, Ordering::SeqCst);
+    }
+    result
+}
+
+fn install_inner<R: Runtime>(app: &AppHandle<R>) -> Result<(), ApiError> {
     // A dev binary sits in target/ and must never be replaced by a release asset.
     if store::is_dev(app) {
         return Err(ApiError::new(
@@ -216,7 +232,7 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> Result<(), ApiError> {
         Flavor::Portable => &manifest.portable,
         Flavor::Installer => &manifest.installer,
     };
-    let dir = std::env::temp_dir().join("FlowDir-update");
+    let dir = std::env::temp_dir().join(format!("FlowDir-update-{}", random_hex()));
     fs::create_dir_all(&dir).map_err(|e| ApiError::new("UPDATE_IO", e.to_string()))?;
     let downloaded = dir.join(&asset.name);
     download(&slug, asset, &downloaded)?;
@@ -224,15 +240,21 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> Result<(), ApiError> {
     let exe = std::env::current_exe().map_err(|e| ApiError::new("UPDATE_IO", e.to_string()))?;
     let body = match flavor {
         Flavor::Portable => {
+            // Re-hash right before touching the running image so a file swapped after the
+            // download (TOCTOU) is rejected.
+            verify_file(&downloaded, asset)?;
             replace_portable(&exe, &downloaded)?;
             let _ = fs::remove_file(&downloaded);
             format!("start \"\" \"{}\"", exe.display())
         }
-        Flavor::Installer => format!(
-            "start \"\" /wait \"{}\" /S\nstart \"\" \"{}\"",
-            downloaded.display(),
-            exe.display()
-        ),
+        Flavor::Installer => {
+            verify_file(&downloaded, asset)?;
+            format!(
+                "start \"\" /wait \"{}\" /S\nstart \"\" \"{}\"",
+                downloaded.display(),
+                exe.display()
+            )
+        }
     };
     spawn_helper(&body)?;
 
@@ -288,16 +310,45 @@ fn write_state<R: Runtime>(app: &AppHandle<R>, state: &State) {
 fn fetch_manifest(slug: &str) -> Result<Manifest, ApiError> {
     let path = format!("/{slug}/releases/latest/download/latest.json");
     let bytes = http_get("github.com", &path)?;
-    serde_json::from_slice(&bytes).map_err(|e| ApiError::new("UPDATE_MANIFEST", e.to_string()))
+    let manifest: Manifest =
+        serde_json::from_slice(&bytes).map_err(|e| ApiError::new("UPDATE_MANIFEST", e.to_string()))?;
+    validate_asset(&manifest.portable)?;
+    validate_asset(&manifest.installer)?;
+    Ok(manifest)
+}
+
+/// Both digest and size are mandatory now: a manifest served from the same (possibly
+/// compromised) release cannot vouch for itself, so a missing field is a hard failure.
+fn validate_asset(asset: &Asset) -> Result<(), ApiError> {
+    if asset.name.is_empty()
+        || asset.name.contains('/')
+        || asset.name.contains('\\')
+        || asset.name.contains(':')
+        || asset.name.contains("..")
+    {
+        return Err(ApiError::new("UPDATE_MANIFEST", asset.name.clone()));
+    }
+    let digest_ok = asset.sha256.len() == 64 && asset.sha256.bytes().all(|b| b.is_ascii_hexdigit());
+    if !digest_ok {
+        return Err(ApiError::new(
+            "UPDATE_MANIFEST",
+            format!("invalid sha256 for {}", asset.name),
+        ));
+    }
+    if asset.size == 0 {
+        return Err(ApiError::new(
+            "UPDATE_MANIFEST",
+            format!("missing size for {}", asset.name),
+        ));
+    }
+    Ok(())
 }
 
 fn download(slug: &str, asset: &Asset, dest: &PathBuf) -> Result<(), ApiError> {
-    if asset.name.is_empty() || asset.name.contains('/') || asset.name.contains('\\') {
-        return Err(ApiError::new("UPDATE_MANIFEST", asset.name.clone()));
-    }
+    validate_asset(asset)?;
     let path = format!("/{slug}/releases/latest/download/{}", asset.name);
     let bytes = http_get("github.com", &path)?;
-    if asset.size > 0 && bytes.len() as u64 != asset.size {
+    if bytes.len() as u64 != asset.size {
         return Err(ApiError::new(
             "UPDATE_SIZE",
             format!("{} != {}", bytes.len(), asset.size),
@@ -306,16 +357,35 @@ fn download(slug: &str, asset: &Asset, dest: &PathBuf) -> Result<(), ApiError> {
     if !bytes.starts_with(b"MZ") {
         return Err(ApiError::new("UPDATE_ASSET", "not a PE image"));
     }
-    if !asset.sha256.is_empty() {
-        let actual = sha256_hex(&bytes);
-        if !actual.eq_ignore_ascii_case(&asset.sha256) {
-            return Err(ApiError::new(
-                "UPDATE_HASH",
-                format!("{actual} != {}", asset.sha256),
-            ));
-        }
+    let actual = sha256_hex(&bytes);
+    if !actual.eq_ignore_ascii_case(&asset.sha256) {
+        return Err(ApiError::new(
+            "UPDATE_HASH",
+            format!("{actual} != {}", asset.sha256),
+        ));
     }
-    fs::write(dest, &bytes).map_err(|e| ApiError::new("UPDATE_IO", e.to_string()))
+    fs::write(dest, &bytes).map_err(|e| ApiError::new("UPDATE_IO", e.to_string()))?;
+    // Re-read what actually landed on disk; the in-memory bytes are not evidence that the
+    // file was not touched between write and launch.
+    verify_file(dest, asset)
+}
+
+fn verify_file(path: &Path, asset: &Asset) -> Result<(), ApiError> {
+    let bytes = fs::read(path).map_err(|e| ApiError::new("UPDATE_IO", e.to_string()))?;
+    if bytes.len() as u64 != asset.size {
+        return Err(ApiError::new(
+            "UPDATE_SIZE",
+            format!("{} != {}", bytes.len(), asset.size),
+        ));
+    }
+    let actual = sha256_hex(&bytes);
+    if !actual.eq_ignore_ascii_case(&asset.sha256) {
+        return Err(ApiError::new(
+            "UPDATE_HASH",
+            format!("{actual} != {}", asset.sha256),
+        ));
+    }
+    Ok(())
 }
 
 /// Moves the running image aside and copies the new one into its place. The old name is
@@ -412,7 +482,7 @@ fn http_get(host: &str, path: &str) -> Result<Vec<u8>, ApiError> {
         }
         let request = Handle(request);
 
-        let policy: u32 = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
+        let policy: u32 = WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;
         let policy_bytes =
             std::slice::from_raw_parts(&policy as *const u32 as *const u8, size_of::<u32>());
         let _ = WinHttpSetOption(
@@ -453,6 +523,8 @@ fn http_get(host: &str, path: &str) -> Result<Vec<u8>, ApiError> {
                 format!("status {status} for {path}"),
             ));
         }
+        let final_url = query_url(request.0).unwrap_or_default();
+        validate_download_url(&final_url)?;
 
         let mut out = Vec::new();
         let mut buffer = vec![0u8; 64 * 1024];
@@ -472,6 +544,69 @@ fn http_get(host: &str, path: &str) -> Result<Vec<u8>, ApiError> {
         }
         Ok(out)
     }
+}
+
+/// Reads `WINHTTP_OPTION_URL` after the response has been received; at that point it is
+/// the URL WinHTTP actually landed on, not the one we asked for.
+fn query_url(request: *mut std::ffi::c_void) -> Option<String> {
+    unsafe {
+        let mut bytes = 0u32;
+        let _ = WinHttpQueryOption(request, WINHTTP_OPTION_URL, None, &mut bytes);
+        if bytes == 0 {
+            return None;
+        }
+        let mut buffer = vec![0u16; (bytes as usize).div_ceil(2) + 1];
+        let mut written = bytes;
+        WinHttpQueryOption(
+            request,
+            WINHTTP_OPTION_URL,
+            Some(buffer.as_mut_ptr() as *mut _),
+            &mut written,
+        )
+        .ok()?;
+        let text = String::from_utf16_lossy(&buffer);
+        Some(text.trim_end_matches('\0').to_string())
+    }
+}
+
+/// Only HTTPS URLs whose host is GitHub-owned may be downloaded. A 302 to `http://` is
+/// already blocked by the redirect policy; this also rejects arbitrary hosts and makes
+/// the guarantee explicit for the manifest and asset requests alike.
+fn validate_download_url(url: &str) -> Result<(), ApiError> {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return Err(ApiError::new(
+            "UPDATE_SCHEME",
+            format!("refusing non-https download: {url}"),
+        ));
+    };
+    let host = rest
+        .split(['/', ':'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let allowed = host == "github.com"
+        || host.ends_with(".github.com")
+        || host == "githubusercontent.com"
+        || host.ends_with(".githubusercontent.com");
+    if !allowed {
+        return Err(ApiError::new(
+            "UPDATE_HOST",
+            format!("refusing download from {host}"),
+        ));
+    }
+    Ok(())
+}
+
+fn random_hex() -> String {
+    let mut bytes = [0u8; 16];
+    unsafe {
+        let _ = BCryptGenRandom(
+            None,
+            &mut bytes,
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        );
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -583,5 +718,36 @@ mod tests {
         assert!(due(now_secs() - 26 * 3600, 24));
         assert!(!due(now_secs() - 3600, 24));
         assert!(!due(0, 0));
+    }
+
+    #[test]
+    fn download_url_must_be_https_and_github() {
+        assert!(validate_download_url("https://github.com/o/r/releases/x").is_ok());
+        assert!(validate_download_url("https://objects.githubusercontent.com/x").is_ok());
+        assert!(validate_download_url("http://github.com/o/r").is_err());
+        assert!(validate_download_url("https://evil.example.com/x").is_err());
+        assert!(validate_download_url("https://github.com.evil.example/x").is_err());
+    }
+
+    #[test]
+    fn assets_require_digest_and_size() {
+        let ok = Asset {
+            name: "a.exe".into(),
+            sha256: "a".repeat(64),
+            size: 1,
+        };
+        assert!(validate_asset(&ok).is_ok());
+        let no_digest = Asset {
+            sha256: String::new(),
+            ..ok.clone()
+        };
+        assert!(validate_asset(&no_digest).is_err());
+        let no_size = Asset { size: 0, ..ok.clone() };
+        assert!(validate_asset(&no_size).is_err());
+        let traversal = Asset {
+            name: "../a.exe".into(),
+            ..ok
+        };
+        assert!(validate_asset(&traversal).is_err());
     }
 }

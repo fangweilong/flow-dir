@@ -1019,6 +1019,11 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
                     {updateMessage}
                     {checkedAt && <span className="ml-1 text-muted-2">· {t('settings.updateLastCheck', { time: checkedAt })}</span>}
                   </div>
+                  {update?.notes && (
+                    <div className="mt-0.5 truncate text-[0.65625rem] text-muted-2" title={update.notes} data-update-notes>
+                      {update.notes}
+                    </div>
+                  )}
                 </div>
                 <button
                   type="button"

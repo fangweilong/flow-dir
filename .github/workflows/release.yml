@@ -103,6 +103,7 @@ jobs:
 
           $manifest = @{
             version = $version
+            notes = (git log -1 --pretty=%s)
             portable = Asset "dist-release/$portable"
             installer = Asset "dist-release/$setup"
           }
