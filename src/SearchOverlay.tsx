@@ -51,14 +51,22 @@ export function SearchOverlay({
     const value = query.trim()
     if (!value) {
       setItems([])
+      setActive(0)
+      setProvider('')
       setLoading(false)
       setError(null)
       void searchCancel().catch(() => undefined)
       return
     }
     const id = ++gen.current
+    // Results belong to the previous query until this one produces its own; keeping them
+    // on screen would let Enter open a hit the user is no longer searching for.
+    setItems([])
+    setActive(0)
+    setProvider('')
     setLoading(true)
     setError(null)
+    void searchCancel().catch(() => undefined)
     const timer = window.setTimeout(() => {
       const acc: SearchItem[] = []
       searchStart(root, value, id, 500, preferEverything, showHidden, (batch) => {
