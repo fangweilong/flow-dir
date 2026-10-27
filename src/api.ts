@@ -131,6 +131,10 @@ export const configPath = () => invoke<string>('config_path')
 
 /// Relaunches the app; browser arguments such as GPU acceleration only apply to a new process.
 export const restartApp = () => invoke<void>('restart_app')
+/** Graceful quit: cancels running operations, flushes layout and settings, then exits. */
+export const quitApp = () => invoke<void>('quit_app')
+/** Ids of the operations still running, used to confirm before a quit. */
+export const activeOps = () => invoke<string[]>('active_ops')
 export const pickFolder = (title: string, initial: string) =>
   invoke<string | null>('pick_folder', { title, initial })
 export const titlebarMenu = (x: number, y: number) => invoke<void>('titlebar_menu', { x, y })

@@ -150,6 +150,30 @@ impl OpState {
         }
     }
 
+    /// Ids of operations that are still running, for the shutdown confirmation.
+    pub fn active(&self) -> Vec<String> {
+        self.jobs.lock().unwrap().keys().cloned().collect()
+    }
+
+    pub fn cancel_all(&self) {
+        for token in self.jobs.lock().unwrap().values() {
+            token.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Waits until no operation is registered, up to `timeout`. The shell can take a
+    /// moment to wind down an aborted `IFileOperation`, so exiting must not race it.
+    pub fn wait_idle(&self, timeout: std::time::Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if self.jobs.lock().unwrap().is_empty() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        self.jobs.lock().unwrap().is_empty()
+    }
+
     fn record_denied(&self, request: &Request) {
         let mut denied = self.denied.lock().unwrap();
         denied.retain(|_, entry| entry.at.elapsed() < std::time::Duration::from_secs(600));

@@ -10,6 +10,7 @@ import { refreshIconCache } from './icons'
 import { ContextMenu } from './ContextMenu'
 import type { MenuItem } from './ContextMenu'
 import { OpsPanel } from './OpsPanel'
+import { HistoryPanel } from './HistoryPanel'
 import { PromptDialog } from './PromptDialog'
 import { BatchRenameDialog } from './BatchRenameDialog'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -38,6 +39,7 @@ import {
   opStart,
   previewExternal,
   previewInfo,
+  quitApp,
   quickAccess,
   restoreRecycle,
   setAppTheme,
@@ -98,7 +100,7 @@ import {
 } from './workspace'
 import type { DropMode, Node, PaneState, TabState, Workspace } from './workspace'
 import { UNDO_LIMIT, undoEntryFor } from './undo'
-import type { UndoEntry } from './undo'
+import type { OpRequestShape, UndoEntry, UndoPayload } from './undo'
 
 /** Error code of a rejected IPC call; `ApiError` is `{ code, detail }`. */
 const errorCode = (err: unknown): string =>
@@ -212,6 +214,10 @@ export default function App() {
   /** Original request per running/finished op, so an ACCESS_DENIED result can be retried. */
   const opRequests = useRef<Record<string, OpRequest>>({})
   const [elevating, setElevating] = useState<string | null>(null)
+  /** The undo/redo history list is open. */
+  const [historyOpen, setHistoryOpen] = useState(false)
+  /** Count of operations still running when the window was asked to close. */
+  const [quitBusy, setQuitBusy] = useState<number | null>(null)
   /** Sidebar tree: expanded folders (key → display path) and their cached children. */
   const [treeOpen, setTreeOpen] = useState<Record<string, string>>({})
   const [treeNodes, setTreeNodes] = useState<Record<string, string[]>>({})
@@ -244,6 +250,11 @@ export default function App() {
   const toastTimer = useRef<number | null>(null)
   /** Undo stack: process-local, capped, only fully successful operations. */
   const undoStack = useRef<UndoEntry[]>([])
+  /** Reversed entries; cleared as soon as a new operation lands on the undo stack. */
+  const redoStack = useRef<UndoEntry[]>([])
+  /** Bumped after each stack change so the history panel re-renders. */
+  const [historyEpoch, setHistoryEpoch] = useState(0)
+  const undoCounter = useRef(0)
   /** A permanent delete succeeded last, so an empty stack is not "nothing happened". */
   const lastIrreversible = useRef(false)
   const notifiedUpdate = useRef<string | null>(null)
@@ -909,6 +920,23 @@ export default function App() {
     }
   }, [flushSettings, reportSaveError])
 
+  /**
+   * The backend defers a close while a copy/move runs; the dialog decides between cancelling
+   * the operations and quitting anyway.
+   */
+  useEffect(() => {
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    void listen<number>('flowdir:confirm-quit', (event) => setQuitBusy(event.payload)).then((fn) => {
+      if (disposed) fn()
+      else unlisten = fn
+    })
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [])
+
   /** Column widths are global: every pane and tab shares them. */
   const setColWidths = useCallback(
     (listSizeWidth: number, listTimeWidth: number, driveCapacityWidth: number, driveFreeWidth: number) => {
@@ -1108,14 +1136,14 @@ export default function App() {
       const current = wsRef.current
       if (!current) return
       const target = ev.target instanceof Element ? ev.target.closest<HTMLElement>('[data-pane-id]') : null
-      if (!target && (settingsOpen || searchOpen || menu || prompt || batchRename || deleteConfirm)) return
+      if (!target && (settingsOpen || searchOpen || menu || prompt || batchRename || deleteConfirm || quitBusy)) return
       const pane = current.panes[target?.dataset.paneId ?? current.activePaneId]
       const tab = pane ? current.tabs[pane.activeTabId] : undefined
       if (tab) historyMove(tab.id, ev.button === 3 ? -1 : 1)
     }
     window.addEventListener('mouseup', onMouseUp)
     return () => window.removeEventListener('mouseup', onMouseUp)
-  }, [historyMove, settingsOpen, searchOpen, menu, prompt, batchRename, deleteConfirm])
+  }, [historyMove, settingsOpen, searchOpen, menu, prompt, batchRename, deleteConfirm, quitBusy])
 
   /** Tree rows: folders navigate the active tab, non-path locations go to the shell. */
   const openTreePath = useCallback(
@@ -1477,6 +1505,34 @@ export default function App() {
     refreshPanes()
   }, [refreshPanes])
 
+  /** Clamped history depth from settings; both stacks follow it. */
+  const undoLimit = useCallback(
+    () => Math.max(1, Math.min(100, settingsRef.current.undoLimit || UNDO_LIMIT)),
+    [],
+  )
+
+  /**
+   * Records one reversible operation. A new operation invalidates the redo stack, and the
+   * depth follows `undo_limit` (1–100).
+   */
+  const pushUndo = useCallback(
+    (payload: UndoPayload, request: OpRequestShape, dirs: string[]) => {
+      undoCounter.current += 1
+      undoStack.current.push({
+        ...payload,
+        id: undoCounter.current,
+        at: Date.now(),
+        request,
+        dirs,
+      })
+      const limit = undoLimit()
+      while (undoStack.current.length > limit) undoStack.current.shift()
+      redoStack.current.length = 0
+      setHistoryEpoch((epoch) => epoch + 1)
+    },
+    [undoLimit],
+  )
+
   const runOp = useCallback(
     (
       kind: OpKind,
@@ -1487,19 +1543,37 @@ export default function App() {
         newNames?: string[]
         permanent?: boolean
         after?: () => void
+        /**
+         * `false` skips the undo stack; undo and redo move the entry themselves once the
+         * shell call succeeded, so a failed step never leaves the history.
+         */
         record?: boolean
+        /** Folders recorded with the history entry, invalidated when it is reversed. */
+        dirsAfter?: string[]
+        onDone?: (ok: boolean) => void
       },
     ) => {
       if (!sources.length) return
       const opId = uid('op')
-      opRequests.current[opId] = {
-        opId,
+      const request: OpRequestShape = {
         kind,
         sources,
         targetDir: options?.targetDir,
         newName: options?.newName,
         newNames: options?.newNames,
         permanent: options?.permanent,
+      }
+      opRequests.current[opId] = { opId, ...request }
+      const recordEntry = (payload: UndoPayload | null, dirs: string[]) => {
+        if (options?.record === false) return
+        if (!payload) {
+          if (kind === 'delete' && options?.permanent) lastIrreversible.current = true
+          return
+        }
+        // A reversible step supersedes the permanent one; an empty stack then means a normal
+        // "nothing to undo", not "the last thing you did cannot be undone".
+        lastIrreversible.current = false
+        pushUndo(payload, request, dirs)
       }
       setOps((prev) => ({
         ...prev,
@@ -1557,6 +1631,7 @@ export default function App() {
             progress.failed.some((failure) => failure.code === 'ACCESS_DENIED')
           if (progress.error) {
             announce(t('op.failed', { code: progress.error.code }))
+            options?.onDone?.(false)
             if (!denied) drop(5000)
             return
           }
@@ -1564,6 +1639,7 @@ export default function App() {
           // attempted, so they are not "failed" from the user's point of view.
           if (progress.aborted) {
             announce(t('op.canceled'))
+            options?.onDone?.(false)
             drop(2500)
             return
           }
@@ -1571,35 +1647,39 @@ export default function App() {
             const failed = progress.failedCount
             const ok = Math.max(0, progress.total - failed)
             announce(t('op.partial', { ok, failed }))
+            // Record the part that did land: Ctrl+Z after a partial move must undo the
+            // files that were moved, not skip back to an older unrelated step.
+            recordEntry(
+              undoEntryFor(kind, sources, {
+                ...options,
+                skip: progress.failed.map((failure) => failure.path),
+              }),
+              options?.dirsAfter ?? [],
+            )
             // Rows that did make it are on disk; a stale list would hide them.
             options?.after?.()
             refreshPanes()
+            // A partly applied step stays on the history: undoing half of it must not
+            // silently drop the other half from the stack.
+            options?.onDone?.(false)
             // Keep the card around so the failure list stays readable.
             drop(denied ? 600_000 : 15000)
             return
           }
-          if (options?.record !== false) {
-            const entry = undoEntryFor(kind, sources, options)
-            if (entry) {
-              undoStack.current.push(entry)
-              if (undoStack.current.length > UNDO_LIMIT) undoStack.current.shift()
-              lastIrreversible.current = false
-            } else if (kind === 'delete' && options?.permanent) {
-              // Permanent deletes never enter the stack; Ctrl+Z explains instead of no-oping.
-              lastIrreversible.current = true
-            }
-          }
+          recordEntry(undoEntryFor(kind, sources, options), options?.dirsAfter ?? [])
           options?.after?.()
           refreshPanes()
           remind(t('op.done'))
+          options?.onDone?.(true)
           drop(800)
         },
       ).catch((e: unknown) => {
         showToast(t('op.failed', { code: String(e) }))
+        options?.onDone?.(false)
         drop(4000)
       })
     },
-    [refreshPanes, showToast, t],
+    [pushUndo, refreshPanes, showToast, t],
   )
 
   /**
@@ -1650,57 +1730,57 @@ export default function App() {
     [elevating, refreshPanes, showToast, t],
   )
 
+  /** Runs one reverse/replay step and resolves with the shell outcome. */
+  const runStep = useCallback(
+    (kind: OpKind, sources: string[], options: Parameters<typeof runOp>[2] = {}) =>
+      new Promise<boolean>((resolve) => {
+        runOp(kind, sources, { ...options, record: false, onDone: resolve })
+      }),
+    [runOp],
+  )
+
   /**
-   * Ctrl+Z: reverse the newest recorded operation. Undo operations themselves pass
-   * `record: false`, so repeated undo walks back through the stack instead of ping-ponging.
+   * Reverses one entry. The stack is peeked, not popped: a failed undo keeps the step in
+   * place, so pressing Ctrl+Z again targets the same operation instead of losing it.
    */
-  const undoLast = useCallback(() => {
-    const entry = undoStack.current.pop()
-    if (!entry) {
-      showToast(t(lastIrreversible.current ? 'undo.irreversible' : 'undo.empty'))
-      return
-    }
-    const afterDirs = (dirs: string[]) => () => {
-      for (const dir of new Set(dirs)) {
-        invalidateTree(dir)
-        invalidateGit(dir)
-      }
-    }
-    switch (entry.kind) {
-      case 'rename': {
-        const dirs = entry.items.map((item) => parentPath(item.path))
-        runOp(
-          'rename',
-          entry.items.map((item) => joinPath(parentPath(item.path), item.newName)),
-          {
-            newNames: entry.items.map((item) => item.oldName),
-            record: false,
-            after: afterDirs(dirs),
-          },
-        )
-        return
-      }
-      case 'move': {
-        // A move keeps the names, so only the original folders are needed.
-        const byDir = new Map<string, string[]>()
-        for (const item of entry.items) {
-          const dir = parentPath(item.from)
-          byDir.set(dir, [...(byDir.get(dir) ?? []), item.to])
+  const applyUndo = useCallback(
+    async (entry: UndoEntry): Promise<boolean> => {
+      const afterDirs = (dirs: string[]) => () => {
+        for (const dir of new Set(dirs)) {
+          invalidateTree(dir)
+          invalidateGit(dir)
         }
-        for (const [dir, paths] of byDir) {
-          runOp('move', paths, { targetDir: dir, record: false, after: afterDirs([dir]) })
-        }
-        return
       }
-      case 'copy':
-        runOp('delete', entry.created, {
-          record: false,
-          after: afterDirs(entry.created.map(parentPath)),
-        })
-        return
-      case 'delete':
-        void restoreRecycle(entry.paths)
-          .then((report) => {
+      switch (entry.kind) {
+        case 'rename': {
+          const dirs = entry.items.map((item) => parentPath(item.path))
+          return runStep(
+            'rename',
+            entry.items.map((item) => joinPath(parentPath(item.path), item.newName)),
+            { newNames: entry.items.map((item) => item.oldName), after: afterDirs(dirs) },
+          )
+        }
+        case 'move': {
+          // A move keeps the names, so only the original folders are needed.
+          const byDir = new Map<string, string[]>()
+          for (const item of entry.items) {
+            const dir = parentPath(item.from)
+            byDir.set(dir, [...(byDir.get(dir) ?? []), item.to])
+          }
+          const results = await Promise.all(
+            [...byDir].map(([dir, paths]) =>
+              runStep('move', paths, { targetDir: dir, after: afterDirs([dir]) }),
+            ),
+          )
+          return results.every(Boolean)
+        }
+        case 'copy':
+          return runStep('delete', entry.created, {
+            after: afterDirs(entry.created.map(parentPath)),
+          })
+        case 'delete': {
+          try {
+            const report = await restoreRecycle(entry.paths)
             if (report.missing.length) {
               showToast(
                 t('undo.partial', { ok: report.restored.length, failed: report.missing.length }),
@@ -1710,10 +1790,85 @@ export default function App() {
             }
             for (const path of report.restored) invalidateTree(parentPath(path))
             refreshPanes()
-          })
-          .catch((e: unknown) => showToast(t('op.failed', { code: errorCode(e) })))
+            return report.restored.length > 0
+          } catch (e: unknown) {
+            showToast(t('op.failed', { code: errorCode(e) }))
+            return false
+          }
+        }
+      }
+    },
+    [invalidateGit, invalidateTree, refreshPanes, runStep, showToast, t],
+  )
+
+  /** Ctrl+Z: reverse the newest recorded operation, then hand it to the redo stack. */
+  const undoLast = useCallback(() => {
+    const entry = undoStack.current[undoStack.current.length - 1]
+    if (!entry) {
+      showToast(t(lastIrreversible.current ? 'undo.irreversible' : 'undo.empty'))
+      return
     }
-  }, [invalidateGit, invalidateTree, refreshPanes, runOp, showToast, t])
+    void applyUndo(entry).then((ok) => {
+      if (!ok) return
+      undoStack.current.pop()
+      redoStack.current.push(entry)
+      while (redoStack.current.length > undoLimit()) redoStack.current.shift()
+      setHistoryEpoch((epoch) => epoch + 1)
+    })
+  }, [applyUndo, showToast, t])
+
+  /** Ctrl+Y: replay the request behind the newest undone entry. */
+  const redoLast = useCallback(() => {
+    const entry = redoStack.current[redoStack.current.length - 1]
+    if (!entry) {
+      showToast(t('redo.empty'))
+      return
+    }
+    const { request } = entry
+    void runStep(request.kind, request.sources, {
+      targetDir: request.targetDir,
+      newName: request.newName,
+      newNames: request.newNames,
+      permanent: request.permanent,
+      after: () => {
+        for (const dir of new Set(entry.dirs)) {
+          invalidateTree(dir)
+          invalidateGit(dir)
+        }
+      },
+    }).then((ok) => {
+      if (!ok) return
+      redoStack.current.pop()
+      undoStack.current.push(entry)
+      const limit = undoLimit()
+      while (undoStack.current.length > limit) undoStack.current.shift()
+      setHistoryEpoch((epoch) => epoch + 1)
+    })
+  }, [invalidateGit, invalidateTree, runStep, showToast, t, undoLimit])
+
+  /** History panel: undo every entry newer than `id`, including that one. */
+  const undoTo = useCallback(
+    (id: number) => {
+      const target = undoStack.current.findIndex((entry) => entry.id === id)
+      if (target < 0) return
+      const steps = undoStack.current.length - target
+      const walk = (left: number) => {
+        if (left <= 0) return
+        const entry = undoStack.current[undoStack.current.length - 1]
+        if (!entry) return
+        void applyUndo(entry).then((ok) => {
+          if (!ok) return
+          undoStack.current.pop()
+          redoStack.current.push(entry)
+          while (redoStack.current.length > undoLimit()) redoStack.current.shift()
+          setHistoryEpoch((epoch) => epoch + 1)
+          walk(left - 1)
+        })
+      }
+      walk(steps)
+    },
+    [applyUndo, undoLimit],
+  )
 
   /** Nearest element carrying `data-drop-dir`, with the box the highlight should cover. */
   const resolveDropTarget = useCallback((x: number, y: number): DropTarget | null => {
@@ -2421,7 +2576,7 @@ export default function App() {
   // list from reacting to keys typed into them.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (settingsOpen || searchOpen || deleteConfirm || prompt || batchRename || menu) return
+      if (settingsOpen || searchOpen || deleteConfirm || prompt || batchRename || menu || quitBusy) return
       const bare = !event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey
       if (bare && isTextInput(event.target)) return
 
@@ -2465,6 +2620,12 @@ export default function App() {
         if (isTextInput(event.target)) return
         event.preventDefault()
         undoLast()
+        return
+      }
+      if (matchBinding(event, keys.redo)) {
+        if (isTextInput(event.target)) return
+        event.preventDefault()
+        redoLast()
         return
       }
       if (matchBinding(event, keys.togglePreview)) {
@@ -2511,6 +2672,7 @@ export default function App() {
     prompt,
     batchRename,
     menu,
+    quitBusy,
     activePane,
     activeTab,
     activeList,
@@ -2520,6 +2682,7 @@ export default function App() {
     activateTab,
     openExternalPreview,
     undoLast,
+    redoLast,
   ])
 
   const placeLabel = (key: string) => {
@@ -2810,6 +2973,21 @@ export default function App() {
         </button>
         <button
           type="button"
+          onClick={() => setHistoryOpen((open) => !open)}
+          title={t('history.open')}
+          data-history-toggle
+          className={`grid h-6 w-6 shrink-0 place-items-center rounded-md hover:bg-surface-3 ${
+            historyOpen ? 'text-blue-500' : 'text-muted'
+          }`}
+        >
+          <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.4">
+            <path d="M2.6 7.2A5.6 5.6 0 1 1 3.4 10" strokeLinecap="round" />
+            <path d="M2.2 3.4v3.6h3.6" strokeLinecap="round" strokeLinejoin="round" />
+            <path d="M8 4.8V8l2.2 1.4" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
+        <button
+          type="button"
           onClick={() => setSearchOpen(true)}
           title="Ctrl+F"
           className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-muted hover:bg-surface-3 hover:text-fg"
@@ -3034,6 +3212,18 @@ export default function App() {
         }}
       />
 
+      {historyOpen && (
+        <HistoryPanel
+          key={historyEpoch}
+          lang={lang}
+          undo={undoStack.current}
+          redo={redoStack.current}
+          onUndoTo={undoTo}
+          onRedo={redoLast}
+          onClose={() => setHistoryOpen(false)}
+        />
+      )}
+
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
 
       {prompt && (
@@ -3094,6 +3284,21 @@ export default function App() {
             setDeleteConfirm(null)
             if (pending) focusList(pending.paneId)
           }}
+        />
+      )}
+
+      {quitBusy !== null && (
+        <ConfirmDialog
+          lang={lang}
+          title={t('confirm.quitTitle')}
+          message={t('confirm.quitBusy', { count: quitBusy })}
+          confirmLabel={t('confirm.quitAnyway')}
+          danger
+          onConfirm={() => {
+            setQuitBusy(null)
+            void quitApp()
+          }}
+          onClose={() => setQuitBusy(null)}
         />
       )}
 

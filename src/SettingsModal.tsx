@@ -726,6 +726,25 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
                 value={settings.useEverything}
                 onChange={(value) => onChange({ ...settings, useEverything: value })}
               />
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-[0.71875rem] text-fg">{t('settings.undoLimit')}</div>
+                  <div className="text-[0.625rem] text-muted-2">{t('settings.undoLimitHint')}</div>
+                </div>
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={settings.undoLimit}
+                  onChange={(ev) => {
+                    const next = Number(ev.target.value)
+                    if (!Number.isFinite(next)) return
+                    onChange({ ...settings, undoLimit: Math.min(100, Math.max(1, Math.round(next))) })
+                  }}
+                  data-undo-limit
+                  className="h-6 w-16 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-blue-400"
+                />
+              </div>
             </div>
           </section>
 

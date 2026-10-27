@@ -236,7 +236,19 @@ fn cancel_dir(state: tauri::State<'_, AppState>, tab_id: String) {
 /// environment (browser arguments such as GPU acceleration).
 #[tauri::command]
 fn restart_app(app: tauri::AppHandle) {
-    app.restart();
+    shutdown(&app, true);
+}
+
+/// Asks the frontend how many operations are running so quitting can confirm first.
+#[tauri::command]
+fn active_ops(state: tauri::State<'_, ops::OpState>) -> Vec<String> {
+    state.active()
+}
+
+/// Requests a graceful quit from the tray menu or the frontend.
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) {
+    shutdown(&app, false);
 }
 
 #[tauri::command]
@@ -826,6 +838,46 @@ fn show_main(app: &tauri::AppHandle) {
     }
 }
 
+/// The single exit path. The window close handler already flushes layout; a tray quit,
+/// restart or update install bypassed it and could drop the last settings/layout write or
+/// kill a running copy mid-flight.
+fn shutdown<R: tauri::Runtime>(app: &tauri::AppHandle<R>, restart: bool) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.emit("flowdir:flush-layout", ());
+    }
+    let ops = app.state::<ops::OpState>();
+    if !ops.active().is_empty() {
+        ops.cancel_all();
+        ops.wait_idle(std::time::Duration::from_secs(5));
+    }
+    if restart {
+        app.restart();
+    } else {
+        app.exit(0);
+    }
+}
+
+/// Asks the frontend to confirm before quitting while a copy/move is still running.
+/// Returns true when the quit was deferred to that confirmation.
+fn confirm_if_busy<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let active = app.state::<ops::OpState>().active();
+    if active.is_empty() {
+        return false;
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.emit("flowdir:confirm-quit", active.len());
+        let _ = window.set_focus();
+    }
+    true
+}
+
+/// Runs the same flush/cancel sequence as `shutdown`, then exits when it finished.
+fn request_quit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if !confirm_if_busy(app) {
+        shutdown(app, false);
+    }
+}
+
 fn init_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem};
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -839,7 +891,7 @@ fn init_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
-            "quit" => app.exit(0),
+            "quit" => request_quit(app),
             "show" => show_main(app),
             _ => {}
         })
@@ -954,7 +1006,14 @@ fn main() {
                     let win = window.clone();
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_millis(900));
-                        let _ = win.close();
+                        // A running copy/move needs the user's word before the window goes
+                        // away; the frontend answers with `quit_app`. Cancelling restores
+                        // the normal close path.
+                        if confirm_if_busy(win.app_handle()) {
+                            win.state::<AppState>().closing.store(false, Ordering::SeqCst);
+                        } else {
+                            let _ = win.close();
+                        }
                     });
                 }
             }
@@ -977,6 +1036,8 @@ fn main() {
             settings_save,
             config_path,
             restart_app,
+            quit_app,
+            active_ops,
             pick_folder,
             set_app_theme,
             watch_set,

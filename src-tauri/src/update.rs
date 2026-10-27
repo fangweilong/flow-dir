@@ -262,7 +262,9 @@ fn install_inner<R: Runtime>(app: &AppHandle<R>) -> Result<(), ApiError> {
     std::thread::spawn(move || {
         // Give the IPC reply and the helper a moment; the helper polls until we are gone.
         std::thread::sleep(Duration::from_millis(600));
-        handle.exit(0);
+        // Same exit path as the tray: flush layout and let running copies wind down first,
+        // otherwise the installer could start while this process still holds the image.
+        crate::shutdown(&handle, false);
     });
     Ok(())
 }

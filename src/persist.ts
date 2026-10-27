@@ -55,6 +55,8 @@ export type Settings = {
   driveCapacityWidth: number
   /** Drive overview "free" column width in px at the default font size; drag-resizable. */
   driveFreeWidth: number
+  /** Undo and redo history depth (1–100). */
+  undoLimit: number
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -86,6 +88,7 @@ export const DEFAULT_SETTINGS: Settings = {
   listTimeWidth: 142,
   driveCapacityWidth: 150,
   driveFreeWidth: 84,
+  undoLimit: 10,
 }
 
 type Snapshot = {

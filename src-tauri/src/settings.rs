@@ -113,6 +113,8 @@ pub struct Settings {
     pub drive_capacity_width: u32,
     /// Drive overview free-space column width in px at the default font size; drag-resizable.
     pub drive_free_width: u32,
+    /// Undo/redo history depth, 1–100.
+    pub undo_limit: u32,
 }
 
 fn default_language() -> String {
@@ -258,6 +260,7 @@ impl Default for Settings {
             list_time_width: default_list_time_width(),
             drive_capacity_width: default_drive_capacity_width(),
             drive_free_width: default_drive_free_width(),
+            undo_limit: 10,
         }
     }
 }
@@ -318,6 +321,7 @@ impl Settings {
         );
         self.drive_free_width =
             sanitize_list_col(self.drive_free_width, DRIVE_FREE_MIN, default_drive_free_width());
+        self.undo_limit = self.undo_limit.clamp(1, 100);
         self
     }
 }
@@ -402,6 +406,9 @@ external_preview = []
 # 快捷键覆盖（只记录改过的项，默认值内置）/ shortcut overrides, defaults live in the app
 # shortcuts = [{ id = "search", keys = "ctrl+shift+f" }]
 shortcuts = []
+
+# 撤销/重做历史深度（1–100）/ undo and redo history depth, 1–100
+undo_limit = 10
 "#;
 
 /// On-disk shape: snake_case keys, no coupling to the camelCase IPC payload.
@@ -436,6 +443,7 @@ struct FileSettings {
     hidden_places: Vec<String>,
     external_preview: Vec<ExternalPreview>,
     shortcuts: Vec<ShortcutOverride>,
+    undo_limit: u32,
 }
 
 impl Default for FileSettings {
@@ -470,6 +478,7 @@ impl Default for FileSettings {
             hidden_places: base.hidden_places,
             external_preview: base.external_preview,
             shortcuts: base.shortcuts,
+            undo_limit: base.undo_limit,
         }
     }
 }
@@ -505,6 +514,7 @@ impl From<FileSettings> for Settings {
             hidden_places: file.hidden_places,
             external_preview: file.external_preview,
             shortcuts: file.shortcuts,
+            undo_limit: file.undo_limit,
         }
     }
 }
@@ -619,6 +629,7 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), A
         "drive_free_width",
         Value::from(settings.drive_free_width as i64),
     );
+    set_value(&mut doc, "undo_limit", Value::from(settings.undo_limit as i64));
 
     let mut hidden = toml_edit::Array::new();
     for key in &settings.hidden_places {

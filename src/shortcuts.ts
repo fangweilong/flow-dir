@@ -12,6 +12,7 @@ export type ShortcutId =
   | 'closeTab'
   | 'openSettings'
   | 'undo'
+  | 'redo'
   | 'open'
   | 'rename'
   | 'delete'
@@ -41,6 +42,7 @@ export const DEFAULT_BINDINGS: Record<ShortcutId, string> = {
   closeTab: 'ctrl+w',
   openSettings: 'ctrl+,',
   undo: 'ctrl+z',
+  redo: 'ctrl+y',
   open: 'enter',
   rename: 'f2',
   delete: 'delete',
@@ -66,6 +68,7 @@ export const SHORTCUTS: Shortcut[] = [
   { id: 'closeTab', scope: 'app', label: 'shortcut.closeTab' },
   { id: 'openSettings', scope: 'app', label: 'shortcut.openSettings' },
   { id: 'undo', scope: 'app', label: 'shortcut.undo' },
+  { id: 'redo', scope: 'app', label: 'shortcut.redo' },
   { id: 'open', scope: 'pane', label: 'shortcut.open' },
   { id: 'rename', scope: 'pane', label: 'shortcut.rename' },
   { id: 'delete', scope: 'pane', label: 'shortcut.delete' },
