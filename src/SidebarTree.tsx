@@ -2,6 +2,10 @@ import { memo } from 'react'
 import { isFsPath, joinPath, pathKey } from './paths'
 import type { Drive } from './types'
 
+/** Indent per level, capped so a deep tree cannot consume the whole sidebar. */
+const INDENT_STEP = 12
+const INDENT_MAX_DEPTH = 16
+
 /** One folder level: expanded state and fetched children keyed by {@link pathKey}. */
 type TreeState = {
   /** open: key → display path, so a cached folder keeps its own casing. */
@@ -114,7 +118,7 @@ const TreeRow = memo(function TreeRow({
               ? 'font-medium text-fg-strong hover:bg-surface-3'
               : 'text-fg hover:bg-surface-3'
         }`}
-        style={{ paddingLeft: 2 + Math.min(depth, 8) * 12 }}
+        style={{ paddingLeft: 2 + Math.min(depth, INDENT_MAX_DEPTH) * INDENT_STEP }}
       >
         {expandable ? (
           <button
@@ -172,7 +176,7 @@ const TreeRow = memo(function TreeRow({
           data-tree-truncated={key}
           title={truncatedLabel}
           className="flex h-[1.375rem] items-center rounded pr-1 text-[0.6875rem] text-muted-2"
-          style={{ paddingLeft: 2 + Math.min(depth + 1, 8) * 12 }}
+          style={{ paddingLeft: 2 + Math.min(depth + 1, INDENT_MAX_DEPTH) * INDENT_STEP }}
         >
           <span className="h-4 w-4 shrink-0" />
           <span className="truncate">{truncatedLabel}</span>
