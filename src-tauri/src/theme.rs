@@ -3,8 +3,9 @@
 //! Win32 has no supported per-window dark mode API. The de-facto approach is
 //! uxtheme's undocumented ordinals (used by Explorer, Notepad, VS Code):
 //! 135 `SetPreferredAppMode`, 136 `FlushMenuThemes`, 133
-//! `AllowDarkModeForWindow`. They are resolved at runtime, so a future build
-//! that drops them degrades to the OS default instead of failing to start.
+//! `AllowDarkModeForWindow`, 132 `ShouldAppsUseDarkMode`. They are resolved at runtime,
+//! so a future build that drops them degrades to the OS default instead of failing to
+//! start.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::LazyLock;
@@ -25,6 +26,7 @@ struct Apis {
     set_preferred_app_mode: Option<unsafe extern "system" fn(i32) -> i32>,
     flush_menu_themes: Option<unsafe extern "system" fn()>,
     allow_dark_mode_for_window: Option<unsafe extern "system" fn(HWND, BOOL) -> BOOL>,
+    should_apps_use_dark_mode: Option<unsafe extern "system" fn() -> BOOL>,
 }
 
 fn apis() -> &'static Apis {
@@ -37,6 +39,7 @@ fn apis() -> &'static Apis {
                 set_preferred_app_mode: None,
                 flush_menu_themes: None,
                 allow_dark_mode_for_window: None,
+                should_apps_use_dark_mode: None,
             };
         };
         let by_ordinal =
@@ -46,9 +49,35 @@ fn apis() -> &'static Apis {
             set_preferred_app_mode: by_ordinal(135).map(|f| std::mem::transmute(f)),
             flush_menu_themes: by_ordinal(136).map(|f| std::mem::transmute(f)),
             allow_dark_mode_for_window: by_ordinal(133).map(|f| std::mem::transmute(f)),
+            should_apps_use_dark_mode: by_ordinal(132).map(|f| std::mem::transmute(f)),
         }
     });
     &APIS
+}
+
+/// Whether the OS is in dark app mode, which is what `system` resolves to.
+fn system_is_dark() -> bool {
+    unsafe {
+        apis()
+            .should_apps_use_dark_mode
+            .is_some_and(|should| should().as_bool())
+    }
+}
+
+/// Fill for the window behind the WebView2 surface, mirroring `--color-surface` in
+/// `styles.css`. A parked or still-loading webview paints nothing, so this is what the
+/// window shows on restore; the default erase is white in either theme.
+pub fn surface(theme: &str) -> tauri::window::Color {
+    let dark = match theme {
+        "dark" => true,
+        "light" => false,
+        _ => system_is_dark(),
+    };
+    if dark {
+        tauri::window::Color(0x0f, 0x17, 0x2a, 0xff)
+    } else {
+        tauri::window::Color(0xff, 0xff, 0xff, 0xff)
+    }
 }
 
 /// Applies `theme` (`system` / `light` / `dark`) to the process and `hwnd`.

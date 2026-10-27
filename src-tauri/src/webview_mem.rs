@@ -8,10 +8,15 @@
 //!
 //! `TrySuspend` only succeeds while the controller is invisible, so visibility is
 //! toggled around it.
+//!
+//! Parking and waking are event driven. A parked controller renders nothing, so every
+//! millisecond the app spends noticing that the window is back is a blank window; a
+//! timer alone would keep it blank for up to its whole interval after the restore.
 
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, WindowEvent};
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2TrySuspendCompletedHandler, ICoreWebView2_3,
 };
@@ -39,17 +44,31 @@ pub fn browser_args(gpu_accel: bool) -> String {
     args
 }
 
-/// Win32 state poll; two syscalls, no COM marshalling. Short enough that restoring the
-/// window resumes within the same blink the user expects content to be there.
-const POLL: Duration = Duration::from_millis(700);
+/// Backstop for a state change that emits no window event. It costs two syscalls and no
+/// longer sits on the restore path, so it is free to be slow.
+const POLL: Duration = Duration::from_secs(2);
 
 pub fn watch(app: AppHandle) {
+    let (wake, wakes) = mpsc::channel();
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    // Restoring from the taskbar is a resize plus a focus gain; either one is enough to
+    // get here before the window is painted again.
+    window.on_window_event(move |event| {
+        if matches!(event, WindowEvent::Resized(_) | WindowEvent::Focused(_)) {
+            let _ = wake.send(());
+        }
+    });
     std::thread::spawn(move || {
         let mut parked = false;
         loop {
-            std::thread::sleep(POLL);
+            // Disconnected means the window is gone, so there is nothing left to park.
+            if let Err(RecvTimeoutError::Disconnected) = wakes.recv_timeout(POLL) {
+                return;
+            }
             let Some(window) = app.get_webview_window("main") else {
-                continue;
+                return;
             };
             let hidden =
                 window.is_minimized().unwrap_or(false) || !window.is_visible().unwrap_or(true);

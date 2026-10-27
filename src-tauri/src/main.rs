@@ -563,11 +563,16 @@ fn search_start(
 
 #[tauri::command]
 fn set_app_theme(app: tauri::AppHandle, theme: String) {
-    let hwnd = app
-        .get_webview_window("main")
+    let window = app.get_webview_window("main");
+    let hwnd = window
+        .as_ref()
         .and_then(|window| window.hwnd().ok())
         .map(|hwnd| windows::Win32::Foundation::HWND(hwnd.0));
     theme::apply(hwnd, &theme);
+    // Keep the fill the parked webview reveals in step with the theme it wakes into.
+    if let Some(window) = window {
+        let _ = window.set_background_color(Some(theme::surface(&theme)));
+    }
 }
 
 #[tauri::command]
@@ -842,6 +847,9 @@ fn main() {
             .center()
             .decorations(false)
             .visible(false)
+            // The webview paints nothing while it is parked or still loading; this is what
+            // the window shows instead, so it has to be the app surface, not white.
+            .background_color(theme::surface(&saved.theme))
             .additional_browser_args(&webview_mem::browser_args(saved.gpu_accel))
             .data_directory(
                 store::cache_dir(app.handle())
