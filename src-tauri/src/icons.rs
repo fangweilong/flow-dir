@@ -70,8 +70,9 @@ pub fn handle_request<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) ->
         .clamp(16, 64);
 
     let key = format!(
-        "icon:{}?s={size}",
-        params.get("v").map(|_| path.as_str()).unwrap_or(path)
+        "icon:{}?s={size}&v={}",
+        path,
+        params.get("v").map(String::as_str).unwrap_or_default()
     );
     let cache = app.state::<PreviewCache>();
     if let Some(bytes) = cache.get(&key) {
@@ -181,7 +182,7 @@ fn ok(body: Vec<u8>) -> Response<Vec<u8>> {
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "image/png")
-        .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+        .header(header::CACHE_CONTROL, "public, max-age=86400")
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .body(body)
         .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "encode"))

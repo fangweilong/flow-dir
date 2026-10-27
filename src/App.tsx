@@ -6,6 +6,7 @@ import { getCurrentWebview } from '@tauri-apps/api/webview'
 import iconUrl from './assets/icon.png'
 import { PaneView } from './PaneView'
 import type { MenuPoint } from './PaneView'
+import { refreshIconCache } from './icons'
 import { ContextMenu } from './ContextMenu'
 import type { MenuItem } from './ContextMenu'
 import { OpsPanel } from './OpsPanel'
@@ -1411,6 +1412,12 @@ export default function App() {
     if (overview) refreshDrives()
   }, [invalidateGit, invalidateTree, refreshDrives, startScan])
 
+  /** F5 and the menu refresh also re-request icons; post-operation rescans keep the cache. */
+  const manualRefresh = useCallback(() => {
+    refreshIconCache()
+    refreshPanes()
+  }, [refreshPanes])
+
   const runOp = useCallback(
     (
       kind: OpKind,
@@ -2046,7 +2053,7 @@ export default function App() {
             { kind: 'item', label: t('menu.newFolder'), onSelect: () => createFolder(paneId) },
             { kind: 'item', label: t('menu.paste'), hint: 'Ctrl+V', onSelect: () => pasteInto(paneId) },
             { kind: 'sep' },
-            { kind: 'item', label: t('menu.refresh'), hint: 'F5', onSelect: () => refreshPanes() },
+            { kind: 'item', label: t('menu.refresh'), hint: 'F5', onSelect: () => manualRefresh() },
             {
               kind: 'item',
               label: t('menu.selectAll'),
@@ -2072,10 +2079,10 @@ export default function App() {
               onSelect: () => toggleHidden(paneId),
             },
           ]
-        : [{ kind: 'item', label: t('menu.refresh'), hint: 'F5', onSelect: () => refreshPanes() }]
+        : [{ kind: 'item', label: t('menu.refresh'), hint: 'F5', onSelect: () => manualRefresh() }]
       setMenu({ x: point.clientX, y: point.clientY, items })
     },
-    [createFolder, listData, pasteInto, refreshPanes, t, toggleHidden, update],
+    [createFolder, listData, manualRefresh, pasteInto, t, toggleHidden, update],
   )
 
   const openBlankMenu = useCallback(
@@ -2501,7 +2508,7 @@ export default function App() {
               onRename={(name) => startRename(pane.id, name)}
               onDelete={(names, permanent) => deleteEntries(pane.id, names, permanent)}
               onPaste={() => pasteInto(pane.id)}
-              onRefresh={refreshPanes}
+              onRefresh={manualRefresh}
               onRetry={retryTab}
               keys={keys}
               update={update}
