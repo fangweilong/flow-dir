@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { FileIcon } from './icons'
-import { crumbs, formatSize, formatTime, isDir, isFsPath, joinPath, parentPath, pathKey, underPath } from './paths'
+import { crumbs, formatSize, formatTime, isDir, isFsPath, joinPath, parentPath, pathKey, resolveAddress, underPath } from './paths'
 import { buildGitBadges } from './git'
 import type { GitBadges } from './git'
 import { openPath, pathIsDir } from './api'
@@ -516,8 +516,8 @@ export function PaneView({
       closeAddressEdit()
       return
     }
-    // "c:" (no slash) must land on the drive root, not on a relative path.
-    const next = /^[a-zA-Z]:$/.test(raw) ? `${raw}\\` : raw
+    // Relative addresses are resolved against the current folder; `c:` lands on the root.
+    const next = resolveAddress(tab.path, raw)
     if (pathKey(next) === pathKey(tab.path)) {
       closeAddressEdit()
       return
@@ -632,23 +632,51 @@ export function PaneView({
       }))
       return
     }
+    /** Moves the selection/cursor to `next`; `extend` keeps the Shift-range anchor. */
+    const moveTo = (next: number, extend: boolean) => {
+      if (!view.length) return
+      const target = Math.max(0, Math.min(view.length - 1, next))
+      const base = anchorIdx < 0 ? target : anchorIdx
+      update(tab.id, (d) => {
+        if (!extend) {
+          return { ...d, anchor: view[target].name, selected: new Set([view[target].name]) }
+        }
+        const [a, b] = [Math.min(base, target), Math.max(base, target)]
+        return {
+          ...d,
+          anchor: view[target].name,
+          selected: new Set(view.slice(a, b + 1).map((e) => e.name)),
+        }
+      })
+      virtualizer.scrollToIndex(target, { align: 'auto' })
+    }
     if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
       ev.preventDefault()
       if (!view.length) return
       const step = ev.key === 'ArrowDown' ? 1 : -1
       const current = anchorIdx < 0 ? (step > 0 ? -1 : 0) : anchorIdx
-      const next = Math.max(0, Math.min(view.length - 1, current + step))
-      const base = anchorIdx < 0 ? next : anchorIdx
-      update(tab.id, (d) => {
-        if (!ev.shiftKey) return { ...d, anchor: view[next].name, selected: new Set([view[next].name]) }
-        const [a, b] = [Math.min(base, next), Math.max(base, next)]
-        return {
-          ...d,
-          anchor: view[next].name,
-          selected: new Set(view.slice(a, b + 1).map((e) => e.name)),
-        }
-      })
-      virtualizer.scrollToIndex(next, { align: 'auto' })
+      moveTo(current + step, ev.shiftKey)
+      return
+    }
+    if (
+      !ev.ctrlKey &&
+      !ev.altKey &&
+      !ev.metaKey &&
+      (ev.key === 'Home' || ev.key === 'End' || ev.key === 'PageUp' || ev.key === 'PageDown')
+    ) {
+      ev.preventDefault()
+      const page = Math.max(
+        1,
+        Math.floor((scrollRef.current?.clientHeight ?? rowHeight * 10) / rowHeight) - 1,
+      )
+      const current = anchorIdx < 0 ? 0 : anchorIdx
+      const next =
+        ev.key === 'Home'
+          ? 0
+          : ev.key === 'End'
+            ? view.length - 1
+            : current + (ev.key === 'PageDown' ? page : -page)
+      moveTo(next, ev.shiftKey)
       return
     }
     if (matchBinding(ev, keys.open)) {

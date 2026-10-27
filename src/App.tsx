@@ -2272,6 +2272,36 @@ export default function App() {
       const bare = !event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey
       if (bare && isTextInput(event.target)) return
 
+      // Tab switching is fixed, not rebindable: Ctrl+Tab cycles, Ctrl+1..9 jump, and 9
+      // selects the last tab when there are fewer than nine (Explorer's behaviour).
+      if (activePane && event.ctrlKey && !event.altKey && !event.metaKey && event.key === 'Tab') {
+        event.preventDefault()
+        const ids = activePane.tabIds
+        if (ids.length > 1) {
+          const index = ids.indexOf(activePane.activeTabId)
+          const step = event.shiftKey ? -1 : 1
+          const next = ids[(index + step + ids.length) % ids.length]
+          if (next) activateTab(activePane.id, next)
+        }
+        return
+      }
+      if (
+        activePane &&
+        event.ctrlKey &&
+        !event.altKey &&
+        !event.metaKey &&
+        !event.shiftKey &&
+        /^[1-9]$/.test(event.key)
+      ) {
+        const ids = activePane.tabIds
+        const id = event.key === '9' ? ids[ids.length - 1] : ids[Number(event.key) - 1]
+        if (id) {
+          event.preventDefault()
+          activateTab(activePane.id, id)
+        }
+        return
+      }
+
       if (matchBinding(event, keys.search)) {
         event.preventDefault()
         setSearchOpen(true)
@@ -2333,6 +2363,7 @@ export default function App() {
     previewName,
     newTab,
     closeTab,
+    activateTab,
     openExternalPreview,
     undoLast,
   ])
