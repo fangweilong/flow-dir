@@ -214,6 +214,8 @@ export default function App() {
   const wsRef = useRef<Workspace | null>(null)
   const layoutRef = useRef<HTMLDivElement>(null)
   const settingsRef = useRef<Settings>(DEFAULT_SETTINGS)
+  const settingsSaveTimer = useRef<number | null>(null)
+  const pendingSettings = useRef<Settings | null>(null)
   const gens = useRef<Record<string, number>>({})
   const paneEls = useRef(new Map<string, HTMLDivElement>())
   const homeRef = useRef('C:\\')
@@ -627,22 +629,6 @@ export default function App() {
   }, [ws])
 
   useEffect(() => {
-    let disposed = false
-    let unlisten: (() => void) | undefined
-    void listen('flowdir:flush-layout', () => {
-      const current = wsRef.current
-      if (current) void layoutSave(toSnapshot(current)).catch(() => undefined)
-    }).then((fn) => {
-      if (disposed) fn()
-      else unlisten = fn
-    })
-    return () => {
-      disposed = true
-      unlisten?.()
-    }
-  }, [])
-
-  useEffect(() => {
     const announce = (status: UpdateStatus) => {
       if (!status.available || !status.latest) return
       setUpdateAvailable(status.latest)
@@ -845,8 +831,45 @@ export default function App() {
 
   const updateSettings = useCallback((next: Settings) => {
     setSettings(next)
-    void settingsSave(next).catch(() => undefined)
+    settingsRef.current = next
+    pendingSettings.current = next
+    if (settingsSaveTimer.current !== null) window.clearTimeout(settingsSaveTimer.current)
+    // Sliders emit one change per step; write once the values settle.
+    settingsSaveTimer.current = window.setTimeout(() => {
+      settingsSaveTimer.current = null
+      const snapshot = pendingSettings.current
+      pendingSettings.current = null
+      if (snapshot) void settingsSave(snapshot).catch(() => undefined)
+    }, 300)
   }, [])
+
+  /** Writes a pending change before the window closes; the debounce must not lose it. */
+  const flushSettings = useCallback(() => {
+    if (settingsSaveTimer.current !== null) {
+      window.clearTimeout(settingsSaveTimer.current)
+      settingsSaveTimer.current = null
+    }
+    const snapshot = pendingSettings.current
+    pendingSettings.current = null
+    if (snapshot) void settingsSave(snapshot).catch(() => undefined)
+  }, [])
+
+  useEffect(() => {
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    void listen('flowdir:flush-layout', () => {
+      const current = wsRef.current
+      if (current) void layoutSave(toSnapshot(current)).catch(() => undefined)
+      flushSettings()
+    }).then((fn) => {
+      if (disposed) fn()
+      else unlisten = fn
+    })
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [flushSettings])
 
   /** Column widths are global: every pane and tab shares them. */
   const setColWidths = useCallback(

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { appInfo, configPath, diagnosticsExport, everythingStatus, logDirPath, pickFolder, restartApp, updateCheck, updateInstall } from './api'
+import { appInfo, configPath, diagnosticsExport, everythingStatus, logDirPath, pickFolder, restartApp, settingsSave, updateCheck, updateInstall } from './api'
 import { makeT } from './i18n'
 import type { Key } from './i18n'
 import { DEFAULT_BINDINGS, SHORTCUTS, bindingFromEvent, formatBinding, resolveShortcuts, sameBinding } from './shortcuts'
@@ -681,7 +681,13 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
                 <span className="text-[0.65625rem] text-muted-2">{t('settings.gpuRestartHint')}</span>
                 <button
                   type="button"
-                  onClick={() => void restartApp().catch(() => undefined)}
+                  onClick={() => {
+                    // The debounced save may not have run yet; persist the latest snapshot
+                    // before the process restarts.
+                    void settingsSave(settings)
+                      .catch(() => undefined)
+                      .then(() => restartApp().catch(() => undefined))
+                  }}
                   className="shrink-0 rounded-md border border-line px-2 py-1 text-[0.6875rem] text-fg hover:bg-surface-3"
                 >
                   {t('settings.restartNow')}
