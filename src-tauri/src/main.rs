@@ -325,8 +325,10 @@ async fn path_is_dir(path: String) -> bool {
 }
 
 #[tauri::command]
-fn quick_access() -> Vec<fs::Place> {
-    fs::quick_access()
+async fn quick_access() -> Vec<fs::Place> {
+    tauri::async_runtime::spawn_blocking(fs::quick_access)
+        .await
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -368,13 +370,17 @@ fn settings_save(
 }
 
 #[tauri::command]
-fn watch_set(
+async fn watch_set(
     app: tauri::AppHandle,
-    watchers: tauri::State<'_, watch::Watchers>,
     pane_id: String,
     path: String,
 ) -> Result<(), ApiError> {
-    watch::set(&app, &watchers, pane_id, path)
+    tauri::async_runtime::spawn_blocking(move || {
+        let watchers = app.state::<watch::Watchers>();
+        watch::set(&app, &watchers, pane_id, path)
+    })
+    .await
+    .map_err(|e| ApiError::new("WATCH_TASK", e.to_string()))?
 }
 
 #[tauri::command]
@@ -614,8 +620,10 @@ fn set_app_theme(app: tauri::AppHandle, theme: String) {
 }
 
 #[tauri::command]
-fn everything_status() -> search::EverythingStatus {
-    search::everything_status()
+async fn everything_status() -> search::EverythingStatus {
+    tauri::async_runtime::spawn_blocking(search::everything_status)
+        .await
+        .unwrap_or_default()
 }
 
 #[tauri::command]

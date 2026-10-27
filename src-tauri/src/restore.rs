@@ -6,6 +6,7 @@
 //! the behaviour identical to Explorer's (including conflicts with existing files).
 
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::Serialize;
 use windows::core::GUID;
@@ -42,11 +43,31 @@ pub fn restore(paths: &[String]) -> Result<RestoreReport, ApiError> {
     if paths.is_empty() {
         return Err(ApiError::new("EMPTY", "no paths"));
     }
+    // A timed-out shell restore keeps running in its worker thread. Refusing a second
+    // call until that thread exits avoids two restores racing over the same bin items.
+    if BUSY.swap(true, Ordering::SeqCst) {
+        return Err(ApiError::new(
+            "RESTORE_BUSY",
+            "a previous restore is still running",
+        ));
+    }
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            BUSY.store(false, Ordering::SeqCst);
+        }
+    }
+    let guard = Guard;
     crate::shell_menu::run_offthread("flowdir-restore", std::time::Duration::from_secs(120), {
         let paths = paths.to_vec();
-        move || unsafe { restore_on_thread(&paths) }
+        move || {
+            let _guard = guard;
+            unsafe { restore_on_thread(&paths) }
+        }
     })?
 }
+
+static BUSY: AtomicBool = AtomicBool::new(false);
 
 unsafe fn restore_on_thread(paths: &[String]) -> Result<RestoreReport, ApiError> {
     unsafe {
@@ -184,9 +205,13 @@ fn join(dir: &str, name: &str) -> String {
 mod tests {
     use super::*;
 
+    /// `restore` is deliberately single-flight; the tests share that guard.
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// End to end: recycle a file through the shell, then restore it by its original path.
     #[test]
     fn restores_a_recycled_file() {
+        let _serial = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("flowdir-restore-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -208,6 +233,7 @@ mod tests {
 
     #[test]
     fn unknown_path_is_reported_missing() {
+        let _serial = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let report = restore(&["C:\\flowdir\\no-such-file.txt".to_string()]).expect("restore call");
         assert_eq!(report.missing.len(), 1);
         assert!(report.restored.is_empty());

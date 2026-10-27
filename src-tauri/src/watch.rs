@@ -38,14 +38,17 @@ pub fn set<R: Runtime>(
     pane_id: String,
     path: String,
 ) -> Result<(), ApiError> {
-    let mut map = watchers.0.lock().unwrap();
-    map.remove(&pane_id);
-
     let folder = FsPath::new(&path);
     let git_dir = metadata_dir(folder);
     // Case differs when the tab path and the notify reply were produced by different
     // sources; lowercasing both keeps the event split stable on the same volume.
     let git_dir_key = git_dir.as_ref().map(|dir| dir.to_string_lossy().to_lowercase());
+    // A pane showing `.git/objects` is inside the metadata directory: there, every
+    // change is a normal content change, so the git-only shortcut must be disabled.
+    let watched_key = path.to_lowercase();
+    let inside_git = git_dir_key.as_ref().is_some_and(|dir| {
+        watched_key == *dir || watched_key.starts_with(&format!("{dir}\\"))
+    });
     let handle = app.clone();
     let id = pane_id.clone();
     let watched_path = path.clone();
@@ -67,13 +70,14 @@ pub fn set<R: Runtime>(
         };
         // Index and ref writes (`git add`, `git commit`) change badges only: they must not
         // rescan a folder whose contents did not move.
-        let git_only = git_dir_key.as_ref().is_some_and(|dir| {
-            !event.paths.is_empty()
-                && event.paths.iter().all(|path| {
-                    let path = path.to_string_lossy().to_lowercase();
-                    path == *dir || path.starts_with(&format!("{dir}\\"))
-                })
-        });
+        let git_only = !inside_git
+            && git_dir_key.as_ref().is_some_and(|dir| {
+                !event.paths.is_empty()
+                    && event.paths.iter().all(|path| {
+                        let path = path.to_string_lossy().to_lowercase();
+                        path == *dir || path.starts_with(&format!("{dir}\\"))
+                    })
+            });
         let payload = DirChanged {
             pane_id: id.clone(),
             structural: is_structural(event.kind),
@@ -86,6 +90,8 @@ pub fn set<R: Runtime>(
     })
     .map_err(|e| ApiError::new("WATCH", e.to_string()))?;
 
+    // Watcher construction and `watch()` can block on a dead SMB share; only the map
+    // insert is serialized, so one broken pane cannot freeze every other pane.
     watcher
         .watch(folder, RecursiveMode::NonRecursive)
         .map_err(|e| ApiError::new("WATCH", e.to_string()))?;
@@ -95,6 +101,7 @@ pub fn set<R: Runtime>(
         let _ = watcher.watch(dir, RecursiveMode::NonRecursive);
     }
 
+    let mut map = watchers.0.lock().unwrap();
     map.insert(pane_id, watcher);
     Ok(())
 }

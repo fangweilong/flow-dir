@@ -183,8 +183,11 @@ unsafe fn build_items(
         for path in paths {
             let wide = HSTRING::from(path);
             let mut pidl: *mut windows::Win32::UI::Shell::Common::ITEMIDLIST = std::ptr::null_mut();
-            SHParseDisplayName(&wide, None::<&IBindCtx>, &mut pidl, 0, None)
-                .map_err(|e| ApiError::from_windows(path, e.code().0))?;
+            if let Err(err) = SHParseDisplayName(&wide, None::<&IBindCtx>, &mut pidl, 0, None) {
+                // The guard was not built yet; free every PIDL parsed so far.
+                drop(PidlGuard(pidls));
+                return Err(ApiError::from_windows(path, err.code().0));
+            }
             pidls.push(pidl as *const _);
         }
         let cleanup = PidlGuard(pidls.clone());

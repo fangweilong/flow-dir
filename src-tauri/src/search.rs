@@ -81,7 +81,7 @@ pub fn run(
     }
 
     if prefer_everything {
-        if let Ok(items) = everything_search(&root, &needle, limit, hidden) {
+        if let Ok(items) = everything_search(&root, &needle, limit, hidden, &cancel) {
             let _ = on_batch.send(SearchBatch {
                 gen,
                 provider: "everything".into(),
@@ -196,7 +196,7 @@ pub fn run(
     });
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct EverythingStatus {
     pub usable: bool,
@@ -267,11 +267,45 @@ fn under_root(path: &str, root: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('\\'))
 }
 
+/// Everything reports only the hit's own attributes; a visible file inside a hidden
+/// folder must still be filtered out when hidden entries are off.
+fn has_hidden_ancestor(
+    path: &str,
+    root: &str,
+    cache: &mut std::collections::HashMap<String, bool>,
+) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    let root_key = root.trim_end_matches(['\\', '/']).to_lowercase();
+    let mut current = std::path::Path::new(path).parent();
+    while let Some(dir) = current {
+        let key = dir.to_string_lossy().to_lowercase();
+        if let Some(hidden) = cache.get(&key) {
+            if *hidden {
+                return true;
+            }
+        } else {
+            let hidden = std::fs::metadata(dir)
+                .map(|meta| meta.file_attributes() & (ATTR_HIDDEN | ATTR_SYSTEM) != 0)
+                .unwrap_or(false);
+            cache.insert(key.clone(), hidden);
+            if hidden {
+                return true;
+            }
+        }
+        if key == root_key {
+            break;
+        }
+        current = dir.parent();
+    }
+    false
+}
+
 fn everything_search(
     root: &str,
     needle: &str,
     limit: usize,
     hidden: bool,
+    cancel: &AtomicBool,
 ) -> Result<Vec<SearchItem>, ApiError> {
     // Escape hatch used by the verification harness and by users who prefer the
     // built-in scanner even when Everything is running.
@@ -306,7 +340,12 @@ fn everything_search(
         .map_err(|e| ApiError::new("EVERYTHING", e.to_string()))?;
 
     let mut items = Vec::new();
+    // Ancestor attributes are queried once per directory, not once per hit.
+    let mut ancestor_cache: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
     for item in list.iter() {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
         let Some(name) = item.get_string(RequestFlags::FileName) else {
             continue;
         };
@@ -325,6 +364,9 @@ fn everything_search(
         }
         let attrs = item.get_u32(RequestFlags::Attributes).unwrap_or(0);
         if !hidden && attrs & (ATTR_HIDDEN | ATTR_SYSTEM) != 0 {
+            continue;
+        }
+        if !hidden && has_hidden_ancestor(&path, root, &mut ancestor_cache) {
             continue;
         }
         let is_dir = attrs & 0x10 != 0;

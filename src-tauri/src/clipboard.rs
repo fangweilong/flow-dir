@@ -1,11 +1,13 @@
 use std::ptr;
 
 use windows::core::{w, BOOL};
-use windows::Win32::Foundation::{HANDLE, POINT};
+use windows::Win32::Foundation::{GlobalFree, HANDLE, POINT};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
 };
-use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::System::Memory::{
+    GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
+};
 use windows::Win32::System::Ole::CF_HDROP;
 use windows::Win32::UI::Shell::DROPFILES;
 
@@ -36,6 +38,7 @@ pub fn copy_paths(paths: &[String], cut: bool) -> Result<(), ApiError> {
             let hglobal = GlobalAlloc(GMEM_MOVEABLE, size)?;
             let target = GlobalLock(hglobal);
             if target.is_null() {
+                let _ = GlobalFree(Some(hglobal));
                 return Err(windows::core::Error::from_thread());
             }
             ptr::write_bytes(target as *mut u8, 0, size);
@@ -55,7 +58,11 @@ pub fn copy_paths(paths: &[String], cut: bool) -> Result<(), ApiError> {
                 wide.len(),
             );
             let _ = GlobalUnlock(hglobal);
-            SetClipboardData(CF_HDROP.0 as u32, Some(HANDLE(hglobal.0)))?;
+            // SetClipboardData takes ownership only on success; otherwise the block leaks.
+            if let Err(err) = SetClipboardData(CF_HDROP.0 as u32, Some(HANDLE(hglobal.0))) {
+                let _ = GlobalFree(Some(hglobal));
+                return Err(err);
+            }
 
             let effect_format = RegisterClipboardFormatW(w!("Preferred DropEffect"));
             if effect_format != 0 {
@@ -66,10 +73,15 @@ pub fn copy_paths(paths: &[String], cut: bool) -> Result<(), ApiError> {
                 };
                 let hmem = GlobalAlloc(GMEM_MOVEABLE, std::mem::size_of::<u32>())?;
                 let ptr_effect = GlobalLock(hmem);
-                if !ptr_effect.is_null() {
+                if ptr_effect.is_null() {
+                    let _ = GlobalFree(Some(hmem));
+                } else {
                     ptr::write(ptr_effect as *mut u32, effect);
                     let _ = GlobalUnlock(hmem);
-                    let _ = SetClipboardData(effect_format, Some(HANDLE(hmem.0)));
+                    if let Err(err) = SetClipboardData(effect_format, Some(HANDLE(hmem.0))) {
+                        let _ = GlobalFree(Some(hmem));
+                        return Err(err);
+                    }
                 }
             }
             Ok(())
@@ -112,14 +124,14 @@ pub fn read_paths() -> Result<Clip, ApiError> {
             let format = RegisterClipboardFormatW(w!("Preferred DropEffect"));
             if format != 0 {
                 if let Ok(effect) = GetClipboardData(format) {
-                    let ptr = windows::Win32::System::Memory::GlobalLock(
-                        windows::Win32::Foundation::HGLOBAL(effect.0),
-                    );
-                    if !ptr.is_null() {
-                        cut = (ptr as *const u32).read_unaligned() == DROPEFFECT_MOVE;
-                        let _ = windows::Win32::System::Memory::GlobalUnlock(
-                            windows::Win32::Foundation::HGLOBAL(effect.0),
-                        );
+                    let hglobal = windows::Win32::Foundation::HGLOBAL(effect.0);
+                    // Read the drop effect only when the block can actually hold one.
+                    if GlobalSize(hglobal) >= std::mem::size_of::<u32>() {
+                        let ptr = windows::Win32::System::Memory::GlobalLock(hglobal);
+                        if !ptr.is_null() {
+                            cut = (ptr as *const u32).read_unaligned() == DROPEFFECT_MOVE;
+                            let _ = windows::Win32::System::Memory::GlobalUnlock(hglobal);
+                        }
                     }
                 }
             }

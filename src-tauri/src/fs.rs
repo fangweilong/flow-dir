@@ -200,6 +200,12 @@ fn scan(
                 // Keep the offset advance below reachable: a `continue` here would
                 // re-read the same record forever.
                 if (show_hidden || !hidden) && (is_dir || !dirs_only) {
+                    // One extra matching record proves `truncated`; a folder holding
+                    // exactly `limit` entries must not claim it was cut short.
+                    if entries.len() >= limit {
+                        truncated = true;
+                        break 'scan;
+                    }
                     let name = std::ffi::OsString::from_wide(name_slice)
                         .to_string_lossy()
                         .into_owned();
@@ -218,11 +224,6 @@ fn scan(
                 break;
             }
             offset += info.NextEntryOffset as usize;
-
-            if entries.len() >= limit {
-                truncated = true;
-                break 'scan;
-            }
         }
         // One call per buffer chunk: enough for a progress readout without flooding IPC.
         progress(entries.len());
