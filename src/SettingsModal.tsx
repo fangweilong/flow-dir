@@ -5,6 +5,7 @@ import type { Key } from './i18n'
 import { DEFAULT_BINDINGS, SHORTCUTS, bindingFromEvent, formatBinding, resolveShortcuts, sameBinding } from './shortcuts'
 import type { ShortcutId } from './shortcuts'
 import type { AppInfo, EverythingStatus, Lang, Theme, UpdateStatus } from './types'
+import { THEMES, themeIsDark } from './themes'
 import type { LogLevel, Settings } from './persist'
 import {
   DEFAULT_FONT_FAMILY,
@@ -42,7 +43,6 @@ const SECTIONS: { id: SectionId; label: Key }[] = [
   { id: 'about', label: 'settings.about' },
 ]
 
-const THEMES: Theme[] = ['system', 'light', 'dark']
 const UPDATE_INTERVALS = [0, 6, 12, 24, 72]
 const LOG_LEVELS: LogLevel[] = ['error', 'warn', 'info', 'debug']
 
@@ -85,6 +85,103 @@ function ToggleRow({
         />
       </button>
     </div>
+  )
+}
+
+/**
+ * Miniature file list for the theme picker. The real tokens paint it, so the swatch
+ * cannot drift from the palette; `system` splits into the two base schemes.
+ */
+function ThemeSwatch({ theme }: { theme: Theme }) {
+  if (theme === 'system') {
+    return (
+      <div className="grid h-[3.5rem] grid-cols-2 gap-px overflow-hidden rounded-md border border-line bg-line">
+        <ThemeSwatchSurface theme="light" />
+        <ThemeSwatchSurface theme="dark" />
+      </div>
+    )
+  }
+  return (
+    <div className="h-[3.5rem] overflow-hidden rounded-md border border-line">
+      <ThemeSwatchSurface theme={theme} />
+    </div>
+  )
+}
+
+function ThemeSwatchSurface({ theme }: { theme: Exclude<Theme, 'system'> }) {
+  const dark = themeIsDark(theme, false)
+  return (
+    <div data-theme={theme} className={`h-full ${dark ? 'dark' : ''}`}>
+      <div className="flex h-full flex-col bg-surface">
+        <div className="flex h-3 shrink-0 items-center gap-0.5 border-b border-line bg-surface-2 px-1.5">
+          <span className="h-1 w-1 rounded-full bg-muted-2" />
+          <span className="h-1 w-1 rounded-full bg-muted-2" />
+          <span className="ml-auto h-1 w-5 rounded-full bg-surface-3" />
+        </div>
+        <div className="min-h-0 flex-1 px-1.5 py-1">
+          <div className="flex items-center gap-1 border-b border-row-line py-[0.125rem]">
+            <span className="h-1.5 w-1.5 rounded-[1px] bg-amber-400" />
+            <span className="h-1 w-7 rounded-full bg-fg/60" />
+            <span className="ml-auto h-1 w-3 rounded-full bg-muted-2/70" />
+          </div>
+          <div className="my-[0.125rem] flex items-center gap-1 rounded-[2px] bg-sel px-1 py-[0.125rem]">
+            <span className="h-1.5 w-1.5 rounded-[1px] bg-blue-400" />
+            <span className="h-1 w-9 rounded-full bg-fg-strong/80" />
+          </div>
+          <div className="flex items-center gap-1 border-b border-row-line py-[0.125rem]">
+            <span className="h-1.5 w-1.5 rounded-[1px] bg-sky-400" />
+            <span className="h-1 w-6 rounded-full bg-fg/60" />
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ActiveCheck() {
+  return (
+    <svg aria-hidden viewBox="0 0 16 16" className="ml-auto h-3 w-3 shrink-0 text-blue-500">
+      <path
+        d="m3.5 8.5 3 3 6-7"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+function ThemeCard({
+  theme,
+  label,
+  active,
+  onSelect,
+}: {
+  theme: Theme
+  label: string
+  active: boolean
+  onSelect: () => void
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      title={label}
+      onClick={onSelect}
+      className={`rounded-lg border p-1.5 text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-400 ${
+        active ? 'border-blue-400 bg-surface-3/60' : 'border-line hover:border-line-strong hover:bg-surface-2'
+      }`}
+    >
+      <ThemeSwatch theme={theme} />
+      <span className="mt-1.5 flex items-center gap-1 px-0.5">
+        <span className={`truncate text-[0.6875rem] ${active ? 'font-medium text-fg-strong' : 'text-muted'}`}>
+          {label}
+        </span>
+        {active && <ActiveCheck />}
+      </span>
+    </button>
   )
 }
 
@@ -172,9 +269,10 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
       t('settings.general'),
       t('settings.appearance'),
       t('settings.theme'),
-      t('settings.themeSystem'),
-      t('settings.themeLight'),
-      t('settings.themeDark'),
+      ...THEMES.map((entry) => t(entry.label)),
+      t('settings.themeSystemHint'),
+      t('settings.themeLightGroup'),
+      t('settings.themeDarkGroup'),
       t('settings.font'),
       t('settings.fontSize'),
       t('settings.fontCustom'),
@@ -339,9 +437,6 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
     return () => window.removeEventListener('keydown', onKey, true)
   }, [capturing, keys, settings, onChange, t])
 
-  const themeLabel = (theme: Theme) =>
-    theme === 'system' ? t('settings.themeSystem') : theme === 'light' ? t('settings.themeLight') : t('settings.themeDark')
-
   const updateMessage = checking
     ? t('settings.updateChecking')
     : update?.error
@@ -417,24 +512,59 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
             {noMatch && <div className="text-[0.71875rem] text-muted-2">{t('settings.noMatch')}</div>}
           <section className={sectionClass('general')}>
             <h2 className="pb-2 text-[0.6875rem] font-semibold tracking-wide text-muted-2">{t('settings.appearance')}</h2>
-            <div className="flex items-center justify-between rounded-lg border border-line px-3 py-2">
+            <div className="rounded-lg border border-line px-3 py-2.5">
               <span className="text-[0.75rem] text-fg">{t('settings.theme')}</span>
-              <div className="flex gap-0.5 rounded-md bg-surface-3 p-0.5">
-                {THEMES.map((theme) => (
-                  <button
-                    key={theme}
-                    type="button"
-                    onClick={() => onChange({ ...settings, theme })}
-                    className={`rounded px-2.5 py-1 text-[0.71875rem] ${
-                      settings.theme === theme
-                        ? 'bg-surface font-medium text-fg-strong shadow-sm'
-                        : 'text-muted hover:text-fg'
+              <button
+                type="button"
+                aria-pressed={settings.theme === 'system'}
+                onClick={() => onChange({ ...settings, theme: 'system' })}
+                className={`mt-2 flex w-full items-center gap-3 rounded-lg border p-1.5 text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-400 ${
+                  settings.theme === 'system'
+                    ? 'border-blue-400 bg-surface-3/60'
+                    : 'border-line hover:border-line-strong hover:bg-surface-2'
+                }`}
+              >
+                <div className="w-[8.5rem] shrink-0">
+                  <ThemeSwatch theme="system" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div
+                    className={`text-[0.6875rem] ${
+                      settings.theme === 'system' ? 'font-medium text-fg-strong' : 'text-muted'
                     }`}
                   >
-                    {themeLabel(theme)}
-                  </button>
-                ))}
-              </div>
+                    {t('settings.themeSystem')}
+                  </div>
+                  <div className="mt-0.5 truncate text-[0.625rem] text-muted-2">
+                    {t('settings.themeSystemHint')}
+                  </div>
+                </div>
+                {settings.theme === 'system' && <ActiveCheck />}
+              </button>
+
+              {(
+                [
+                  ['settings.themeLightGroup', false],
+                  ['settings.themeDarkGroup', true],
+                ] as const
+              ).map(([label, dark]) => (
+                <div key={label} className="mt-3">
+                  <div className="mb-1.5 text-[0.625rem] font-medium tracking-wide text-muted-2">
+                    {t(label)}
+                  </div>
+                  <div className="grid grid-cols-[repeat(auto-fill,minmax(9rem,1fr))] gap-2">
+                    {THEMES.filter((entry) => entry.dark === dark).map((entry) => (
+                      <ThemeCard
+                        key={entry.id}
+                        theme={entry.id}
+                        label={t(entry.label)}
+                        active={settings.theme === entry.id}
+                        onSelect={() => onChange({ ...settings, theme: entry.id })}
+                      />
+                    ))}
+                  </div>
+                </div>
+              ))}
             </div>
           </section>
 

@@ -25,7 +25,17 @@ export type Drive = {
 }
 export type Place = { key: string; path: string }
 export type Lang = 'zh-CN' | 'en'
-export type Theme = 'system' | 'light' | 'dark'
+/** Theme ids; labels and schemes live in `themes.ts`, palettes in `styles.css`. */
+export type Theme =
+  | 'system'
+  | 'light'
+  | 'sepia'
+  | 'mist'
+  | 'dark'
+  | 'midnight'
+  | 'graphite'
+  | 'nord'
+  | 'forest'
 export type Dependency = { name: string; version: string; license: string; kind: string }
 export type Clip = { paths: string[]; cut: boolean }
 export type EverythingStatus = { usable: boolean; version: string | null; reason: string | null }

@@ -15,6 +15,7 @@ import { BatchRenameDialog } from './BatchRenameDialog'
 import { ConfirmDialog } from './ConfirmDialog'
 import { PreviewPanel } from './PreviewPanel'
 import { SearchOverlay } from './SearchOverlay'
+import { themeIsDark } from './themes'
 import { SettingsModal } from './SettingsModal'
 import { SidebarTree } from './SidebarTree'
 import {
@@ -697,8 +698,15 @@ export default function App() {
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)')
     const apply = () => {
-      const dark = settings.theme === 'dark' || (settings.theme === 'system' && media.matches)
-      document.documentElement.classList.toggle('dark', dark)
+      const root = document.documentElement
+      const dark = themeIsDark(settings.theme, media.matches)
+      // `system` leaves the attribute unset so the base light/dark tokens apply; every
+      // explicit theme tags the root and styles.css resolves the full palette from it.
+      if (settings.theme === 'system') delete root.dataset.theme
+      else root.dataset.theme = settings.theme
+      root.classList.toggle('dark', dark)
+      // Native form controls and the window's own chrome follow this, not our tokens.
+      root.style.colorScheme = dark ? 'dark' : 'light'
     }
     apply()
     void setAppTheme(settings.theme).catch(() => undefined)

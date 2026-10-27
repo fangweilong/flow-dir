@@ -194,7 +194,7 @@ export function BatchRenameDialog({ names, lang, onConfirm, onClose }: Props) {
           {plan.map((pair, index) => (
             <div
               key={`${pair.from}-${index}`}
-              className={`grid grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-line/60 px-2 py-1 text-[0.6875rem] last:border-b-0 ${
+              className={`grid grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-row-line px-2 py-1 text-[0.6875rem] last:border-b-0 ${
                 invalid.has(index) ? 'text-red-600 dark:text-red-300' : 'text-fg'
               }`}
             >

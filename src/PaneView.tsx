@@ -1195,7 +1195,7 @@ export function PaneView({
                   }}
                   title={drive.available ? drive.root : `${drive.root} · ${t('drive.unavailable')}`}
                   style={{ height: rowHeight, gridTemplateColumns: driveGrid }}
-                  className={`grid cursor-default items-center gap-2 border-b border-line/60 px-1.5 hover:bg-surface-3 ${
+                  className={`grid cursor-default items-center gap-2 border-b border-row-line px-1.5 hover:bg-surface-3 ${
                     drive.available ? '' : 'text-muted-2'
                   }`}
                 >
@@ -1262,7 +1262,7 @@ export function PaneView({
                   onRowContextMenu(entry, pointOf(e))
                 }}
                 onDoubleClick={() => activate(entry)}
-                className={`absolute left-0 top-0 grid w-full items-center border-b border-line/60 pr-1.5 ${
+                className={`absolute left-0 top-0 grid w-full items-center border-b border-row-line pr-1.5 ${
                   isSelected ? 'bg-sel text-fg-strong' : 'hover:bg-surface-3'
                 }`}
                 style={{ height: rowHeight, transform: `translateY(${vi.start}px)`, gridTemplateColumns: grid }}

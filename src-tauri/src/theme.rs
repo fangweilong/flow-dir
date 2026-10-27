@@ -64,28 +64,47 @@ fn system_is_dark() -> bool {
     }
 }
 
-/// Fill for the window behind the WebView2 surface, mirroring `--color-surface` in
-/// `styles.css`. A parked or still-loading webview paints nothing, so this is what the
-/// window shows on restore; the default erase is white in either theme.
-pub fn surface(theme: &str) -> tauri::window::Color {
-    let dark = match theme {
-        "dark" => true,
-        "light" => false,
-        _ => system_is_dark(),
-    };
-    if dark {
-        tauri::window::Color(0x0f, 0x17, 0x2a, 0xff)
-    } else {
-        tauri::window::Color(0xff, 0xff, 0xff, 0xff)
+/// Explicit palettes: `(is_dark, surface rgb)`. Mirrors the `--color-surface` values in
+/// `styles.css`; keep the ids in sync with `src/themes.ts`.
+fn palette(theme: &str) -> Option<(bool, u32)> {
+    match theme {
+        "light" => Some((false, 0xff_ffff)),
+        "sepia" => Some((false, 0xfb_f7ef)),
+        "mist" => Some((false, 0xf7_fbfa)),
+        "dark" => Some((true, 0x0f_172a)),
+        "midnight" => Some((true, 0x07_0a10)),
+        "graphite" => Some((true, 0x18_191b)),
+        "nord" => Some((true, 0x2e_3440)),
+        "forest" => Some((true, 0x0e_1713)),
+        _ => None,
     }
 }
 
-/// Applies `theme` (`system` / `light` / `dark`) to the process and `hwnd`.
+/// Fill for the window behind the WebView2 surface, mirroring `--color-surface` in
+/// `styles.css`. A parked or still-loading webview paints nothing, so this is what the
+/// window shows on restore; `system` falls back to the base light/dark surface.
+pub fn surface(theme: &str) -> tauri::window::Color {
+    let (_, rgb) = palette(theme).unwrap_or_else(|| {
+        if system_is_dark() {
+            (true, 0x0f_172a)
+        } else {
+            (false, 0xff_ffff)
+        }
+    });
+    tauri::window::Color(
+        ((rgb >> 16) & 0xff) as u8,
+        ((rgb >> 8) & 0xff) as u8,
+        (rgb & 0xff) as u8,
+        0xff,
+    )
+}
+
+/// Applies `theme` (`system` or an explicit palette id) to the process and `hwnd`.
 pub fn apply(hwnd: Option<HWND>, theme: &str) {
-    let mode = match theme {
-        "dark" => MODE_DARK,
-        "light" => MODE_LIGHT,
-        _ => MODE_DEFAULT,
+    let mode = match palette(theme) {
+        Some((true, _)) => MODE_DARK,
+        Some((false, _)) => MODE_LIGHT,
+        None => MODE_DEFAULT,
     };
     CURRENT.store(mode, Ordering::Relaxed);
     let apis = apis();

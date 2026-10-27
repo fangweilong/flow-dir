@@ -13,9 +13,18 @@
   --color-muted: #64748b;
   --color-muted-2: #94a3b8;
   --color-sel: #dbeafe;
+  /* List row divider, kept separate from `line` so rows can read clearly on dark surfaces. */
+  --color-row-line: #e6ecf4;
 }
 
-.dark {
+/*
+ * Palettes. `system` resolves to the base light/dark tokens below; every explicit id
+ * repeats the full token set so a themed subtree (the settings picker previews) does not
+ * depend on the app-level `.dark` class. Keep ids in sync with `src/themes.ts` and
+ * `theme::palette` in src-tauri/src/theme.rs, including the surface fill there.
+ */
+.dark,
+[data-theme='dark'] {
   --color-surface: #0f172a;
   --color-surface-2: #0b1220;
   --color-surface-3: #1e293b;
@@ -26,6 +35,111 @@
   --color-muted: #94a3b8;
   --color-muted-2: #64748b;
   --color-sel: #1e3a8a;
+  --color-row-line: #27364c;
+}
+
+[data-theme='light'] {
+  --color-surface: #ffffff;
+  --color-surface-2: #f8fafc;
+  --color-surface-3: #f1f5f9;
+  --color-line: #e2e8f0;
+  --color-line-strong: #cbd5e1;
+  --color-fg: #334155;
+  --color-fg-strong: #0f172a;
+  --color-muted: #64748b;
+  --color-muted-2: #94a3b8;
+  --color-sel: #dbeafe;
+  --color-row-line: #e6ecf4;
+}
+
+/* Warm paper: lower contrast than pure white, amber selection. */
+[data-theme='sepia'] {
+  --color-surface: #fbf7ef;
+  --color-surface-2: #f6f0e4;
+  --color-surface-3: #ece3d2;
+  --color-line: #e2d7c4;
+  --color-line-strong: #cbbca2;
+  --color-fg: #4b4336;
+  --color-fg-strong: #2b251c;
+  --color-muted: #766c5c;
+  --color-muted-2: #a2957f;
+  --color-sel: #efdfbe;
+  --color-row-line: #e9dfcd;
+}
+
+/* Cool mist: a green-cast daylight palette that stays quiet next to `light`. */
+[data-theme='mist'] {
+  --color-surface: #f7fbfa;
+  --color-surface-2: #eef6f4;
+  --color-surface-3: #e2efeb;
+  --color-line: #d5e5e0;
+  --color-line-strong: #b7cec8;
+  --color-fg: #31453f;
+  --color-fg-strong: #13231e;
+  --color-muted: #5e756e;
+  --color-muted-2: #93a9a2;
+  --color-sel: #cfe8e0;
+  --color-row-line: #e1eeea;
+}
+
+/* Ink black with an indigo cast, for OLED panels. */
+[data-theme='midnight'] {
+  --color-surface: #070a10;
+  --color-surface-2: #05070b;
+  --color-surface-3: #141b27;
+  --color-line: #1c2533;
+  --color-line-strong: #2c3a4e;
+  --color-fg: #c5cedd;
+  --color-fg-strong: #f0f4fa;
+  --color-muted: #8695a9;
+  --color-muted-2: #5b6a7f;
+  --color-sel: #16305a;
+  --color-row-line: #222f42;
+}
+
+/* Neutral charcoal: no hue cast, so file-type colors carry the screen. */
+[data-theme='graphite'] {
+  --color-surface: #18191b;
+  --color-surface-2: #131416;
+  --color-surface-3: #26282b;
+  --color-line: #2e3034;
+  --color-line-strong: #404348;
+  --color-fg: #d3d5d9;
+  --color-fg-strong: #f5f6f8;
+  --color-muted: #9da1a8;
+  --color-muted-2: #6d7178;
+  --color-sel: #3d4148;
+  --color-row-line: #33363a;
+}
+
+/* Nord: Polar Night surfaces with Frost-blue selection. */
+[data-theme='nord'] {
+  --color-surface: #2e3440;
+  --color-surface-2: #272c36;
+  --color-surface-3: #3b4252;
+  --color-line: #3f4757;
+  --color-line-strong: #4c566a;
+  --color-fg: #d8dee9;
+  --color-fg-strong: #eceff4;
+  --color-muted: #a3adbf;
+  --color-muted-2: #7b869b;
+  --color-sel: #40557a;
+  --color-row-line: #465063;
+}
+
+/* Pine: deep green-black for long sessions in dim rooms. */
+[data-theme='forest'] {
+  --color-surface: #0e1713;
+  --color-surface-2: #0a110e;
+  --color-surface-3: #1a2a22;
+  --color-line: #22352b;
+  --color-line-strong: #34513f;
+  --color-fg: #c6d7ce;
+  --color-fg-strong: #edf6f1;
+  --color-muted: #8aa396;
+  --color-muted-2: #5f7669;
+  --color-sel: #1f4a37;
+  --color-row-line: #263b30;
 }
 
 /*
@@ -76,14 +190,15 @@ body {
   width: 0.625rem;
   height: 0.625rem;
 }
+/* Derived from the palette so the thumb stays visible on every surface, dark included. */
 ::-webkit-scrollbar-thumb {
-  background: rgb(0 0 0 / 0.18);
+  background: color-mix(in srgb, var(--color-muted-2) 55%, transparent);
   border-radius: 999px;
   border: 2px solid transparent;
   background-clip: content-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgb(0 0 0 / 0.3);
+  background: color-mix(in srgb, var(--color-muted-2) 80%, transparent);
   background-clip: content-box;
 }
 ::-webkit-scrollbar-track {

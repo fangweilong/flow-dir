@@ -238,7 +238,7 @@ export function SearchOverlay({
                 onActivate(item)
                 onClose()
               }}
-              className={`flex w-full items-center gap-2 border-b border-line/60 px-3 py-1.5 text-left ${
+              className={`flex w-full items-center gap-2 border-b border-row-line px-3 py-1.5 text-left ${
                 index === activeIndex ? 'bg-sel' : 'hover:bg-surface-3'
               }`}
             >
