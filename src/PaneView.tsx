@@ -128,6 +128,8 @@ type Props = {
   onDriveRowMenu: (drive: Drive, point: MenuPoint) => void
   onProperties: (names: string[]) => void
   onRename: (name: string) => void
+  /** Opens the batch dialog for a multi-selection. */
+  onRenameMany: (names: string[]) => void
   onDelete: (names: string[], permanent: boolean) => void
   onPaste: () => void
   onRefresh: () => void
@@ -183,6 +185,7 @@ export function PaneView({
   onDriveRowMenu,
   onProperties,
   onRename,
+  onRenameMany,
   onDelete,
   onPaste,
   onRefresh,
@@ -689,6 +692,10 @@ export function PaneView({
     }
     if (matchBinding(ev, keys.rename)) {
       ev.preventDefault()
+      if (visibleSelected.size > 1) {
+        onRenameMany(Array.from(visibleSelected))
+        return
+      }
       const target =
         visibleSelected.size === 1 ? Array.from(visibleSelected)[0] : view[anchorIdx]?.name
       if (target) onRename(target)

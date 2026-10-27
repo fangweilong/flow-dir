@@ -161,6 +161,8 @@ pub struct Request {
     pub sources: Vec<String>,
     pub target_dir: Option<String>,
     pub new_name: Option<String>,
+    /// One new name per source for a batch rename; mutually exclusive with `new_name`.
+    pub new_names: Option<Vec<String>>,
     pub permanent: bool,
 }
 
@@ -175,6 +177,21 @@ pub fn start(
         .ok_or_else(|| ApiError::new("BAD_KIND", format!("unknown operation {}", request.kind)))?;
     if request.sources.is_empty() {
         return Err(ApiError::new("EMPTY", "no source paths"));
+    }
+    if kind == Kind::Rename {
+        match &request.new_names {
+            Some(names) if names.len() != request.sources.len() => {
+                return Err(ApiError::new(
+                    "BAD_ARGS",
+                    "batch rename needs one new name per source",
+                ));
+            }
+            Some(_) => {}
+            None if request.new_name.is_none() => {
+                return Err(ApiError::new("BAD_ARGS", "rename needs newName"));
+            }
+            None => {}
+        }
     }
     let token = state.begin(&request.op_id);
     let op_id = request.op_id.clone();
@@ -445,7 +462,7 @@ fn queue(
         let new_name = request.new_name.as_deref().map(HSTRING::from);
         let mut queued_count = 0;
 
-        for path in &request.sources {
+        for (index, path) in request.sources.iter().enumerate() {
             let item = match shell_item(path) {
                 Ok(item) => item,
                 // One unresolvable path (deleted meanwhile, unparsable) must not abort the
@@ -488,13 +505,20 @@ fn queue(
                     ),
                 },
                 Kind::Delete => operation.DeleteItem(&item, None::<&IFileOperationProgressSink>),
-                Kind::Rename => operation.RenameItem(
-                    &item,
-                    new_name
+                Kind::Rename => {
+                    let name = request
+                        .new_names
                         .as_ref()
-                        .ok_or_else(|| ApiError::new("BAD_ARGS", "rename needs newName"))?,
-                    None::<&IFileOperationProgressSink>,
-                ),
+                        .and_then(|names| names.get(index))
+                        .map(HSTRING::from)
+                        .or_else(|| request.new_name.as_ref().map(HSTRING::from))
+                        .ok_or_else(|| ApiError::new("BAD_ARGS", "rename needs newName"))?;
+                    operation.RenameItem(
+                        &item,
+                        &name,
+                        None::<&IFileOperationProgressSink>,
+                    )
+                }
                 Kind::NewDir => unreachable!(),
             };
             if let Err(e) = queued {
@@ -751,6 +775,66 @@ mod tests {
         assert!(!outcome.aborted);
     }
 
+    #[test]
+    fn batch_rename_rejects_mismatched_names() {
+        let channel = Channel::new(|_| Ok(()));
+        let request = Request {
+            op_id: "bad-batch".into(),
+            kind: "rename".into(),
+            sources: vec!["a".into(), "b".into()],
+            target_dir: None,
+            new_name: None,
+            new_names: Some(vec!["one".into()]),
+            permanent: false,
+        };
+        let error = start(&OpState::default(), request, None, channel).unwrap_err();
+        assert_eq!(error.code, "BAD_ARGS");
+    }
+
+    /// One IFileOperation renames the whole selection and reports per-item progress.
+    #[test]
+    fn batch_rename_renames_every_source() {
+        let dir = temp_dir("batch-rename");
+        let first = dir.join("first.txt");
+        let second = dir.join("second.txt");
+        fs::write(&first, b"a").unwrap();
+        fs::write(&second, b"b").unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let channel = Channel::new(move |body| {
+            if let tauri::ipc::InvokeResponseBody::Json(text) = body {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if value["done"] == true {
+                        let _ = tx.send(value);
+                    }
+                }
+            }
+            Ok(())
+        });
+        let request = Request {
+            op_id: "batch-rename".into(),
+            kind: "rename".into(),
+            sources: vec![
+                first.to_string_lossy().into_owned(),
+                second.to_string_lossy().into_owned(),
+            ],
+            target_dir: None,
+            new_name: None,
+            new_names: Some(vec!["one.txt".into(), "two.txt".into()]),
+            permanent: false,
+        };
+        start(&OpState::default(), request, None, channel).unwrap();
+        let done = rx
+            .recv_timeout(std::time::Duration::from_secs(15))
+            .expect("the operation must finish");
+        assert_eq!(done["failedCount"], 0, "{done}");
+        assert!(done["error"].is_null(), "{done}");
+        assert!(dir.join("one.txt").exists());
+        assert!(dir.join("two.txt").exists());
+        assert!(!first.exists() && !second.exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
     fn delete_request(path: &std::path::Path) -> Request {
         Request {
             op_id: "test".into(),
@@ -758,6 +842,7 @@ mod tests {
             sources: vec![path.to_string_lossy().into_owned()],
             target_dir: None,
             new_name: None,
+            new_names: None,
             permanent: false,
         }
     }
@@ -769,6 +854,7 @@ mod tests {
             sources: vec![path.to_string_lossy().into_owned()],
             target_dir: Some(target.to_string_lossy().into_owned()),
             new_name: Some(name.into()),
+            new_names: None,
             permanent: false,
         }
     }
@@ -863,6 +949,7 @@ pub(crate) fn recycle_for_test(path: &str) -> u32 {
         sources: vec![path.to_string()],
         target_dir: None,
         new_name: None,
+        new_names: None,
         permanent: false,
     };
     unsafe {

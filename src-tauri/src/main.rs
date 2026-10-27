@@ -409,6 +409,7 @@ fn op_start(
     sources: Vec<String>,
     target_dir: Option<String>,
     new_name: Option<String>,
+    new_names: Option<Vec<String>>,
     permanent: bool,
     on_progress: Channel<ops::OpProgress>,
 ) -> Result<(), ApiError> {
@@ -430,6 +431,7 @@ fn op_start(
             sources,
             target_dir,
             new_name,
+            new_names,
             permanent,
         },
         hwnd,

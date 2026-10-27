@@ -51,6 +51,8 @@ export type OpRequest = {
   sources: string[]
   targetDir?: string
   newName?: string
+  /** One name per source for a batch rename; takes precedence over `newName`. */
+  newNames?: string[]
   permanent?: boolean
 }
 
@@ -63,6 +65,7 @@ export function opStart(request: OpRequest, onProgress: (progress: OpProgress) =
     sources: request.sources,
     targetDir: request.targetDir ?? null,
     newName: request.newName ?? null,
+    newNames: request.newNames ?? null,
     permanent: request.permanent ?? false,
     onProgress: channel,
   })

@@ -11,6 +11,7 @@ import { ContextMenu } from './ContextMenu'
 import type { MenuItem } from './ContextMenu'
 import { OpsPanel } from './OpsPanel'
 import { PromptDialog } from './PromptDialog'
+import { BatchRenameDialog } from './BatchRenameDialog'
 import { ConfirmDialog } from './ConfirmDialog'
 import { PreviewPanel } from './PreviewPanel'
 import { SearchOverlay } from './SearchOverlay'
@@ -75,7 +76,7 @@ import {
 } from './fonts'
 import { DEFAULT_SETTINGS, fromSnapshot, toSnapshot } from './persist'
 import type { Settings } from './persist'
-import { isDir, isFsPath, joinPath, parentPath, pathKey, sameVolume, treeChain, underPath } from './paths'
+import { baseName, isDir, isFsPath, joinPath, parentPath, pathKey, sameVolume, treeChain, underPath } from './paths'
 import { centerOffset } from './scroll'
 import { formatBinding, isTextInput, matchBinding, resolveShortcuts } from './shortcuts'
 import {
@@ -195,6 +196,8 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null)
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null)
   const [prompt, setPrompt] = useState<{ title: string; initial: string; submit: (value: string) => void } | null>(null)
+  /** Multi-selection waiting for the batch rename preview. */
+  const [batchRename, setBatchRename] = useState<{ paneId: string; names: string[] } | null>(null)
   /** Pending delete waiting for the confirmation dialog; nothing leaves the disk until it closes. */
   const [deleteConfirm, setDeleteConfirm] = useState<{
     paneId: string
@@ -1422,7 +1425,14 @@ export default function App() {
     (
       kind: OpKind,
       sources: string[],
-      options?: { targetDir?: string; newName?: string; permanent?: boolean; after?: () => void; record?: boolean },
+      options?: {
+        targetDir?: string
+        newName?: string
+        newNames?: string[]
+        permanent?: boolean
+        after?: () => void
+        record?: boolean
+      },
     ) => {
       if (!sources.length) return
       const opId = uid('op')
@@ -1468,6 +1478,7 @@ export default function App() {
           sources,
           targetDir: options?.targetDir,
           newName: options?.newName,
+          newNames: options?.newNames,
           permanent: options?.permanent,
         },
         (progress) => {
@@ -1538,12 +1549,16 @@ export default function App() {
     }
     switch (entry.kind) {
       case 'rename': {
-        const parent = parentPath(entry.path)
-        runOp('rename', [joinPath(parent, entry.newName)], {
-          newName: entry.oldName,
-          record: false,
-          after: afterDirs([parent]),
-        })
+        const dirs = entry.items.map((item) => parentPath(item.path))
+        runOp(
+          'rename',
+          entry.items.map((item) => joinPath(parentPath(item.path), item.newName)),
+          {
+            newNames: entry.items.map((item) => item.oldName),
+            record: false,
+            after: afterDirs(dirs),
+          },
+        )
         return
       }
       case 'move': {
@@ -1834,6 +1849,17 @@ export default function App() {
     [runOp, t],
   )
 
+  const startRenameMany = useCallback(
+    (paneId: string, names: string[]) => {
+      if (names.length < 2) {
+        if (names[0]) startRename(paneId, names[0])
+        return
+      }
+      setBatchRename({ paneId, names })
+    },
+    [startRename],
+  )
+
   const createFolder = useCallback(
     (paneId: string) => {
       const current = wsRef.current
@@ -1988,7 +2014,15 @@ export default function App() {
         },
         { kind: 'item', label: t('menu.paste'), onSelect: () => pasteInto(paneId) },
         { kind: 'sep' },
-        { kind: 'item', label: t('menu.rename'), hint: 'F2', onSelect: () => startRename(paneId, entry.name) },
+        {
+          kind: 'item',
+          label: paths.length > 1 ? t('menu.batchRename') : t('menu.rename'),
+          hint: 'F2',
+          onSelect: () =>
+            paths.length > 1
+              ? startRenameMany(paneId, paths.map(baseName))
+              : startRename(paneId, entry.name),
+        },
         {
           kind: 'item',
           label: t('menu.delete'),
@@ -2007,7 +2041,7 @@ export default function App() {
         { kind: 'item', label: t('menu.copyPath'), onSelect: () => copyPaths(paths) },
       ]
     },
-    [copyPaths, deleteEntries, openInNewPane, pasteInto, showToast, startRename, t],
+    [copyPaths, deleteEntries, openInNewPane, pasteInto, showToast, startRename, startRenameMany, t],
   )
 
   const openRowMenu = useCallback(
@@ -2268,7 +2302,7 @@ export default function App() {
   // list from reacting to keys typed into them.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (settingsOpen || searchOpen || deleteConfirm || prompt || menu) return
+      if (settingsOpen || searchOpen || deleteConfirm || prompt || batchRename || menu) return
       const bare = !event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey
       if (bare && isTextInput(event.target)) return
 
@@ -2356,6 +2390,7 @@ export default function App() {
     searchOpen,
     deleteConfirm,
     prompt,
+    batchRename,
     menu,
     activePane,
     activeTab,
@@ -2537,6 +2572,7 @@ export default function App() {
               onDriveRowMenu={openDriveRowMenu}
               onProperties={(names) => openProperties(pane.id, names)}
               onRename={(name) => startRename(pane.id, name)}
+              onRenameMany={(names) => startRenameMany(pane.id, names)}
               onDelete={(names, permanent) => deleteEntries(pane.id, names, permanent)}
               onPaste={() => pasteInto(pane.id)}
               onRefresh={manualRefresh}
@@ -2888,6 +2924,27 @@ export default function App() {
             setPrompt(null)
           }}
           onClose={() => setPrompt(null)}
+        />
+      )}
+
+      {batchRename && (
+        <BatchRenameDialog
+          names={batchRename.names}
+          lang={lang}
+          onClose={() => setBatchRename(null)}
+          onConfirm={(pairs) => {
+            const current = wsRef.current
+            const pane = current?.panes[batchRename.paneId]
+            const tab = pane ? current?.tabs[pane.activeTabId] : undefined
+            if (tab?.path) {
+              runOp(
+                'rename',
+                pairs.map((pair) => joinPath(tab.path, pair.from)),
+                { newNames: pairs.map((pair) => pair.to) },
+              )
+            }
+            setBatchRename(null)
+          }}
         />
       )}
 
