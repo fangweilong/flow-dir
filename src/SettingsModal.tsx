@@ -195,6 +195,7 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
     updates: [t('settings.updates'), t('settings.updateInterval'), t('settings.updateCheck')].join(' '),
     diagnostics: [
       t('settings.diagnostics'),
+      t('settings.watermark'),
       t('settings.logLevel'),
       t('settings.logOpen'),
       t('settings.logExport'),
@@ -889,6 +890,14 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
             <h2 className="pb-2 text-[0.6875rem] font-semibold tracking-wide text-muted-2">
               {t('settings.diagnostics')}
             </h2>
+            <div className="pb-2">
+              <ToggleRow
+                label={t('settings.watermark')}
+                hint={t('settings.watermarkHint')}
+                value={settings.watermark}
+                onChange={(value) => onChange({ ...settings, watermark: value })}
+              />
+            </div>
             <div className="space-y-2 rounded-lg border border-line px-3 py-2" data-diagnostics>
               <div className="flex items-center justify-between gap-2">
                 <div className="min-w-0">

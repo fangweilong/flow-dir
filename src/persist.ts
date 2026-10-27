@@ -29,6 +29,8 @@ export type Settings = {
   updateIntervalHours: number
   /** System notification when a long operation finishes while the window is unfocused. */
   notifyOps: boolean
+  /** Faint version/OS/clock overlay over the interface; a troubleshooting aid. */
+  watermark: boolean
   /** Diagnostic log verbosity; the backend log follows it immediately. */
   logLevel: LogLevel
   /** Single UI font family; the frontend appends fallbacks. */
@@ -73,6 +75,7 @@ export const DEFAULT_SETTINGS: Settings = {
   gpuAccel: true,
   updateIntervalHours: 24,
   notifyOps: true,
+  watermark: true,
   logLevel: 'info',
   fontFamily: 'Segoe UI Variable Text',
   fontSize: 13,

@@ -82,6 +82,8 @@ pub struct Settings {
     pub update_interval_hours: u32,
     /// System notification when a long operation finishes in the background.
     pub notify_ops: bool,
+    /// Faint version/OS/clock overlay on top of the interface; a troubleshooting aid.
+    pub watermark: bool,
     /// Diagnostic log verbosity: error | warn | info | debug.
     pub log_level: String,
     /// Single UI font family, assembled into a stack by the frontend.
@@ -240,6 +242,7 @@ impl Default for Settings {
             gpu_accel: true,
             update_interval_hours: 24,
             notify_ops: true,
+            watermark: true,
             log_level: "info".to_string(),
             font_family: default_font_family(),
             font_size: default_font_size(),
@@ -354,6 +357,9 @@ update_interval_hours = 24
 # 长任务在后台完成时发系统通知 / system notification when a long operation finishes
 notify_ops = true
 
+# 界面隐形水印（版本、系统版本、时间），排障用 / faint version, OS and clock watermark
+watermark = true
+
 # 诊断日志级别 / diagnostic log level: "error" | "warn" | "info" | "debug"
 log_level = "info"
 
@@ -390,6 +396,7 @@ struct FileSettings {
     gpu_accel: bool,
     update_interval_hours: u32,
     notify_ops: bool,
+    watermark: bool,
     log_level: String,
     font_family: String,
     font_size: u32,
@@ -424,6 +431,7 @@ impl Default for FileSettings {
             gpu_accel: base.gpu_accel,
             update_interval_hours: base.update_interval_hours,
             notify_ops: base.notify_ops,
+            watermark: base.watermark,
             log_level: base.log_level,
             font_family: base.font_family,
             font_size: base.font_size,
@@ -459,6 +467,7 @@ impl From<FileSettings> for Settings {
             gpu_accel: file.gpu_accel,
             update_interval_hours: file.update_interval_hours,
             notify_ops: file.notify_ops,
+            watermark: file.watermark,
             log_level: file.log_level,
             font_family: file.font_family,
             font_size: file.font_size,
@@ -536,6 +545,7 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), A
         "update_interval_hours",
         Value::from(settings.update_interval_hours as i64),
     );
+    set_value(&mut doc, "watermark", Value::from(settings.watermark));
     set_value(&mut doc, "font_family", Value::from(settings.font_family.as_str()));
     set_value(&mut doc, "font_size", Value::from(settings.font_size as i64));
     set_value(&mut doc, "tab_font_family", Value::from(settings.tab_font_family.as_str()));
@@ -756,6 +766,7 @@ mod tests {
     #[test]
     fn template_and_inline_rules_parse() {
         let seed: FileSettings = toml_edit::de::from_str(TEMPLATE).unwrap();
+        assert!(seed.watermark);
         assert!(seed.external_preview.is_empty());
         assert_eq!(seed.list_size_width, 96);
         assert_eq!(seed.list_time_width, 142);
@@ -766,6 +777,7 @@ mod tests {
         assert_eq!(seed.list_font_size, 13);
         assert_eq!(seed.nav_font_size, 12);
         let legacy: FileSettings = toml_edit::de::from_str("language = \"en\"").unwrap();
+        assert!(legacy.watermark);
         assert_eq!(legacy.list_size_width, 96);
         assert_eq!(legacy.list_time_width, 142);
         assert_eq!(legacy.tab_font_size, 12);

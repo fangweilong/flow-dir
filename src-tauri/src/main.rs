@@ -499,8 +499,10 @@ struct Dependency {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct AppInfo {
     version: &'static str,
+    os_version: String,
     dependencies: Vec<Dependency>,
 }
 
@@ -704,6 +706,7 @@ async fn update_install(app: tauri::AppHandle) -> Result<(), ApiError> {
 fn app_info() -> AppInfo {
     AppInfo {
         version: env!("CARGO_PKG_VERSION"),
+        os_version: crate::logging::windows_version(),
         dependencies: DEPS
             .iter()
             .map(|(kind, name, version, license)| Dependency {

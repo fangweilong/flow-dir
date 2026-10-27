@@ -317,6 +317,7 @@ fn redacted_settings(settings: &Settings) -> serde_json::Value {
         "gpuAccel": settings.gpu_accel,
         "updateIntervalHours": settings.update_interval_hours,
         "notifyOps": settings.notify_ops,
+        "watermark": settings.watermark,
         "fontFamily": settings.font_family,
         "fontSize": settings.font_size,
         "tabFontSize": settings.tab_font_size,

@@ -49,7 +49,7 @@ export type OpProgress = {
   aborted: boolean
   error: ApiError | null
 }
-export type AppInfo = { version: string; dependencies: Dependency[] }
+export type AppInfo = { version: string; osVersion: string; dependencies: Dependency[] }
 
 export type UpdateStatus = {
   current: string

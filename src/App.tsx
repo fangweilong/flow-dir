@@ -15,6 +15,7 @@ import { PreviewPanel } from './PreviewPanel'
 import { SearchOverlay } from './SearchOverlay'
 import { SettingsModal } from './SettingsModal'
 import { SidebarTree } from './SidebarTree'
+import { Watermark } from './Watermark'
 import {
   cancelDir,
   clipboardCopy,
@@ -2847,6 +2848,8 @@ export default function App() {
           onClose={() => setSettingsOpen(false)}
         />
       )}
+
+      {settings.watermark && <Watermark />}
     </div>
   )
 }
