@@ -7,11 +7,12 @@
 //! Listing never blocks on it: the command runs off the UI thread and the list paints
 //! first, badges arrive afterwards.
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -49,6 +50,7 @@ pub struct GitRepo {
 }
 
 #[derive(Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct GitStatus {
     /// Work-tree root; empty when the folder is not inside a repository.
     pub root: String,
@@ -56,6 +58,8 @@ pub struct GitStatus {
     pub files: Vec<GitFile>,
     /// Child folders holding changes deeper down; they only get a marker, not a letter.
     pub dirs: Vec<String>,
+    /// Tracked direct child folders with no change anywhere below them.
+    pub clean_dirs: Vec<String>,
     /// Checked-out branch; empty when HEAD is detached.
     pub branch: String,
     /// Commits the branch is ahead of and behind its upstream; both zero without one.
@@ -68,6 +72,35 @@ pub struct GitStatus {
     /// Direct child folders that are repository roots, with their own summary so the row
     /// badge can show check / pending / unpushed without opening the repository.
     pub repos: Vec<GitRepo>,
+}
+
+/// Repositories whose porcelain output is reused while navigating inside them.
+const STATUS_CACHE_TTL: Duration = Duration::from_secs(2);
+const CHILD_CACHE_TTL: Duration = Duration::from_secs(5);
+const CACHE_ENTRIES: usize = 16;
+
+struct RootData {
+    at: Instant,
+    output: Arc<Vec<u8>>,
+    /// Tracked paths from the repository root, `/` separated.
+    tracked: Arc<Vec<String>>,
+}
+
+static ROOT_CACHE: LazyLock<Mutex<HashMap<String, RootData>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static CHILD_CACHE: LazyLock<Mutex<HashMap<String, (Instant, Vec<GitRepo>)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Drops cached status for a repository root, called when the watcher reports a change
+/// there so the next listing is fresh instead of waiting out the TTL.
+pub fn invalidate(path: &str) {
+    let key = path.to_lowercase();
+    if let Ok(mut cache) = ROOT_CACHE.lock() {
+        cache.retain(|root, _| !key.starts_with(root.as_str()));
+    }
+    if let Ok(mut cache) = CHILD_CACHE.lock() {
+        cache.remove(&key);
+    }
 }
 
 pub fn status(path: &str) -> GitStatus {
@@ -86,32 +119,24 @@ pub fn status(path: &str) -> GitStatus {
         };
     };
     let prefix = relative_to_root(&root, path);
-    // `all` names each untracked file instead of collapsing its folder into one `dir/`
-    // record, which would hide every status inside that folder once opened.
-    let mut command = status_command(git, Path::new(&root), "all");
-    let Some(output) = output_with_timeout(&mut command, STATUS_TIMEOUT) else {
+    let Some(data) = root_data(git, &root) else {
         return GitStatus {
             root,
             repos,
             ..GitStatus::default()
         };
     };
-    if !output.status.success() {
-        return GitStatus {
-            root,
-            repos,
-            ..GitStatus::default()
-        };
-    }
-    let (branch, ahead, behind, upstream) = summary(&output.stdout);
-    let dirty = has_changes(&output.stdout);
+    let (branch, ahead, behind, upstream) = summary(&data.output);
+    let dirty = has_changes(&data.output);
     // Nested paths collapse to one marker per child folder: a work tree with 50k changes
     // below the listed folder must not push 50k strings through the IPC bridge.
-    let (files, dirs) = split_direct(parse(&output.stdout, prefix.as_deref()));
+    let (files, dirs) = split_direct(parse(&data.output, prefix.as_deref()));
+    let clean_dirs = clean_dirs(&data.tracked, prefix.as_deref(), &dirs);
     GitStatus {
         root,
         files,
         dirs,
+        clean_dirs,
         branch,
         ahead,
         behind,
@@ -119,6 +144,105 @@ pub fn status(path: &str) -> GitStatus {
         dirty,
         repos,
     }
+}
+
+/// One porcelain run per repository root, reused by every folder inside it. The watcher
+/// only needs to push a change into the list; the short TTL also covers changes made
+/// outside the app without a per-pane invalidation round-trip.
+fn root_data(git: &Path, root: &str) -> Option<RootData> {
+    let key = root.to_lowercase();
+    if let Ok(cache) = ROOT_CACHE.lock() {
+        if let Some(entry) = cache.get(&key) {
+            if entry.at.elapsed() < STATUS_CACHE_TTL {
+                return Some(RootData {
+                    at: entry.at,
+                    output: entry.output.clone(),
+                    tracked: entry.tracked.clone(),
+                });
+            }
+        }
+    }
+    let mut command = status_command(git, Path::new(root), "all");
+    let output = output_with_timeout(&mut command, STATUS_TIMEOUT)?;
+    if !output.status.success() {
+        return None;
+    }
+    let tracked = Arc::new(tracked_paths(git, root));
+    let data = RootData {
+        at: Instant::now(),
+        output: Arc::new(output.stdout),
+        tracked,
+    };
+    if let Ok(mut cache) = ROOT_CACHE.lock() {
+        cache.retain(|_, entry| entry.at.elapsed() < STATUS_CACHE_TTL);
+        if cache.len() >= CACHE_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(
+            key,
+            RootData {
+                at: data.at,
+                output: data.output.clone(),
+                tracked: data.tracked.clone(),
+            },
+        );
+    }
+    Some(data)
+}
+
+fn tracked_paths(git: &Path, root: &str) -> Vec<String> {
+    let mut command = Command::new(git);
+    command
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z"])
+        .creation_flags(CREATE_NO_WINDOW);
+    let Some(output) = output_with_timeout(&mut command, STATUS_TIMEOUT) else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).replace('/', "\\"))
+        .collect()
+}
+
+/// Direct child folders that hold at least one tracked file, minus the dirty ones.
+/// Only tracked directories get the check; a folder full of ignored files stays plain.
+fn clean_dirs(tracked: &[String], prefix: Option<&str>, dirty: &[String]) -> Vec<String> {
+    let dirty: std::collections::HashSet<String> =
+        dirty.iter().map(|dir| dir.to_lowercase()).collect();
+    let mut dirs: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for path in tracked {
+        let relative = match prefix {
+            None => path.as_str(),
+            Some(prefix) => match path.get(..prefix.len()) {
+                Some(head)
+                    if head.eq_ignore_ascii_case(prefix)
+                        && path.as_bytes().get(prefix.len()) == Some(&b'\\') =>
+                {
+                    &path[prefix.len() + 1..]
+                }
+                _ => continue,
+            },
+        };
+        let Some((dir, rest)) = relative.split_once('\\') else {
+            continue;
+        };
+        if rest.is_empty() || dirty.contains(&dir.to_lowercase()) {
+            continue;
+        }
+        if seen.insert(dir.to_lowercase()) {
+            dirs.push(dir.to_string());
+        }
+    }
+    dirs.sort_by_key(|dir| dir.to_lowercase());
+    dirs
 }
 
 /// `git` is normally on PATH; GUI launches sometimes miss the user's shims, so the two
@@ -212,6 +336,16 @@ fn unchecked_repos(names: Vec<String>) -> Vec<GitRepo> {
 /// marker instead of a state badge. Order follows the sorted input.
 fn repo_states(git: &Path, parent: &str, names: Vec<String>) -> Vec<GitRepo> {
     let mut repos = unchecked_repos(names.clone());
+    // Re-entering a folder must not re-probe every child repository: a short TTL keeps
+    // navigation instant while still catching edits made outside the app.
+    let key = parent.to_lowercase();
+    if let Ok(cache) = CHILD_CACHE.lock() {
+        if let Some((at, cached)) = cache.get(&key) {
+            if at.elapsed() < CHILD_CACHE_TTL && cached.len() == names.len() {
+                return cached.clone();
+            }
+        }
+    }
     let checked = names.len().min(CHILD_REPO_LIMIT);
     if checked == 0 {
         return repos;
@@ -238,6 +372,13 @@ fn repo_states(git: &Path, parent: &str, names: Vec<String>) -> Vec<GitRepo> {
             }
         }
     });
+    if let Ok(mut cache) = CHILD_CACHE.lock() {
+        cache.retain(|_, (at, _)| at.elapsed() < CHILD_CACHE_TTL);
+        if cache.len() >= CACHE_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(key, (Instant::now(), repos.clone()));
+    }
     repos
 }
 
@@ -569,6 +710,23 @@ mod tests {
         assert_eq!(dirs, ["a", "b"]);
     }
 
+    #[test]
+    fn clean_dirs_lists_tracked_folders_without_changes() {
+        let tracked = vec![
+            "src\\App.tsx".to_string(),
+            "src\\deep\\x.rs".to_string(),
+            "docs\\readme.md".to_string(),
+            "README.md".to_string(),
+            "dirty\\a.txt".to_string(),
+        ];
+        assert_eq!(clean_dirs(&tracked, None, &["dirty".to_string()]), ["docs", "src"]);
+        // Inside a subfolder only that subtree counts, with the prefix stripped.
+        assert_eq!(
+            clean_dirs(&tracked, Some("src"), &[]),
+            ["deep"]
+        );
+    }
+
     /// The regression this module was fixed for: opening a folder git had collapsed to
     /// one untracked record used to show no badges at all. Skipped when git is missing.
     #[test]
@@ -613,6 +771,8 @@ mod tests {
 
         std::fs::write(root.join("newdir").join("a.txt"), "a").unwrap();
         std::fs::write(root.join("newdir").join("deep").join("b.txt"), "b").unwrap();
+        // The watcher normally drops the cached status; the test writes directly.
+        invalidate(root.to_str().unwrap());
 
         let inside = status(root.join("newdir").to_str().unwrap());
         assert!(inside.dirty);

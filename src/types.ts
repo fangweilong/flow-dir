@@ -166,6 +166,8 @@ export type GitStatus = {
   files: GitFile[]
   /** Child folders with changes deeper down. */
   dirs: string[]
+  /** Tracked child folders without any change below them. */
+  cleanDirs: string[]
   /** Checked-out branch; empty when HEAD is detached. */
   branch: string
   ahead: number
@@ -183,6 +185,7 @@ export const EMPTY_GIT: GitStatus = {
   root: '',
   files: [],
   dirs: [],
+  cleanDirs: [],
   branch: '',
   ahead: 0,
   behind: 0,

@@ -82,6 +82,8 @@ pub fn set<R: Runtime>(
             pane_id: id.clone(),
             structural: is_structural(event.kind),
         };
+        // The status cache is keyed by repository root; drop it before the pane rescans.
+        crate::git::invalidate(&watched_path);
         let _ = if git_only {
             handle.emit("flowdir:git-changed", payload)
         } else {

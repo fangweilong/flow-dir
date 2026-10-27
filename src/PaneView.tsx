@@ -1273,7 +1273,7 @@ export function PaneView({
                     <GitRepoBadge name={entry.name} dir={dir} badges={gitBadges} t={t} />
                   </span>
                   <span className={`truncate ${dir ? 'font-medium text-fg-strong' : ''}`}>{entry.name}</span>
-                  <GitBadge name={entry.name} dir={dir} badges={gitBadges} />
+                  <GitBadge name={entry.name} dir={dir} badges={gitBadges} t={t} />
                 </div>
                 {showSize && (
                   <div className="tabular whitespace-nowrap pr-1.5 text-right text-[0.88em] text-muted">
@@ -1487,10 +1487,12 @@ function GitBadge({
   name,
   dir,
   badges,
+  t,
 }: {
   name: string
   dir: boolean
   badges: GitBadges
+  t: Translate
 }) {
   const key = name.toLowerCase()
   if (dir && badges.repos.has(key)) return null
@@ -1504,6 +1506,25 @@ function GitBadge({
   }
   if (dir && badges.dirtyDirs.has(key)) {
     return <span title="git" className="h-1.5 w-1.5 shrink-0 rounded-full bg-blue-500/70" />
+  }
+  // Tracked and unchanged: the same check a clean child repository gets, so a repository
+  // root no longer looks like the only committed folder.
+  if (dir && badges.cleanDirs.has(key)) {
+    return (
+      <svg
+        viewBox="0 0 16 16"
+        className="h-2.5 w-2.5 shrink-0 text-emerald-500"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden
+      >
+        <title>{t('git.cleanCommitted')}</title>
+        <path d="M3.4 8.6 6.4 11.6 12.6 4.8" />
+      </svg>
+    )
   }
   return null
 }
