@@ -2238,7 +2238,7 @@ export default function App() {
   // list from reacting to keys typed into them.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (settingsOpen || searchOpen || deleteConfirm) return
+      if (settingsOpen || searchOpen || deleteConfirm || prompt || menu) return
       const bare = !event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey
       if (bare && isTextInput(event.target)) return
 
@@ -2295,6 +2295,8 @@ export default function App() {
     settingsOpen,
     searchOpen,
     deleteConfirm,
+    prompt,
+    menu,
     activePane,
     activeTab,
     activeList,
@@ -2861,7 +2863,10 @@ export default function App() {
           lang={lang}
           onChange={updateSettings}
           onOpenLocation={openInApp}
-          onClose={() => setSettingsOpen(false)}
+          onClose={() => {
+            setSettingsOpen(false)
+            if (activePane) focusList(activePane.id)
+          }}
         />
       )}
     </div>
