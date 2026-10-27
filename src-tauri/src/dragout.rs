@@ -15,17 +15,16 @@ use windows::Win32::Foundation::{
     DV_E_FORMATETC, E_OUTOFMEMORY, HGLOBAL, OLE_E_ADVISENOTSUPPORTED, POINT, S_FALSE, S_OK,
 };
 use windows::Win32::System::Com::{
-    CoInitializeEx, CoUninitialize, IAdviseSink, IDataObject, IDataObject_Impl, IEnumFORMATETC,
-    IEnumFORMATETC_Impl, DATADIR_GET, DVASPECT_CONTENT, FORMATETC, STGMEDIUM, STGMEDIUM_0,
-    TYMED_HGLOBAL, COINIT_APARTMENTTHREADED,
+    IAdviseSink, IDataObject, IDataObject_Impl, IEnumFORMATETC, IEnumFORMATETC_Impl, DATADIR_GET,
+    DVASPECT_CONTENT, FORMATETC, STGMEDIUM, STGMEDIUM_0, TYMED_HGLOBAL,
 };
 use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
 use windows::Win32::System::Memory::{
     GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE, GMEM_ZEROINIT,
 };
 use windows::Win32::System::Ole::{
-    DoDragDrop, IDropSource, IDropSource_Impl, CF_HDROP, DROPEFFECT, DROPEFFECT_COPY,
-    DROPEFFECT_LINK, DROPEFFECT_MOVE, DROPEFFECT_NONE,
+    DoDragDrop, IDropSource, IDropSource_Impl, OleInitialize, OleUninitialize, CF_HDROP,
+    DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, DROPEFFECT_NONE,
 };
 use windows::Win32::UI::Shell::DROPFILES;
 
@@ -261,20 +260,22 @@ impl IDropSource_Impl for DropSource_Impl {
 }
 
 /// Runs a modal OLE drag on its own STA thread and reports the accepted effect.
+///
+/// The thread must call `OleInitialize`, not `CoInitializeEx`: with COM alone
+/// `DoDragDrop` fails immediately with `CO_E_NOTINITIALIZED` because the OLE
+/// drag/drop subsystem is initialized only by `OleInitialize`.
 pub fn drag_out(paths: &[String]) -> Result<String, ApiError> {
     let paths = paths.to_vec();
     let effect = std::thread::Builder::new()
         .name("flowdir-drag".into())
         .spawn(move || -> Result<DROPEFFECT, ApiError> {
             unsafe {
-                CoInitializeEx(None, COINIT_APARTMENTTHREADED)
-                    .ok()
-                    .map_err(|e| ApiError::new("COM", e.to_string()))?;
+                OleInitialize(None).map_err(|e| ApiError::new("COM", e.to_string()))?;
                 let data: IDataObject = DragData { paths }.into();
                 let source: IDropSource = DropSource.into();
                 let mut effect = DROPEFFECT_NONE;
                 let result = DoDragDrop(&data, &source, DROPEFFECT(ALLOWED), &mut effect);
-                CoUninitialize();
+                OleUninitialize();
                 result
                     .ok()
                     .map_err(|e| ApiError::from_windows("", e.code().0))
@@ -296,6 +297,7 @@ pub fn drag_out(paths: &[String]) -> Result<String, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
     use windows::Win32::System::Ole::ReleaseStgMedium;
 
     /// The payload is what every target reads: DROPFILES header, wide paths, double null.
