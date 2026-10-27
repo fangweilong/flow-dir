@@ -131,6 +131,8 @@ type Props = {
   onDelete: (names: string[], permanent: boolean) => void
   onPaste: () => void
   onRefresh: () => void
+  /** Rescans the tab after a failed listing; unlike navigation, a same-path request must run. */
+  onRetry: (tabId: string) => void
   /** Resolved key combinations, so rebinding in settings reaches the pane commands. */
   keys: Record<ShortcutId, string>
   update: (tabId: string, fn: (d: ListData) => ListData) => void
@@ -184,6 +186,7 @@ export function PaneView({
   onDelete,
   onPaste,
   onRefresh,
+  onRetry,
   keys,
   update,
 }: Props) {
@@ -1115,7 +1118,7 @@ export function PaneView({
             </div>
             <button
               type="button"
-              onClick={() => tab && onNavigate(tab.id, tab.path)}
+              onClick={() => tab && onRetry(tab.id)}
               className="rounded border border-red-300 px-1.5 py-0.5 text-[0.8em] hover:bg-red-100 dark:border-red-800 dark:hover:bg-red-900/40"
             >
               {t('list.retry')}

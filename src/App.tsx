@@ -976,6 +976,22 @@ export default function App() {
   )
 
   /**
+   * Forces a rescan of a tab's current folder. The error banner must bypass `navigate`,
+   * which intentionally ignores same-path requests.
+   */
+  const retryTab = useCallback(
+    (tabId: string) => {
+      const current = wsRef.current
+      if (!current) return
+      const pane = Object.values(current.panes).find((p) => p.tabIds.includes(tabId))
+      const tab = current.tabs[tabId]
+      if (!pane || !tab) return
+      startScan(tabId, tab.path, pane.sort, pane.hidden)
+    },
+    [startScan],
+  )
+
+  /**
    * Opens a folder inside FlowDir instead of handing it to Explorer: the config and log
    * directories are ordinary folders, so the app can show them with the same panes.
    */
@@ -2461,6 +2477,7 @@ export default function App() {
               onDelete={(names, permanent) => deleteEntries(pane.id, names, permanent)}
               onPaste={() => pasteInto(pane.id)}
               onRefresh={refreshPanes}
+              onRetry={retryTab}
               keys={keys}
               update={update}
             />
