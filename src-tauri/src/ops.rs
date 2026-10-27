@@ -184,7 +184,9 @@ pub fn start(
         .name(format!("flowdir-op-{op_id}"))
         .spawn(move || {
             let total = request.sources.len() as u32;
-            let outcome = run(&request, kind, hwnd, token, progress.clone());
+            let outcome = run_guarded(&request.kind, || {
+                run(&request, kind, hwnd, token, progress.clone())
+            });
             match (&outcome.error, outcome.aborted, outcome.failed_total) {
                 (Some(err), _, _) => log::error!(
                     target: "flowdir::ops",
@@ -228,6 +230,28 @@ pub fn start(
         })
         .map(|_| ())
         .map_err(|e| ApiError::new("THREAD", e.to_string()))
+}
+
+/// Runs the operation body and turns a panic into a normal failure: `finish` still runs,
+/// so the job cannot stay in the map (and in the taskbar progress) forever.
+fn run_guarded<F: FnOnce() -> Outcome>(kind: &str, work: F) -> Outcome {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
+        Ok(outcome) => outcome,
+        Err(payload) => {
+            let detail = payload
+                .downcast_ref::<&str>()
+                .map(|text| (*text).to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "operation thread panicked".into());
+            log::error!(target: "flowdir::ops", "op {kind} panicked: {detail}");
+            Outcome {
+                aborted: false,
+                error: Some(ApiError::new("PANIC", detail)),
+                failed: Vec::new(),
+                failed_total: 0,
+            }
+        }
+    }
 }
 
 fn run(
@@ -716,6 +740,15 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn panic_becomes_a_failed_outcome() {
+        let outcome = run_guarded("copy", || panic!("boom"));
+        let error = outcome.error.expect("a panic must surface as an error");
+        assert_eq!(error.code, "PANIC");
+        assert!(error.detail.contains("boom"), "{}", error.detail);
+        assert!(!outcome.aborted);
     }
 
     fn delete_request(path: &std::path::Path) -> Request {
