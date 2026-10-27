@@ -32,6 +32,7 @@ import {
   notifyOp,
   openPath,
   opCancel,
+  opRetryElevated,
   opStart,
   previewExternal,
   previewInfo,
@@ -51,6 +52,7 @@ import {
   watchClear,
   watchSet,
 } from './api'
+import type { OpRequest } from './api'
 import { EMPTY_GIT, EMPTY_LIST, emptyList, filterMatches } from './types'
 import type {
   Drive,
@@ -205,6 +207,9 @@ export default function App() {
     permanent: boolean
   } | null>(null)
   const [ops, setOps] = useState<Record<string, OpProgress>>({})
+  /** Original request per running/finished op, so an ACCESS_DENIED result can be retried. */
+  const opRequests = useRef<Record<string, OpRequest>>({})
+  const [elevating, setElevating] = useState<string | null>(null)
   /** Sidebar tree: expanded folders (key → display path) and their cached children. */
   const [treeOpen, setTreeOpen] = useState<Record<string, string>>({})
   const [treeNodes, setTreeNodes] = useState<Record<string, string[]>>({})
@@ -1436,6 +1441,15 @@ export default function App() {
     ) => {
       if (!sources.length) return
       const opId = uid('op')
+      opRequests.current[opId] = {
+        opId,
+        kind,
+        sources,
+        targetDir: options?.targetDir,
+        newName: options?.newName,
+        newNames: options?.newNames,
+        permanent: options?.permanent,
+      }
       setOps((prev) => ({
         ...prev,
         [opId]: {
@@ -1455,6 +1469,7 @@ export default function App() {
       }))
       const drop = (delay: number) =>
         window.setTimeout(() => {
+          delete opRequests.current[opId]
           setOps((prev) => {
             const next = { ...prev }
             delete next[opId]
@@ -1484,9 +1499,14 @@ export default function App() {
         (progress) => {
           setOps((prev) => (prev[opId] ? { ...prev, [opId]: progress } : prev))
           if (!progress.done) return
+          // A denied operation keeps its card until dismissed: the failure list is where the
+          // "retry as administrator" action lives.
+          const denied =
+            progress.error?.code === 'ACCESS_DENIED' ||
+            progress.failed.some((failure) => failure.code === 'ACCESS_DENIED')
           if (progress.error) {
             announce(t('op.failed', { code: progress.error.code }))
-            drop(5000)
+            if (!denied) drop(5000)
             return
           }
           // Cancellation wins over the item failures it produced: those items were not
@@ -1504,7 +1524,7 @@ export default function App() {
             options?.after?.()
             refreshPanes()
             // Keep the card around so the failure list stays readable.
-            drop(15000)
+            drop(denied ? 600_000 : 15000)
             return
           }
           if (options?.record !== false) {
@@ -1529,6 +1549,54 @@ export default function App() {
       })
     },
     [refreshPanes, showToast, t],
+  )
+
+  /**
+   * The GUI stays non-elevated; this asks the backend to launch the same executable through
+   * UAC, waits for its report and then re-enumerates what the elevated run changed.
+   */
+  const retryElevated = useCallback(
+    (opId: string) => {
+      const request = opRequests.current[opId]
+      if (!request || elevating) return
+      setElevating(opId)
+      showToast(t('op.elevating'))
+      opRetryElevated(request)
+        .then((report) => {
+          refreshPanes()
+          if (report.error) {
+            showToast(t('op.failed', { code: report.error.code }))
+          } else if (report.aborted) {
+            showToast(t('op.canceled'))
+          } else if (report.failedTotal > 0) {
+            showToast(
+              t('op.partial', {
+                ok: Math.max(0, request.sources.length - report.failedTotal),
+                failed: report.failedTotal,
+              }),
+            )
+          } else {
+            showToast(t('op.done'))
+            delete opRequests.current[opId]
+            setOps((prev) => {
+              if (!(opId in prev)) return prev
+              const next = { ...prev }
+              delete next[opId]
+              return next
+            })
+          }
+        })
+        .catch((err: unknown) => {
+          const code = errorCode(err)
+          showToast(
+            code === 'ELEVATION_CANCELED'
+              ? t('op.elevationCanceled')
+              : t('op.failed', { code }),
+          )
+        })
+        .finally(() => setElevating(null))
+    },
+    [elevating, refreshPanes, showToast, t],
   )
 
   /**
@@ -2901,15 +2969,18 @@ export default function App() {
       <OpsPanel
         ops={Object.values(ops)}
         lang={lang}
+        elevating={elevating}
+        onRetryElevated={retryElevated}
         onCancel={(opId) => void opCancel(opId)}
-        onDismiss={(opId) =>
+        onDismiss={(opId) => {
+          delete opRequests.current[opId]
           setOps((prev) => {
             if (!(opId in prev)) return prev
             const next = { ...prev }
             delete next[opId]
             return next
           })
-        }
+        }}
       />
 
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}

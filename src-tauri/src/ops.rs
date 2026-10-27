@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use windows::core::{implement, HRESULT, Result as WinResult, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{E_ABORT, HWND};
@@ -31,7 +31,7 @@ const PHASES: [&str; 6] = ["start", "copy", "move", "delete", "rename", "newdir"
 const MAX_REPORTED_FAILURES: usize = 200;
 
 /// One item the shell refused, with the HRESULT mapped to an app error code.
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct OpFailure {
     pub path: String,
@@ -155,6 +155,18 @@ impl Kind {
     }
 }
 
+/// Result written by the elevated helper process and read back by the GUI.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ElevatedReport {
+    pub aborted: bool,
+    pub failed: Vec<OpFailure>,
+    pub failed_total: u32,
+    pub error: Option<ApiError>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Request {
     pub op_id: String,
     pub kind: String,
@@ -166,15 +178,9 @@ pub struct Request {
     pub permanent: bool,
 }
 
-/// Starts an operation on a fresh STA thread and returns immediately.
-pub fn start(
-    state: &OpState,
-    request: Request,
-    hwnd: Option<isize>,
-    progress: Channel<OpProgress>,
-) -> Result<(), ApiError> {
-    let kind = Kind::parse(&request.kind)
-        .ok_or_else(|| ApiError::new("BAD_KIND", format!("unknown operation {}", request.kind)))?;
+/// Checks a request before it touches the shell; used by both the GUI path and the
+/// elevated helper, which receives the request as JSON from another process.
+fn validate(request: &Request, kind: Kind) -> Result<(), ApiError> {
     if request.sources.is_empty() {
         return Err(ApiError::new("EMPTY", "no source paths"));
     }
@@ -193,6 +199,53 @@ pub fn start(
             None => {}
         }
     }
+    Ok(())
+}
+
+/// Runs an operation to completion on the calling thread. This is the body of the
+/// elevated helper: it has no `AppHandle`, no window and no Channel back to a webview,
+/// so progress is discarded and only the final result matters.
+pub fn run_headless(request: Request) -> ElevatedReport {
+    let report = |error: Option<ApiError>| ElevatedReport {
+        aborted: false,
+        failed: Vec::new(),
+        failed_total: 0,
+        error,
+    };
+    let kind = match Kind::parse(&request.kind) {
+        Some(kind) => kind,
+        None => {
+            return report(Some(ApiError::new(
+                "BAD_KIND",
+                format!("unknown operation {}", request.kind),
+            )))
+        }
+    };
+    if let Err(err) = validate(&request, kind) {
+        return report(Some(err));
+    }
+    let outcome = run_guarded(&request.kind, || {
+        let sink = Channel::new(|_| Ok(()));
+        run(&request, kind, None, Arc::new(AtomicBool::new(false)), sink)
+    });
+    ElevatedReport {
+        aborted: outcome.aborted,
+        failed: outcome.failed,
+        failed_total: outcome.failed_total,
+        error: outcome.error,
+    }
+}
+
+/// Starts an operation on a fresh STA thread and returns immediately.
+pub fn start(
+    state: &OpState,
+    request: Request,
+    hwnd: Option<isize>,
+    progress: Channel<OpProgress>,
+) -> Result<(), ApiError> {
+    let kind = Kind::parse(&request.kind)
+        .ok_or_else(|| ApiError::new("BAD_KIND", format!("unknown operation {}", request.kind)))?;
+    validate(&request, kind)?;
     let token = state.begin(&request.op_id);
     let op_id = request.op_id.clone();
     let state = state.clone();
@@ -773,6 +826,42 @@ mod tests {
         assert_eq!(error.code, "PANIC");
         assert!(error.detail.contains("boom"), "{}", error.detail);
         assert!(!outcome.aborted);
+    }
+
+    #[test]
+    fn headless_rename_reports_success() {
+        let dir = temp_dir("headless");
+        let source = dir.join("before.txt");
+        fs::write(&source, b"x").unwrap();
+        let report = run_headless(Request {
+            op_id: "headless".into(),
+            kind: "rename".into(),
+            sources: vec![source.to_string_lossy().into_owned()],
+            target_dir: None,
+            new_name: Some("after.txt".into()),
+            new_names: None,
+            permanent: false,
+        });
+        assert!(report.error.is_none(), "{:?}", report.error);
+        assert_eq!(report.failed_total, 0);
+        assert!(!report.aborted);
+        assert!(dir.join("after.txt").exists());
+        assert!(!source.exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn headless_rejects_an_unknown_kind() {
+        let report = run_headless(Request {
+            op_id: "headless".into(),
+            kind: "explode".into(),
+            sources: vec!["C:\\".into()],
+            target_dir: None,
+            new_name: None,
+            new_names: None,
+            permanent: false,
+        });
+        assert_eq!(report.error.unwrap().code, "BAD_KIND");
     }
 
     #[test]

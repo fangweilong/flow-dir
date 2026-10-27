@@ -49,6 +49,13 @@ export type OpProgress = {
   aborted: boolean
   error: ApiError | null
 }
+/** Outcome written by the elevated helper for a retried, previously denied operation. */
+export type ElevatedReport = {
+  aborted: boolean
+  failed: OpFailure[]
+  failedTotal: number
+  error: ApiError | null
+}
 export type AppInfo = { version: string; dependencies: Dependency[] }
 
 export type UpdateStatus = {

@@ -2,6 +2,7 @@
 
 mod clipboard;
 mod dragout;
+mod elevated;
 mod error;
 mod folder_picker;
 mod fs;
@@ -444,6 +445,24 @@ fn op_cancel(state: tauri::State<'_, ops::OpState>, op_id: String) {
     state.cancel(&op_id);
 }
 
+/// Retries a denied operation under an elevated helper. The frontend offers this only after
+/// the ordinary run reported `ACCESS_DENIED`; the GUI itself stays non-elevated.
+#[tauri::command]
+async fn op_retry_elevated(
+    app: tauri::AppHandle,
+    request: ops::Request,
+) -> Result<ops::ElevatedReport, ApiError> {
+    log::info!(
+        target: "flowdir::ops",
+        "op_retry_elevated kind={} items={}",
+        request.kind,
+        request.sources.len(),
+    );
+    tauri::async_runtime::spawn_blocking(move || elevated::request_elevated(&app, request))
+        .await
+        .map_err(|err| ApiError::new("THREAD", err.to_string()))?
+}
+
 #[tauri::command]
 async fn titlebar_menu(window: tauri::WebviewWindow, x: i32, y: i32) -> Result<(), ApiError> {
     let maximized = window.is_maximized().unwrap_or(false);
@@ -802,6 +821,11 @@ fn init_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 }
 
 fn main() {
+    // The elevated helper must not start Tauri: no window, no tray, no single-instance
+    // mutex, and no second WebView2 process for a filesystem operation.
+    if let Some((request, result)) = elevated::helper_args() {
+        std::process::exit(elevated::run_helper(&request, &result));
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
@@ -925,6 +949,7 @@ fn main() {
             drag_out,
             op_start,
             op_cancel,
+            op_retry_elevated,
             shell_menu_show,
             shell_menu_background_show,
             titlebar_menu,
