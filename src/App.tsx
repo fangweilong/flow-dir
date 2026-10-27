@@ -1066,6 +1066,28 @@ export default function App() {
     [startScan],
   )
 
+  /**
+   * Mouse side buttons: Chromium reports them as `button` 3 (back) and 4 (forward) on the
+   * document, above the keyboard bindings so a rebound key never disables the hardware.
+   * The pane under the pointer wins; elsewhere the active pane handles it, unless a modal
+   * owns the window.
+   */
+  useEffect(() => {
+    const onMouseUp = (ev: MouseEvent) => {
+      if (ev.button !== 3 && ev.button !== 4) return
+      ev.preventDefault()
+      const current = wsRef.current
+      if (!current) return
+      const target = ev.target instanceof Element ? ev.target.closest<HTMLElement>('[data-pane-id]') : null
+      if (!target && (settingsOpen || searchOpen || menu || prompt || batchRename || deleteConfirm)) return
+      const pane = current.panes[target?.dataset.paneId ?? current.activePaneId]
+      const tab = pane ? current.tabs[pane.activeTabId] : undefined
+      if (tab) historyMove(tab.id, ev.button === 3 ? -1 : 1)
+    }
+    window.addEventListener('mouseup', onMouseUp)
+    return () => window.removeEventListener('mouseup', onMouseUp)
+  }, [historyMove, settingsOpen, searchOpen, menu, prompt, batchRename, deleteConfirm])
+
   /** Tree rows: folders navigate the active tab, non-path locations go to the shell. */
   const openTreePath = useCallback(
     (path: string) => {
