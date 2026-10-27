@@ -433,23 +433,79 @@ fn letter_drives() -> Vec<Drive> {
 }
 
 /// Queries every letter in parallel with a short overall deadline: one dead network share
-/// must not stall the whole overview.
+/// must not stall the whole overview. Results are cached per root and a probe that is still
+/// blocked is not started again, so repeated refreshes cannot accumulate threads.
 fn fill_volumes(drives: &mut [Drive]) {
-    use std::sync::mpsc;
+    use std::sync::{mpsc, Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
     const DEADLINE: Duration = Duration::from_millis(1200);
+    const SUCCESS_TTL: Duration = Duration::from_secs(15);
+    const FAILURE_TTL: Duration = Duration::from_secs(60);
+
+    #[derive(Clone)]
+    struct Cached {
+        info: Option<VolumeInfo>,
+        checked: Instant,
+        inflight: bool,
+    }
+
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, Cached>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let now = Instant::now();
+    let mut spawn: Vec<String> = Vec::new();
+    {
+        let mut map = cache.lock().unwrap();
+        for drive in drives.iter_mut() {
+            let entry = map.entry(drive.root.clone()).or_insert_with(|| Cached {
+                info: None,
+                checked: now,
+                inflight: false,
+            });
+            if let Some(info) = &entry.info {
+                apply_volume(drive, info);
+            }
+            let ttl = match &entry.info {
+                Some(info) if info.available => SUCCESS_TTL,
+                _ => FAILURE_TTL,
+            };
+            let stale =
+                entry.info.is_none() || now.saturating_duration_since(entry.checked) >= ttl;
+            if stale && !entry.inflight {
+                entry.inflight = true;
+                spawn.push(drive.root.clone());
+            }
+        }
+    }
+    if spawn.is_empty() {
+        return;
+    }
+
     let (tx, rx) = mpsc::channel();
-    for drive in drives.iter() {
-        let root = drive.root.clone();
+    for root in &spawn {
+        let root = root.clone();
         let tx = tx.clone();
         std::thread::spawn(move || {
             let info = volume_info(&root);
+            if let Some(cache) = CACHE.get() {
+                if let Ok(mut map) = cache.lock() {
+                    map.insert(
+                        root.clone(),
+                        Cached {
+                            info: Some(info.clone()),
+                            checked: Instant::now(),
+                            inflight: false,
+                        },
+                    );
+                }
+            }
             let _ = tx.send((root, info));
         });
     }
+    drop(tx);
+
     let deadline = Instant::now() + DEADLINE;
-    for _ in 0..drives.len() {
+    for _ in 0..spawn.len() {
         let remaining = deadline.saturating_duration_since(Instant::now());
         let Ok((root, info)) = rx.recv_timeout(remaining) else {
             break;
@@ -457,12 +513,16 @@ fn fill_volumes(drives: &mut [Drive]) {
         let Some(drive) = drives.iter_mut().find(|drive| drive.root == root) else {
             continue;
         };
-        drive.label = info.label;
-        drive.fs = info.fs;
-        drive.total = info.total;
-        drive.free = info.free;
-        drive.available = info.available;
+        apply_volume(drive, &info);
     }
+}
+
+fn apply_volume(drive: &mut Drive, info: &VolumeInfo) {
+    drive.label = info.label.clone();
+    drive.fs = info.fs.clone();
+    drive.total = info.total;
+    drive.free = info.free;
+    drive.available = info.available;
 }
 
 /// Shortcuts from `%APPDATA%\Microsoft\Windows\Network Shortcuts`, the per-user
