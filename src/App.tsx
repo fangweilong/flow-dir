@@ -10,6 +10,7 @@ import { FeatureIcon, refreshIconCache } from './icons'
 import { ContextMenu } from './ContextMenu'
 import type { MenuItem } from './ContextMenu'
 import { OpsPanel } from './OpsPanel'
+import { FolderPickerDialog } from './FolderPickerDialog'
 import { HistoryPanel } from './HistoryPanel'
 import { PromptDialog } from './PromptDialog'
 import { BatchRenameDialog } from './BatchRenameDialog'
@@ -42,7 +43,6 @@ import {
   opCancel,
   opRetryElevated,
   opStart,
-  pickFolder,
   previewExternal,
   previewInfo,
   quitApp,
@@ -217,6 +217,8 @@ export default function App() {
   })
   const [toast, setToast] = useState<string | null>(null)
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null)
+  /** Archive waiting for a destination from the in-app folder picker. */
+  const [extractTarget, setExtractTarget] = useState<{ archive: string; initial: string } | null>(null)
   const [prompt, setPrompt] = useState<{
     paneId: string
     title: string
@@ -507,10 +509,10 @@ export default function App() {
     return () => window.clearTimeout(timer)
   }, [ws, gitByDir, gitEpoch, loadGit])
 
-  const showToast = useCallback((text: string) => {
+  const showToast = useCallback((text: string, ms = 2200) => {
     setToast(text)
     if (toastTimer.current) window.clearTimeout(toastTimer.current)
-    toastTimer.current = window.setTimeout(() => setToast(null), 2200)
+    toastTimer.current = window.setTimeout(() => setToast(null), ms)
   }, [])
 
   /**
@@ -2174,9 +2176,11 @@ export default function App() {
               ok: Math.max(0, progress.total - progress.failedCount),
               failed: progress.failedCount,
             }),
+            8000,
           )
-          // The failure list is where the skipped names (unsafe, encrypted) live.
-          drop(15000)
+          // The failure list is where the skipped names (unsafe, encrypted) live, so both
+          // the toast and the card stay long enough to read them.
+          drop(30000)
           return
         }
         showToast(t('op.done'))
@@ -2823,11 +2827,7 @@ export default function App() {
             {
               kind: 'item',
               label: t('menu.extractTo'),
-              onSelect: () => {
-                void pickFolder(t('menu.extractTo'), tabPath!).then((target) => {
-                  if (target) extractArchive(archivePath, target)
-                })
-              },
+              onSelect: () => setExtractTarget({ archive: archivePath, initial: tabPath! }),
             },
           ]
         : []
@@ -2922,12 +2922,6 @@ export default function App() {
       const selected = listData[tab.id]?.selected
       const names = selected && selected.has(entry.name) ? Array.from(selected) : [entry.name]
       const paths = names.map((name) => joinPath(tab.path, name))
-      // The shell menu owns the usual verbs but cannot carry ours, so an archive row gets
-      // the self-drawn menu instead — extraction lives there.
-      if (!isDir(entry.attrs) && names.length === 1 && isArchiveName(entry.name)) {
-        setMenu({ x: point.clientX, y: point.clientY, items: rowFallback(paneId, entry, paths) })
-        return
-      }
       const dpr = window.devicePixelRatio || 1
       void shellMenuShow(
         paths,
@@ -2935,10 +2929,14 @@ export default function App() {
         Math.round(point.screenY * dpr),
         point.shiftKey,
         t('menu.hash'),
+        { title: t('menu.extract'), here: t('menu.extractHere'), to: t('menu.extractTo') },
       )
         .then((outcome) => {
           if (outcome.action === 'hash') setFileTools({ mode: 'hash', paths })
-          else if (outcome.invoked) refreshPanes()
+          else if (outcome.action === 'extractHere') extractArchive(paths[0], tab.path)
+          else if (outcome.action === 'extractTo') {
+            setExtractTarget({ archive: paths[0], initial: tab.path })
+          } else if (outcome.invoked) refreshPanes()
         })
         .catch(() => {
           setMenu({ x: point.clientX, y: point.clientY, items: rowFallback(paneId, entry, paths) })
@@ -3952,6 +3950,20 @@ export default function App() {
       )}
 
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
+
+      {extractTarget && (
+        <FolderPickerDialog
+          title={t('menu.extractTo')}
+          initial={extractTarget.initial}
+          lang={lang}
+          onPick={(target) => {
+            const pending = extractTarget
+            setExtractTarget(null)
+            extractArchive(pending.archive, target)
+          }}
+          onClose={() => setExtractTarget(null)}
+        />
+      )}
 
       {prompt && (
         <PromptDialog

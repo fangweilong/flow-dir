@@ -3,7 +3,7 @@ name = "flowdir"
 version = "0.6.4"
 description = "FlowDir file manager"
 edition = "2021"
-rust-version = "1.90"
+rust-version = "1.93"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -22,6 +22,8 @@ flate2 = "1"
 bzip2 = "0.6"
 lzma-rust2 = "0.24"
 ruzstd = "0.9"
+sevenz-rust2 = "0.24"
+cab = "0.6"
 jwalk = "0.9"
 log = "0.4"
 webview2-com = "0.39"

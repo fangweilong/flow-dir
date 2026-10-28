@@ -32,7 +32,17 @@ export function OpsPanel({ ops, lang, onCancel, onDismiss, onRetryElevated, elev
     <div className="fixed bottom-10 right-4 z-50 flex w-[18.75rem] flex-col gap-2">
       {ops.map((op) => {
         const key = PHASE_KEY[op.phase as keyof typeof PHASE_KEY]
-        const label = key ? t(key) : t('op.working')
+        // A finished card must not keep saying "working"; failures stay readable there.
+        const label = op.done
+          ? op.failedCount > 0
+            ? t('op.partial', {
+                ok: Math.max(0, op.total - op.failedCount),
+                failed: op.failedCount,
+              })
+            : t('op.done')
+          : key
+            ? t(key)
+            : t('op.working')
         const percent =
           op.workTotal > 0
             ? Math.min(100, Math.round((op.work / op.workTotal) * 100))
@@ -53,7 +63,7 @@ export function OpsPanel({ ops, lang, onCancel, onDismiss, onRetryElevated, elev
                     {t('op.items', { current: Math.min(op.current, op.total), total: op.total })}
                   </span>
                 )}
-                {op.failedCount > 0 && (
+                {!op.done && op.failedCount > 0 && (
                   <span className="ml-1.5 font-normal text-red-500">
                     {t('op.failedCount', { count: op.failedCount })}
                   </span>

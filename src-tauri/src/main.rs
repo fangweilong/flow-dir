@@ -699,10 +699,19 @@ async fn shell_menu_show(
     y: i32,
     extended: bool,
     hash_label: Option<String>,
+    extract_title: Option<String>,
+    extract_here: Option<String>,
+    extract_to: Option<String>,
 ) -> Result<shell_menu::Outcome, ApiError> {
-    tauri::async_runtime::spawn_blocking(move || shell_menu::show(paths, x, y, extended, hash_label))
-        .await
-        .map_err(|e| ApiError::new("THREAD", e.to_string()))?
+    let extract = match (extract_title, extract_here, extract_to) {
+        (Some(title), Some(here), Some(to)) => Some(shell_menu::ExtractLabels { title, here, to }),
+        _ => None,
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        shell_menu::show(paths, x, y, extended, hash_label, extract)
+    })
+    .await
+    .map_err(|e| ApiError::new("THREAD", e.to_string()))?
 }
 
 #[tauri::command]

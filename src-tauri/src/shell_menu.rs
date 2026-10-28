@@ -41,7 +41,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
     GetMenuItemCount, GetMenuItemID, InsertMenuItemW, PostMessageW, RegisterClassW,
     SetForegroundWindow, TrackPopupMenuEx, HMENU, MENUITEMINFOW, MF_SEPARATOR, MF_STRING, MFT_STRING,
-    MIIM_BITMAP, MIIM_ID, MIIM_STRING, SM_CXSMICON, SW_SHOWNORMAL, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    MIIM_BITMAP, MIIM_ID, MIIM_STRING, MIIM_SUBMENU, SM_CXSMICON, SW_SHOWNORMAL, TPM_RETURNCMD, TPM_RIGHTBUTTON,
     TPM_WORKAREA, WM_DRAWITEM, WM_INITMENUPOPUP, WM_MEASUREITEM, WM_MENUCHAR, WM_NULL, WNDCLASSW,
     WS_POPUP,
 };
@@ -56,6 +56,8 @@ const ID_CUSTOM_TOGGLE_HIDDEN: u32 = 0xC000;
 const ID_CUSTOM_FIND_DUPLICATES: u32 = 0xC001;
 const ID_CUSTOM_HASH: u32 = 0xC002;
 const ID_CUSTOM_COMPARE: u32 = 0xC003;
+const ID_CUSTOM_EXTRACT_HERE: u32 = 0xC010;
+const ID_CUSTOM_EXTRACT_TO: u32 = 0xC011;
 
 /// GDI+'s `PixelFormat32bppARGB`; the crate exposes no constant for it.
 const PIXEL_FORMAT_32BPP_ARGB: i32 = 0x0026_200A;
@@ -78,6 +80,23 @@ enum MenuGlyph {
     Compare,
     /// Two offset rectangles, read as "the same file twice".
     Duplicates,
+}
+
+/// Localized labels for the extraction submenu on an archive row.
+pub struct ExtractLabels {
+    pub title: String,
+    pub here: String,
+    pub to: String,
+}
+
+/// Only a single archive file gets the submenu: folders, multi-selections and formats
+/// without an in-process backend are left to the shell's own verbs.
+fn extract_applies(paths: &[String]) -> bool {
+    paths.len() == 1
+        && crate::archive::format::from_name(&paths[0]).is_some()
+        && std::fs::metadata(&paths[0])
+            .map(|meta| !meta.is_dir())
+            .unwrap_or(false)
 }
 
 /// Keeps the menu bitmaps alive while the popup is on screen: the menu does not copy them.
@@ -186,6 +205,37 @@ unsafe fn insert_extra(menu: HMENU, extra: &Extra<'_>, bitmap: Option<HBITMAP>) 
     }
 }
 
+/// Appends FlowDir's extraction submenu; the two leaves return their own command ids,
+/// which nested popups do report from `TrackPopupMenuEx`.
+unsafe fn insert_submenu(menu: HMENU, labels: &ExtractLabels) {
+    unsafe {
+        let Ok(submenu) = CreatePopupMenu() else {
+            return;
+        };
+        for (id, label) in [
+            (ID_CUSTOM_EXTRACT_HERE, &labels.here),
+            (ID_CUSTOM_EXTRACT_TO, &labels.to),
+        ] {
+            let wide = HSTRING::from(label.as_str());
+            let _ = AppendMenuW(submenu, MF_STRING, id as usize, &wide);
+        }
+        let wide = HSTRING::from(labels.title.as_str());
+        let info = MENUITEMINFOW {
+            cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+            fMask: MIIM_STRING | MIIM_SUBMENU,
+            fType: MFT_STRING,
+            dwTypeData: PWSTR(wide.as_ptr() as *mut u16),
+            cch: wide.len() as u32,
+            hSubMenu: submenu,
+            ..Default::default()
+        };
+        let index = GetMenuItemCount(Some(menu)).max(0) as u32;
+        if InsertMenuItemW(menu, index, true, &info).is_err() {
+            let _ = DestroyMenu(submenu);
+        }
+    }
+}
+
 #[derive(Serialize, Clone)]
 pub struct Outcome {
     pub invoked: bool,
@@ -245,11 +295,14 @@ pub fn show(
     y: i32,
     extended: bool,
     hash_label: Option<String>,
+    extract: Option<ExtractLabels>,
 ) -> Result<Outcome, ApiError> {
     if paths.is_empty() {
         return Err(ApiError::new("EMPTY", "no paths"));
     }
-    run_on_menu_thread(move || unsafe { run_items(&paths, x, y, extended, hash_label.as_deref()) })
+    run_on_menu_thread(move || unsafe {
+        run_items(&paths, x, y, extended, hash_label.as_deref(), extract.as_ref())
+    })
 }
 
 /// Shows Explorer's folder-background menu for `path`. `toggle_label`, `dup_label` and
@@ -303,13 +356,14 @@ unsafe fn run_items(
     y: i32,
     extended: bool,
     hash_label: Option<&str>,
+    extract: Option<&ExtractLabels>,
 ) -> Result<Outcome, ApiError> {
     unsafe {
         let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         CoInitializeEx(None, COINIT_APARTMENTTHREADED)
             .ok()
             .map_err(|e| ApiError::new("COM", e.to_string()))?;
-        let result = build_items(paths, x, y, extended, hash_label);
+        let result = build_items(paths, x, y, extended, hash_label, extract);
         CoUninitialize();
         result
     }
@@ -341,6 +395,7 @@ unsafe fn build_items(
     y: i32,
     extended: bool,
     hash_label: Option<&str>,
+    extract: Option<&ExtractLabels>,
 ) -> Result<Outcome, ApiError> {
     unsafe {
         let mut pidls: Vec<*const windows::Win32::UI::Shell::Common::ITEMIDLIST> =
@@ -375,7 +430,8 @@ unsafe fn build_items(
             })
             .into_iter()
             .collect();
-        let outcome = track(hwnd, &context, x, y, flags, &extras);
+        let extract = extract.filter(|_| extract_applies(paths));
+        let outcome = track(hwnd, &context, x, y, flags, &extras, extract);
         drop(context);
         drop(array);
         drop(cleanup);
@@ -454,7 +510,7 @@ unsafe fn build_background(
                 glyph: Some(MenuGlyph::Compare),
             },
         ];
-        let outcome = track(hwnd, &context, x, y, flags, &extras);
+        let outcome = track(hwnd, &context, x, y, flags, &extras, None);
         drop(context);
         drop(cleanup);
         outcome
@@ -469,6 +525,7 @@ unsafe fn track(
     y: i32,
     flags: u32,
     extras: &[Extra<'_>],
+    extract: Option<&ExtractLabels>,
 ) -> Result<Outcome, ApiError> {
     unsafe {
         let menu2: Option<IContextMenu2> = context.cast().ok();
@@ -492,8 +549,13 @@ unsafe fn track(
         }
 
         let mut bitmaps = GlyphBitmaps(Vec::new());
-        if !extras.is_empty() {
+        if extract.is_some() || !extras.is_empty() {
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        }
+        if let Some(labels) = extract {
+            insert_submenu(menu, labels);
+        }
+        if !extras.is_empty() {
             let size = glyph_size(x, y);
             for extra in extras {
                 let bitmap = extra.glyph.and_then(|glyph| glyph_bitmap(glyph, size));
@@ -521,7 +583,11 @@ unsafe fn track(
             id: command,
             action: None,
         };
-        if let Some(extra) = extras.iter().find(|extra| extra.id == command) {
+        if command == ID_CUSTOM_EXTRACT_HERE {
+            outcome.action = Some("extractHere".into());
+        } else if command == ID_CUSTOM_EXTRACT_TO {
+            outcome.action = Some("extractTo".into());
+        } else if let Some(extra) = extras.iter().find(|extra| extra.id == command) {
             outcome.action = Some(extra.action.into());
         } else if (ID_CMD_FIRST..=ID_CMD_LAST).contains(&command) {
             let offset = command - ID_CMD_FIRST;
@@ -735,7 +801,38 @@ impl Drop for PidlGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows::Win32::UI::WindowsAndMessaging::GetMenuItemCount;
+    use windows::Win32::UI::WindowsAndMessaging::{GetMenuItemCount, GetMenuStringW, MF_BYPOSITION};
+
+    /// The submenu is inserted with `MIIM_SUBMENU`, which `AppendMenuW` cannot express;
+    /// a broken insert would silently leave the archive row without extraction.
+    #[test]
+    fn extraction_submenu_lands_after_the_shell_entries() {
+        unsafe {
+            let menu = CreatePopupMenu().expect("popup menu");
+            insert_extra(
+                menu,
+                &Extra {
+                    id: ID_CUSTOM_HASH,
+                    label: "校验和",
+                    action: "hash",
+                    glyph: None,
+                },
+                None,
+            );
+            let labels = ExtractLabels {
+                title: "解压".into(),
+                here: "解压到当前文件夹".into(),
+                to: "解压到…".into(),
+            };
+            insert_submenu(menu, &labels);
+            assert_eq!(GetMenuItemCount(Some(menu)), 2);
+            let mut buffer = [0u16; 64];
+            let length = GetMenuStringW(menu, 1, Some(&mut buffer), MF_BYPOSITION);
+            assert!(length > 0, "submenu title missing");
+            assert_eq!(String::from_utf16_lossy(&buffer[..length as usize]), "解压");
+            let _ = DestroyMenu(menu);
+        }
+    }
 
     /// Guards the integration point: the folder's view object must yield a populated
     /// background menu, otherwise the app silently falls back to the self-drawn menu.

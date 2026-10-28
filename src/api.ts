@@ -198,13 +198,26 @@ export const logDirPath = () => invoke<string | null>('log_dir_path')
 /** Writes a diagnostics zip into `dir` and returns its path. */
 export const diagnosticsExport = (dir: string) => invoke<string>('diagnostics_export', { dir })
 
+export type ExtractMenuLabels = { title: string; here: string; to: string }
+/** `extract` adds FlowDir's extraction submenu; the backend hides it for non-archives. */
 export const shellMenuShow = (
   paths: string[],
   x: number,
   y: number,
   extended: boolean,
   hashLabel?: string,
-) => invoke<MenuOutcome>('shell_menu_show', { paths, x, y, extended, hashLabel: hashLabel ?? null })
+  extract?: ExtractMenuLabels,
+) =>
+  invoke<MenuOutcome>('shell_menu_show', {
+    paths,
+    x,
+    y,
+    extended,
+    hashLabel: hashLabel ?? null,
+    extractTitle: extract?.title ?? null,
+    extractHere: extract?.here ?? null,
+    extractTo: extract?.to ?? null,
+  })
 export const shellMenuBackgroundShow = (
   path: string,
   x: number,

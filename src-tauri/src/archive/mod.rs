@@ -223,6 +223,55 @@ mod tests {
     }
 
     #[test]
+    fn sevenz_and_cab_round_trip() {
+        let dir = temp_dir("sevenz-cab");
+
+        let seven = dir.join("sample.7z");
+        let mut writer = sevenz_rust2::ArchiveWriter::create(&seven).unwrap();
+        writer
+            .push_archive_entry(
+                sevenz_rust2::ArchiveEntry::new_file("相册/照片.txt"),
+                Some(&b"7z body"[..]),
+            )
+            .unwrap();
+        writer
+            .push_archive_entry(
+                sevenz_rust2::ArchiveEntry::new_file("plain.txt"),
+                Some(&b"plain"[..]),
+            )
+            .unwrap();
+        writer.finish().unwrap();
+
+        let dest = dir.join("out7z");
+        let progress = extract(&seven, &dest);
+        assert!(progress.error.is_none(), "{:?}", progress.error);
+        assert_eq!(std::fs::read(dest.join("相册\\照片.txt")).unwrap(), b"7z body");
+        assert_eq!(std::fs::read(dest.join("plain.txt")).unwrap(), b"plain");
+
+        let cab = dir.join("sample.cab");
+        let file = std::fs::File::create(&cab).unwrap();
+        let mut builder = cab::CabinetBuilder::new();
+        builder
+            .add_folder(cab::CompressionType::MsZip)
+            .add_file("docs/说明.txt");
+        let mut writer = builder.build(file).unwrap();
+        // Payloads are written in the same order the files were declared.
+        writer
+            .next_file()
+            .unwrap()
+            .unwrap()
+            .write_all(b"cab body")
+            .unwrap();
+        writer.finish().unwrap();
+
+        let dest = dir.join("outcab");
+        let progress = extract(&cab, &dest);
+        assert!(progress.error.is_none(), "{:?}", progress.error);
+        assert_eq!(std::fs::read(dest.join("docs\\说明.txt")).unwrap(), b"cab body");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn start_extracts_on_a_background_thread() {
         let dir = temp_dir("start");
         let archive = dir.join("job.zip");

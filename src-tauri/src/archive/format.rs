@@ -1,7 +1,7 @@
 //! Archive format detection and the name an extraction should use.
 //!
 //! The extension decides when it is unambiguous; magic bytes are the fallback for
-//! extension-less files. Formats without an in-process backend (7z, rar, cab, iso) are
+//! extension-less files. Formats without an in-process backend (rar, iso, lzh) are
 //! reported as unsupported instead of being handed to a decoder that cannot read them.
 
 use std::io::Read;
@@ -10,6 +10,8 @@ use std::io::Read;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Format {
     Zip,
+    SevenZ,
+    Cab,
     Tar,
     TarGz,
     TarBz2,
@@ -31,7 +33,7 @@ impl Format {
 }
 
 /// Suffixes in longest-first order so `.tar.gz` is tested before `.gz`.
-const SUFFIXES: [(&str, Format); 15] = [
+const SUFFIXES: [(&str, Format); 17] = [
     (".tar.bz2", Format::TarBz2),
     (".tar.zst", Format::TarZst),
     (".tar.gz", Format::TarGz),
@@ -42,6 +44,8 @@ const SUFFIXES: [(&str, Format); 15] = [
     (".txz", Format::TarXz),
     (".tar", Format::Tar),
     (".zip", Format::Zip),
+    (".7z", Format::SevenZ),
+    (".cab", Format::Cab),
     (".bz2", Format::Bz2),
     (".zst", Format::Zst),
     (".gz", Format::Gz),
@@ -87,6 +91,12 @@ pub fn detect(path: &str) -> Option<Format> {
     if bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06") {
         return Some(Format::Zip);
     }
+    if bytes.starts_with(&[0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]) {
+        return Some(Format::SevenZ);
+    }
+    if bytes.starts_with(b"MSCF") {
+        return Some(Format::Cab);
+    }
     if bytes.starts_with(b"\x1f\x8b") {
         return Some(Format::Gz);
     }
@@ -116,7 +126,9 @@ mod tests {
         assert_eq!(from_name("a.tgz"), Some(Format::TarGz));
         assert_eq!(from_name("a.tar.bz2"), Some(Format::TarBz2));
         assert_eq!(from_name("a.zst"), Some(Format::Zst));
-        assert_eq!(from_name("a.7z"), None);
+        assert_eq!(from_name("a.7z"), Some(Format::SevenZ));
+        assert_eq!(from_name("a.CAB"), Some(Format::Cab));
+        assert_eq!(from_name("a.rar"), None);
         assert_eq!(from_name("a.txt"), None);
     }
 

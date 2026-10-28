@@ -35,7 +35,9 @@ fn reader(path: &str, format: Format) -> Result<Box<dyn Read>, ApiError> {
             ruzstd::decoding::StreamingDecoder::new(buffered)
                 .map_err(|e| ApiError::new("ARCHIVE", e.to_string()))?,
         ),
-        Format::Zip => return Err(ApiError::new("INTERNAL", "zip is not a stream format")),
+        Format::Zip | Format::SevenZ | Format::Cab => {
+            return Err(ApiError::new("INTERNAL", "not a stream format"))
+        }
     };
     Ok(reader)
 }
@@ -43,18 +45,122 @@ fn reader(path: &str, format: Format) -> Result<Box<dyn Read>, ApiError> {
 pub fn extract(archive: &str, sink: &mut Sink) -> Result<(), ApiError> {
     let format = format::detect(archive)
         .ok_or_else(|| ApiError::new("UNSUPPORTED_FORMAT", name_of(archive)))?;
-    if crate::archive::format::Format::Zip == format {
-        // The central directory makes the totals known up front; show that pass as its
-        // own phase so a huge archive does not look idle.
-        sink.progress_phase("plan");
-        extract_zip(archive, sink)
-    } else if format.is_tar() {
-        sink.progress_phase("extract");
-        extract_tar(reader(archive, format)?, sink)
-    } else {
-        sink.progress_phase("extract");
-        extract_stream(archive, format, sink)
+    match format {
+        // Indexed formats know their totals up front; show that pass as its own phase so
+        // a huge archive does not look idle.
+        Format::Zip => {
+            sink.progress_phase("plan");
+            extract_zip(archive, sink)
+        }
+        Format::SevenZ => {
+            sink.progress_phase("plan");
+            extract_7z(archive, sink)
+        }
+        Format::Cab => {
+            sink.progress_phase("plan");
+            extract_cab(archive, sink)
+        }
+        format if format.is_tar() => {
+            sink.progress_phase("extract");
+            extract_tar(reader(archive, format)?, sink)
+        }
+        format => {
+            sink.progress_phase("extract");
+            extract_stream(archive, format, sink)
+        }
     }
+}
+
+fn extract_7z(path: &str, sink: &mut Sink) -> Result<(), ApiError> {
+    use sevenz_rust2::{ArchiveReader, Password};
+
+    let mut reader = ArchiveReader::open(path, Password::empty())
+        .map_err(|err| ApiError::new("ARCHIVE", err.to_string()))?;
+    let entries: Vec<(String, u64, bool)> = reader
+        .archive()
+        .files
+        .iter()
+        .map(|file| (file.name.clone(), file.size, file.is_directory))
+        .collect();
+    let total: u64 = entries.iter().filter(|(_, _, dir)| !dir).map(|(_, size, _)| *size).sum();
+    sink.set_totals(Some(entries.len() as u32), Some(total))?;
+    sink.progress_phase("extract");
+
+    // The closure can only report sevenz errors, so an abort is parked here and returned
+    // once the reader stops (it always stops immediately after).
+    let mut abort: Option<ApiError> = None;
+    let walked = reader.for_each_entries(|file, read| {
+        if abort.is_some() {
+            return Ok(false);
+        }
+        if sink.cancelled() {
+            abort = Some(ApiError::new("CANCELED", "extraction canceled"));
+            return Ok(false);
+        }
+        let rel = match entry::decode(file.name.as_bytes(), true) {
+            Ok(rel) => rel,
+            Err(err) => {
+                sink.skip(&file.name, &err.code);
+                return Ok(true);
+            }
+        };
+        match sink.accept(&rel, file.is_directory, false) {
+            Ok(Take::Skip | Take::Dir) => Ok(true),
+            Ok(Take::File(target)) => match sink.write(&target, read, file.size) {
+                Ok(()) => Ok(true),
+                Err(err) => {
+                    abort = Some(err);
+                    Ok(false)
+                }
+            },
+            Err(err) => {
+                abort = Some(err);
+                Ok(false)
+            }
+        }
+    });
+    if let Some(err) = abort {
+        return Err(err);
+    }
+    walked.map_err(|err| ApiError::new("ARCHIVE", err.to_string()))?;
+    Ok(())
+}
+
+/// Cabinets carry no directory entries; the sink creates parents from each file path.
+fn extract_cab(path: &str, sink: &mut Sink) -> Result<(), ApiError> {
+    let file = File::open(path).map_err(|err| ApiError::from_io(path, &err))?;
+    let mut cabinet = cab::Cabinet::new(file).map_err(|err| ApiError::new("ARCHIVE", err.to_string()))?;
+    let mut entries: Vec<(String, u64, bool)> = Vec::new();
+    for folder in cabinet.folder_entries() {
+        for file in folder.file_entries() {
+            entries.push((
+                file.name().to_string(),
+                file.uncompressed_size() as u64,
+                file.is_name_utf(),
+            ));
+        }
+    }
+    let total: u64 = entries.iter().map(|(_, size, _)| *size).sum();
+    sink.set_totals(Some(entries.len() as u32), Some(total))?;
+    sink.progress_phase("extract");
+
+    for (name, size, utf8) in entries {
+        let rel = match entry::decode(name.as_bytes(), utf8) {
+            Ok(rel) => rel,
+            Err(err) => {
+                sink.skip(&name, &err.code);
+                continue;
+            }
+        };
+        let Take::File(target) = sink.accept(&rel, false, false)? else {
+            continue;
+        };
+        let mut reader = cabinet
+            .read_file(&name)
+            .map_err(|err| ApiError::new("ARCHIVE", err.to_string()))?;
+        sink.write(&target, &mut reader, size)?;
+    }
+    Ok(())
 }
 
 fn extract_zip(path: &str, sink: &mut Sink) -> Result<(), ApiError> {
@@ -198,6 +304,46 @@ pub fn list(path: &str, limit: usize) -> Result<Vec<ArchiveEntry>, ApiError> {
                     name,
                     size: file.size(),
                 });
+            }
+        }
+        return Ok(entries);
+    }
+    if format == Format::SevenZ {
+        use sevenz_rust2::{ArchiveReader, Password};
+        let reader = ArchiveReader::open(path, Password::empty())
+            .map_err(|err| ApiError::new("ARCHIVE", err.to_string()))?;
+        return Ok(reader
+            .archive()
+            .files
+            .iter()
+            .filter(|file| !file.name.is_empty())
+            .take(limit)
+            .filter_map(|file| {
+                entry::decode(file.name.as_bytes(), true)
+                    .ok()
+                    .map(|name| ArchiveEntry {
+                        name,
+                        size: file.size,
+                    })
+            })
+            .collect());
+    }
+    if format == Format::Cab {
+        let file = File::open(path).map_err(|err| ApiError::from_io(path, &err))?;
+        let cabinet =
+            cab::Cabinet::new(file).map_err(|err| ApiError::new("ARCHIVE", err.to_string()))?;
+        let mut entries = Vec::new();
+        for folder in cabinet.folder_entries() {
+            for item in folder.file_entries() {
+                if entries.len() >= limit {
+                    return Ok(entries);
+                }
+                if let Ok(name) = entry::decode(item.name().as_bytes(), item.is_name_utf()) {
+                    entries.push(ArchiveEntry {
+                        name,
+                        size: item.uncompressed_size() as u64,
+                    });
+                }
             }
         }
         return Ok(entries);
