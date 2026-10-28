@@ -2967,18 +2967,20 @@ export default function App() {
 
   const activePane = ws?.panes[ws.activePaneId]
   const activeTab = activePane ? ws?.tabs[activePane.activeTabId] : undefined
-  // Seeds for the compare view: the first two panes in layout order that show a real folder.
-  // The panel can also take a typed or picked folder, so one pane is enough and the second
-  // seed may stay empty. A virtual root (drives overview, search result) has nothing to compare.
+  // Seeds for the compare view: the first two real folders, panes in layout order first and
+  // then any remaining tab. A single pane with two tabs therefore compares both of them, and
+  // a virtual root (drives overview, search result) has nothing to compare.
   const comparePaths = useMemo(() => {
     if (!ws) return []
     const paths: string[] = []
+    const add = (path: string) => {
+      if (paths.length < 2 && path && isFsPath(path) && !paths.includes(path)) paths.push(path)
+    }
     for (const id of paneIds(ws.root)) {
       const pane = ws.panes[id]
-      const path = pane ? ws.tabs[pane.activeTabId]?.path ?? '' : ''
-      if (path && isFsPath(path) && !paths.includes(path)) paths.push(path)
-      if (paths.length === 2) break
+      if (pane) add(ws.tabs[pane.activeTabId]?.path ?? '')
     }
+    for (const tab of Object.values(ws.tabs)) add(tab.path)
     return paths
   }, [ws])
 
