@@ -23,6 +23,7 @@ import { themeIsDark } from './themes'
 import { SettingsModal } from './SettingsModal'
 import { SidebarTree } from './SidebarTree'
 import {
+  archiveExtract,
   cancelDir,
   clipboardCopy,
   clipboardPaste,
@@ -41,6 +42,7 @@ import {
   opCancel,
   opRetryElevated,
   opStart,
+  pickFolder,
   previewExternal,
   previewInfo,
   quitApp,
@@ -90,7 +92,7 @@ import {
 } from './fonts'
 import { DEFAULT_SETTINGS, fromSnapshot, toSnapshot } from './persist'
 import type { Settings } from './persist'
-import { baseName, isDir, isFsPath, joinPath, parentPath, pathKey, sameVolume, treeChain, underPath } from './paths'
+import { baseName, isArchiveName, isDir, isFsPath, joinPath, parentPath, pathKey, sameVolume, treeChain, underPath } from './paths'
 import { centerOffset } from './scroll'
 import { formatBinding, isTextInput, matchBinding, menuHint, resolveShortcuts } from './shortcuts'
 import {
@@ -2120,6 +2122,73 @@ export default function App() {
     [elevating, refreshPanes, showToast, t],
   )
 
+  /**
+   * Extracts one archive into `dest`. It reuses the operation card for progress, and the
+   * job lives in the backend's op state, so the existing cancel button stops it.
+   */
+  const extractArchive = useCallback(
+    (archive: string, dest: string) => {
+      const opId = `extract-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      setOps((prev) => ({
+        ...prev,
+        [opId]: {
+          opId,
+          phase: 'extract',
+          current: 0,
+          total: 0,
+          name: null,
+          work: 0,
+          workTotal: 0,
+          failedCount: 0,
+          failed: [],
+          done: false,
+          aborted: false,
+          error: null,
+        },
+      }))
+      const drop = (delay: number) =>
+        window.setTimeout(() => {
+          setOps((prev) => {
+            const next = { ...prev }
+            delete next[opId]
+            return next
+          })
+        }, delay)
+      archiveExtract(opId, archive, dest, (progress) => {
+        setOps((prev) => (prev[opId] ? { ...prev, [opId]: progress } : prev))
+        if (!progress.done) return
+        if (progress.error) {
+          showToast(t('op.failed', { code: progress.error.code }))
+          drop(5000)
+          return
+        }
+        if (progress.aborted) {
+          showToast(t('op.canceled'))
+          drop(2500)
+          return
+        }
+        refreshPanes()
+        if (progress.failedCount > 0) {
+          showToast(
+            t('op.partial', {
+              ok: Math.max(0, progress.total - progress.failedCount),
+              failed: progress.failedCount,
+            }),
+          )
+          // The failure list is where the skipped names (unsafe, encrypted) live.
+          drop(15000)
+          return
+        }
+        showToast(t('op.done'))
+        drop(800)
+      }).catch((e: unknown) => {
+        showToast(t('op.failed', { code: errorCode(e) }))
+        drop(4000)
+      })
+    },
+    [refreshPanes, showToast, t],
+  )
+
   /** Runs one reverse/replay step and resolves with the shell outcome. */
   const runStep = useCallback(
     (kind: OpKind, sources: string[], options: Parameters<typeof runOp>[2] = {}) =>
@@ -2737,6 +2806,31 @@ export default function App() {
   const rowFallback = useCallback(
     (paneId: string, entry: Entry, paths: string[]): MenuItem[] => {
       const dir = isDir(entry.attrs)
+      const pane = wsRef.current?.panes[paneId]
+      const tabPath = pane ? wsRef.current?.tabs[pane.activeTabId]?.path : undefined
+      const archivePath =
+        !dir && paths.length === 1 && tabPath && isArchiveName(entry.name)
+          ? joinPath(tabPath, entry.name)
+          : null
+      const archiveMenu: MenuItem[] = archivePath
+        ? [
+            { kind: 'sep' },
+            {
+              kind: 'item',
+              label: t('menu.extractHere'),
+              onSelect: () => extractArchive(archivePath, tabPath!),
+            },
+            {
+              kind: 'item',
+              label: t('menu.extractTo'),
+              onSelect: () => {
+                void pickFolder(t('menu.extractTo'), tabPath!).then((target) => {
+                  if (target) extractArchive(archivePath, target)
+                })
+              },
+            },
+          ]
+        : []
       return [
         {
           kind: 'item',
@@ -2797,12 +2891,25 @@ export default function App() {
           danger: true,
           onSelect: () => deleteEntries(paneId, [entry.name], true),
         },
+        ...archiveMenu,
         { kind: 'sep' },
         { kind: 'item', label: t('menu.hash'), onSelect: () => setFileTools({ mode: 'hash', paths }) },
         { kind: 'item', label: t('menu.copyPath'), onSelect: () => copyPaths(paths) },
       ]
     },
-    [copyPaths, deleteEntries, keys, openInNewPane, openTarget, pasteInto, showToast, startRename, startRenameMany, t],
+    [
+      copyPaths,
+      deleteEntries,
+      extractArchive,
+      keys,
+      openInNewPane,
+      openTarget,
+      pasteInto,
+      showToast,
+      startRename,
+      startRenameMany,
+      t,
+    ],
   )
 
   const openRowMenu = useCallback(
@@ -2815,6 +2922,12 @@ export default function App() {
       const selected = listData[tab.id]?.selected
       const names = selected && selected.has(entry.name) ? Array.from(selected) : [entry.name]
       const paths = names.map((name) => joinPath(tab.path, name))
+      // The shell menu owns the usual verbs but cannot carry ours, so an archive row gets
+      // the self-drawn menu instead — extraction lives there.
+      if (!isDir(entry.attrs) && names.length === 1 && isArchiveName(entry.name)) {
+        setMenu({ x: point.clientX, y: point.clientY, items: rowFallback(paneId, entry, paths) })
+        return
+      }
       const dpr = window.devicePixelRatio || 1
       void shellMenuShow(
         paths,

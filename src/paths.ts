@@ -135,6 +135,13 @@ export function sameVolume(a: string, b: string): boolean {
 
 export const isDir = (attrs: number) => (attrs & 0x10) !== 0
 
+/** Archives the backend can extract in-process; 7z/rar/cab are not listed yet. */
+const ARCHIVE_EXTS = ['zip', 'tar', 'tgz', 'tbz', 'tbz2', 'txz', 'tzst', 'gz', 'bz2', 'xz', 'zst']
+export const isArchiveName = (name: string) => {
+  const lower = name.toLowerCase()
+  return ARCHIVE_EXTS.some((ext) => lower.endsWith(`.${ext}`))
+}
+
 export const formatSize = (n: number, dir: boolean) => {
   if (dir) return ''
   if (!Number.isFinite(n) || n < 0 || n > 1e15) return '—'

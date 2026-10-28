@@ -14,6 +14,9 @@ type Props = {
 }
 
 const PHASE_KEY = {
+  plan: 'op.planning',
+  extract: 'op.extracting',
+  merge: 'op.merging',
   copy: 'op.copying',
   move: 'op.moving',
   delete: 'op.deleting',

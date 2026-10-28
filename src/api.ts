@@ -97,6 +97,18 @@ export function opStart(request: OpRequest, onProgress: (progress: OpProgress) =
 
 export const opCancel = (opId: string) => invoke<void>('op_cancel', { opId })
 
+/** Extracts one archive into `dest`; cancel it through {@link opCancel}. */
+export function archiveExtract(
+  jobId: string,
+  archive: string,
+  dest: string,
+  onProgress: (progress: OpProgress) => void,
+) {
+  const channel = new Channel<OpProgress>()
+  channel.onmessage = onProgress
+  return invoke<void>('archive_extract', { jobId, archive, dest, onProgress: channel })
+}
+
 /** Streaming SHA-256/SHA-1/MD5 over the given paths; results arrive with the final message. */
 export function hashStart(
   jobId: string,

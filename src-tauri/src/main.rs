@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod archive;
 mod clipboard;
 mod compare;
 mod dragout;
@@ -532,6 +533,19 @@ fn op_start(
 #[tauri::command]
 fn op_cancel(state: tauri::State<'_, ops::OpState>, op_id: String) {
     state.cancel(&op_id);
+}
+
+/// Extracts one archive into `dest`; progress arrives on the channel and `op_cancel`
+/// stops it, because extraction registers itself in the shared op state.
+#[tauri::command(rename_all = "camelCase")]
+fn archive_extract(
+    state: tauri::State<'_, ops::OpState>,
+    job_id: String,
+    archive: String,
+    dest: String,
+    on_progress: Channel<ops::OpProgress>,
+) -> Result<(), ApiError> {
+    archive::start(&state, job_id, archive, dest, on_progress)
 }
 
 /// Starts a checksum job; progress arrives on the channel and `tool_cancel` stops it.
@@ -1321,6 +1335,7 @@ fn main() {
             op_start,
             op_cancel,
             op_retry_elevated,
+            archive_extract,
             hash_start,
             dup_start,
             compare_level,

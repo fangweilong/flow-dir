@@ -30,6 +30,7 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
 
+use crate::archive::{self, ArchiveEntry};
 use crate::error::ApiError;
 use crate::settings::{ExternalPreview, Settings};
 
@@ -150,12 +151,6 @@ impl PreviewCache {
             }
         }
     }
-}
-
-#[derive(Serialize, Clone)]
-pub struct ArchiveEntry {
-    pub name: String,
-    pub size: u64,
 }
 
 #[derive(Serialize, Clone)]
@@ -459,23 +454,15 @@ pub fn info(
         return Ok(info);
     }
 
+    // Every format the extraction layer reads can also be listed here, so 7z/rar/tar
+    // previews are no longer limited to zip's central directory.
+    if archive::format::from_name(&path).is_some() {
+        info.kind = "archive".to_string();
+        info.entries = Some(archive::preview_entries(&path, MAX_ARCHIVE_ENTRIES)?);
+        return Ok(info);
+    }
+
     match ext.as_str() {
-        "zip" => {
-            let file = std::fs::File::open(&path).map_err(|e| ApiError::from_io(&path, &e))?;
-            let mut archive =
-                zip::ZipArchive::new(file).map_err(|e| ApiError::new("ARCHIVE", e.to_string()))?;
-            let mut entries = Vec::new();
-            for index in 0..archive.len().min(MAX_ARCHIVE_ENTRIES) {
-                if let Ok(entry) = archive.by_index(index) {
-                    entries.push(ArchiveEntry {
-                        name: entry.name().map(|n| n.to_string()).unwrap_or_default(),
-                        size: entry.size(),
-                    });
-                }
-            }
-            info.kind = "archive".to_string();
-            info.entries = Some(entries);
-        }
         "exe" | "dll" | "sys" | "msi" => {
             info.kind = "binary".to_string();
             info.meta = Some(version_rows(&path));
