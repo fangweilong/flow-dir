@@ -15,6 +15,9 @@ type Props = {
 export function ContextMenu({ x, y, items, onClose }: Props) {
   const ref = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState({ x, y })
+  /** Enabled entries in DOM order; arrow keys walk this list, skips separators. */
+  const entries = () =>
+    Array.from(ref.current?.querySelectorAll<HTMLButtonElement>('[data-menu-item]:not(:disabled)') ?? [])
 
   useLayoutEffect(() => {
     const el = ref.current
@@ -23,11 +26,32 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
     const nx = Math.min(x, window.innerWidth - rect.width - 4)
     const ny = Math.min(y, window.innerHeight - rect.height - 4)
     setPos({ x: Math.max(4, nx), y: Math.max(4, ny) })
+    // Keyboard users open the menu with Shift+F10; without this the first arrow key
+    // would leave the menu instead of moving inside it.
+    entries()[0]?.focus()
   }, [x, y])
 
   useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === 'Escape') onClose()
+      if (ev.key === 'Escape') {
+        ev.preventDefault()
+        onClose()
+        return
+      }
+      if (ev.key !== 'ArrowDown' && ev.key !== 'ArrowUp' && ev.key !== 'Home' && ev.key !== 'End') return
+      const list = entries()
+      if (!list.length) return
+      ev.preventDefault()
+      const index = list.indexOf(document.activeElement as HTMLButtonElement)
+      const next =
+        ev.key === 'Home'
+          ? 0
+          : ev.key === 'End'
+            ? list.length - 1
+            : ev.key === 'ArrowDown'
+              ? (index + 1) % list.length
+              : (index <= 0 ? list.length : index) - 1
+      list[next].focus()
     }
     const onDown = (ev: MouseEvent) => {
       if (ref.current && !ref.current.contains(ev.target as Node)) onClose()
@@ -46,17 +70,21 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
     <div
       ref={ref}
       data-context-menu
+      role="menu"
+      tabIndex={-1}
       className="fixed z-[60] min-w-[11.5rem] rounded-lg border border-line bg-surface py-1 shadow-xl"
       style={{ left: pos.x, top: pos.y }}
       onContextMenu={(ev) => ev.preventDefault()}
     >
       {items.map((item, index) =>
         item.kind === 'sep' ? (
-          <div key={`sep-${index}`} className="my-1 h-px bg-line" />
+          <div key={`sep-${index}`} role="separator" className="my-1 h-px bg-line" />
         ) : (
           <button
-            key={item.label}
+            key={`${item.label}-${index}`}
             type="button"
+            role="menuitem"
+            data-menu-item
             disabled={item.disabled}
             onClick={() => {
               onClose()

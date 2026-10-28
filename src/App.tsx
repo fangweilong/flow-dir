@@ -73,7 +73,7 @@ import type {
   SortState,
   UpdateStatus,
 } from './types'
-import { driveKindLabel, makeT } from './i18n'
+import { driveKindLabel, makeT, setUiLanguage } from './i18n'
 import {
   DEFAULT_LIST_FONT_SIZE,
   DEFAULT_NAV_FONT_SIZE,
@@ -86,7 +86,7 @@ import { DEFAULT_SETTINGS, fromSnapshot, toSnapshot } from './persist'
 import type { Settings } from './persist'
 import { baseName, isDir, isFsPath, joinPath, parentPath, pathKey, sameVolume, treeChain, underPath } from './paths'
 import { centerOffset } from './scroll'
-import { formatBinding, isTextInput, matchBinding, resolveShortcuts } from './shortcuts'
+import { formatBinding, isTextInput, matchBinding, menuHint, resolveShortcuts } from './shortcuts'
 import {
   DEFAULT_SORT,
   adoptIds,
@@ -303,6 +303,11 @@ export default function App() {
   useEffect(() => {
     settingsRef.current = settings
   }, [settings])
+
+  // The crash screen renders outside this component; keep it in the user's language.
+  useEffect(() => {
+    setUiLanguage(lang)
+  }, [lang])
 
   /**
    * Fetches one tree node. Callers only ask for folders that are open, so the cache
@@ -702,11 +707,12 @@ export default function App() {
   }, [])
 
   // WebView2 draws its own page menu (reload / save as / print / inspect) wherever the app
-  // has no menu of its own. Swallow it outside text fields, which keep the native edit menu.
+  // has no menu of its own. Swallow it outside text fields and selectable preview text,
+  // which keep the native edit menu (copy).
   useEffect(() => {
     const onContextMenu = (ev: MouseEvent) => {
       const target = ev.target instanceof Element ? ev.target : null
-      if (target?.closest('input, textarea, [contenteditable="true"]')) return
+      if (target?.closest('input, textarea, [contenteditable="true"], [data-selectable]')) return
       ev.preventDefault()
     }
     window.addEventListener('contextmenu', onContextMenu)
@@ -2401,6 +2407,7 @@ export default function App() {
         {
           kind: 'item',
           label: t('menu.open'),
+          hint: menuHint(keys.open),
           onSelect: () => {
             const current = wsRef.current
             const pane = current?.panes[paneId]
@@ -2414,6 +2421,7 @@ export default function App() {
         {
           kind: 'item',
           label: t('menu.copy'),
+          hint: menuHint(keys.copy),
           onSelect: () => {
             clipboardCopy(paths, false)
               .then(() => showToast(t('toast.copied', { count: paths.length })))
@@ -2423,18 +2431,19 @@ export default function App() {
         {
           kind: 'item',
           label: t('menu.cut'),
+          hint: menuHint(keys.cut),
           onSelect: () => {
             clipboardCopy(paths, true)
               .then(() => showToast(t('toast.cut', { count: paths.length })))
               .catch(() => showToast(t('toast.copyFailed')))
           },
         },
-        { kind: 'item', label: t('menu.paste'), onSelect: () => pasteInto(paneId) },
+        { kind: 'item', label: t('menu.paste'), hint: menuHint(keys.paste), onSelect: () => pasteInto(paneId) },
         { kind: 'sep' },
         {
           kind: 'item',
           label: paths.length > 1 ? t('menu.batchRename') : t('menu.rename'),
-          hint: 'F2',
+          hint: menuHint(keys.rename),
           onSelect: () =>
             paths.length > 1
               ? startRenameMany(paneId, paths.map(baseName))
@@ -2443,14 +2452,14 @@ export default function App() {
         {
           kind: 'item',
           label: t('menu.delete'),
-          hint: 'Del',
+          hint: menuHint(keys.delete),
           danger: true,
           onSelect: () => deleteEntries(paneId, [entry.name], false),
         },
         {
           kind: 'item',
           label: t('menu.deletePermanent'),
-          hint: 'Shift+Del',
+          hint: menuHint(`shift+${keys.delete}`),
           danger: true,
           onSelect: () => deleteEntries(paneId, [entry.name], true),
         },
@@ -2458,7 +2467,7 @@ export default function App() {
         { kind: 'item', label: t('menu.copyPath'), onSelect: () => copyPaths(paths) },
       ]
     },
-    [copyPaths, deleteEntries, openInNewPane, openTarget, pasteInto, showToast, startRename, startRenameMany, t],
+    [copyPaths, deleteEntries, keys, openInNewPane, openTarget, pasteInto, showToast, startRename, startRenameMany, t],
   )
 
   const openRowMenu = useCallback(
@@ -2502,13 +2511,13 @@ export default function App() {
       const items: MenuItem[] = tab.path
         ? [
             { kind: 'item', label: t('menu.newFolder'), onSelect: () => createFolder(paneId) },
-            { kind: 'item', label: t('menu.paste'), hint: 'Ctrl+V', onSelect: () => pasteInto(paneId) },
+            { kind: 'item', label: t('menu.paste'), hint: menuHint(keys.paste), onSelect: () => pasteInto(paneId) },
             { kind: 'sep' },
-            { kind: 'item', label: t('menu.refresh'), hint: 'F5', onSelect: () => manualRefresh() },
+            { kind: 'item', label: t('menu.refresh'), hint: menuHint(keys.refresh), onSelect: () => manualRefresh() },
             {
               kind: 'item',
               label: t('menu.selectAll'),
-              hint: 'Ctrl+A',
+              hint: menuHint(keys.selectAll),
               onSelect: () => {
                 const all = (data?.entries ?? []).map((entry) => entry.name)
                 update(tab.id, (d) => ({
@@ -2533,10 +2542,10 @@ export default function App() {
               onSelect: () => toggleHidden(paneId),
             },
           ]
-        : [{ kind: 'item', label: t('menu.refresh'), hint: 'F5', onSelect: () => manualRefresh() }]
+        : [{ kind: 'item', label: t('menu.refresh'), hint: menuHint(keys.refresh), onSelect: () => manualRefresh() }]
       setMenu({ x: point.clientX, y: point.clientY, items })
     },
-    [createFolder, listData, manualRefresh, pasteInto, t, toggleHidden, update],
+    [createFolder, keys, listData, manualRefresh, pasteInto, t, toggleHidden, update],
   )
 
   const openBlankMenu = useCallback(
@@ -3139,7 +3148,8 @@ export default function App() {
         <button
           type="button"
           onClick={toggleSidebar}
-          title={t('sidebar.toggle')}
+          title={`${t('sidebar.toggle')} (${formatBinding(keys.toggleSidebar)})`}
+          aria-label={t('sidebar.toggle')}
           className={`grid h-6 w-6 shrink-0 place-items-center rounded-md hover:bg-surface-3 ${
             settings.sidebarOpen ? 'text-muted' : 'text-muted-2'
           }`}
@@ -3153,6 +3163,7 @@ export default function App() {
           type="button"
           onClick={() => setHistoryOpen((open) => !open)}
           title={t('history.open')}
+          aria-label={t('history.open')}
           data-history-toggle
           className={`grid h-6 w-6 shrink-0 place-items-center rounded-md hover:bg-surface-3 ${
             historyOpen ? 'text-blue-500' : 'text-muted'
@@ -3167,7 +3178,8 @@ export default function App() {
         <button
           type="button"
           onClick={() => setSearchOpen(true)}
-          title="Ctrl+F"
+          title={`${t('search.open')} (${formatBinding(keys.search)})`}
+          aria-label={t('search.open')}
           className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-muted hover:bg-surface-3 hover:text-fg"
         >
           <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -3178,7 +3190,8 @@ export default function App() {
         <button
           type="button"
           onClick={() => setPreviewOpen((open) => !open)}
-          title="Ctrl+P"
+          title={`${t('preview.title')} (${formatBinding(keys.togglePreview)})`}
+          aria-label={t('preview.title')}
           className={`grid h-6 w-6 shrink-0 place-items-center rounded-md hover:bg-surface-3 ${
             previewOpen ? 'text-blue-500' : 'text-muted'
           }`}
@@ -3210,11 +3223,11 @@ export default function App() {
         </button>
 
         <div className="ml-1 flex h-full shrink-0 items-stretch">
-          <CaptionButton label="最小化" onClick={() => void getCurrentWindow().minimize()}>
+          <CaptionButton label={t('caption.minimize')} onClick={() => void getCurrentWindow().minimize()}>
             <path d="M3 8h10" strokeLinecap="round" />
           </CaptionButton>
           <CaptionButton
-            label={maximized ? '还原' : '最大化'}
+            label={t(maximized ? 'caption.restore' : 'caption.maximize')}
             onClick={() => {
               const win = getCurrentWindow();
               void win.toggleMaximize().then(() => win.isMaximized().then(setMaximized))
@@ -3229,7 +3242,7 @@ export default function App() {
               <rect x="3.5" y="3.5" width="9" height="9" rx="1.2" />
             )}
           </CaptionButton>
-          <CaptionButton label="关闭" danger onClick={() => void getCurrentWindow().close()}>
+          <CaptionButton label={t('caption.close')} danger onClick={() => void getCurrentWindow().close()}>
             <path d="M4 4l8 8M12 4l-8 8" strokeLinecap="round" />
           </CaptionButton>
         </div>

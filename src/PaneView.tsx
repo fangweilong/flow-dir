@@ -5,7 +5,7 @@ import { crumbs, formatSize, formatTime, isDir, isFsPath, joinPath, parentPath, 
 import { buildGitBadges } from './git'
 import type { GitBadges } from './git'
 import { pathIsDir } from './api'
-import { matchBinding } from './shortcuts'
+import { formatBinding, matchBinding } from './shortcuts'
 import type { ShortcutId } from './shortcuts'
 import { matchTypeAhead } from './typeahead'
 import { EMPTY_LIST, filterList, filterMatches } from './types'
@@ -835,6 +835,7 @@ export function PaneView({
                   }}
                   className="grid h-[1.33em] w-[1.33em] shrink-0 place-items-center rounded text-muted-2 hover:bg-surface-3 hover:text-fg"
                   title={t('tab.close')}
+                  aria-label={t('tab.close')}
                 >
                   ×
                 </button>
@@ -844,9 +845,10 @@ export function PaneView({
         </div>
         <button
           type="button"
+          title={t('tab.new')}
+          aria-label={t('tab.new')}
           onClick={onNewTab}
           className="grid h-[1.67em] w-[1.67em] shrink-0 place-items-center self-center rounded text-muted hover:bg-surface-3 hover:text-fg"
-          title={t('tab.new')}
         >
           <svg viewBox="0 0 16 16" className="h-[1.17em] w-[1.17em]" fill="none" stroke="currentColor" strokeWidth="1.6">
             <path d="M8 3.5v9M3.5 8h9" strokeLinecap="round" />
@@ -860,7 +862,8 @@ export function PaneView({
       >
         <button
           type="button"
-          title={t('nav.back')}
+          title={`${t('nav.back')} (${formatBinding(keys.back)})`}
+          aria-label={t('nav.back')}
           onClick={() => tab && onHistoryMove(tab.id, -1)}
           disabled={!tab || tab.histIdx <= 0}
           style={navButtonStyle}
@@ -872,7 +875,8 @@ export function PaneView({
         </button>
         <button
           type="button"
-          title={t('nav.forward')}
+          title={`${t('nav.forward')} (${formatBinding(keys.forward)})`}
+          aria-label={t('nav.forward')}
           onClick={() => tab && onHistoryMove(tab.id, 1)}
           disabled={!tab || tab.histIdx >= tab.history.length - 1}
           style={navButtonStyle}
@@ -884,7 +888,8 @@ export function PaneView({
         </button>
         <button
           type="button"
-          title={t('nav.up')}
+          title={`${t('nav.up')} (${formatBinding(keys.up)})`}
+          aria-label={t('nav.up')}
           onClick={() => tab && onNavigate(tab.id, upTarget)}
           disabled={!tab || upTarget === tab.path}
           style={navButtonStyle}
@@ -985,6 +990,7 @@ export function PaneView({
               data-copy-path
               onClick={() => onCopyPath(tab.path)}
               title={t('address.copyPath')}
+              aria-label={t('address.copyPath')}
               className="grid h-full w-[1.67em] shrink-0 place-items-center border-l border-line text-muted-2 hover:bg-surface-3 hover:text-fg"
             >
               <svg viewBox="0 0 16 16" className="h-[1em] w-[1em]" fill="none" stroke="currentColor" strokeWidth="1.4">
@@ -1508,7 +1514,13 @@ function GitBadge({
     )
   }
   if (dir && badges.dirtyDirs.has(key)) {
-    return <span title="git" className="h-1.5 w-1.5 shrink-0 rounded-full bg-blue-500/70" />
+    return (
+      <span
+        title={t('git.dirty')}
+        aria-label={t('git.dirty')}
+        className="h-1.5 w-1.5 shrink-0 rounded-full bg-blue-500/70"
+      />
+    )
   }
   // Tracked and unchanged: the same check a clean child repository gets, so a repository
   // root no longer looks like the only committed folder.

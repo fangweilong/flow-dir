@@ -1,7 +1,7 @@
 import { Component } from 'react'
 import type { ErrorInfo, ReactNode } from 'react'
 import { logDirPath, logFrontend, openPath } from './api'
-import { makeT } from './i18n'
+import { makeT, uiLanguage } from './i18n'
 
 type Props = { children: ReactNode }
 type State = { error: Error | null }
@@ -28,7 +28,7 @@ export class ErrorBoundary extends Component<Props, State> {
 
   render() {
     if (!this.state.error) return this.props.children
-    const t = makeT('zh-CN')
+    const t = makeT(uiLanguage())
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 bg-surface-2 p-6 text-fg">
         <div className="max-w-[32rem] text-center">

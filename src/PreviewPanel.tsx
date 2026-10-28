@@ -122,7 +122,7 @@ export function PreviewPanel({
             )}
 
             {info.kind === 'text' && (
-              <pre className="whitespace-pre-wrap break-words font-mono text-[0.6875rem] leading-relaxed text-fg">
+              <pre data-selectable className="whitespace-pre-wrap break-words font-mono text-[0.6875rem] leading-relaxed text-fg">
                 {info.text}
               </pre>
             )}

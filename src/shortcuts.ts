@@ -140,13 +140,31 @@ export function parseBinding(binding: string): ParsedBinding | null {
 
 /** Human form for the settings list: `Ctrl+Shift+F`. */
 export function formatBinding(binding: string): string {
+  return bindingLabel(binding, false)
+}
+
+/** Menu-hint form; Explorer writes `Del` where the settings list spells `Delete`. */
+export function menuHint(binding: string): string {
+  return bindingLabel(binding, true)
+}
+
+const MENU_KEYS: Record<string, string> = {
+  delete: 'Del',
+  backspace: 'Bksp',
+  enter: 'Enter',
+  escape: 'Esc',
+  esc: 'Esc',
+}
+
+function bindingLabel(binding: string, compact: boolean): string {
   const parsed = parseBinding(binding)
   if (!parsed) return binding
   const parts: string[] = []
   if (parsed.ctrl) parts.push('Ctrl')
   if (parsed.alt) parts.push('Alt')
   if (parsed.shift) parts.push('Shift')
-  parts.push(KEY_DISPLAY[parsed.key] ?? parsed.key.toUpperCase())
+  const short = compact ? MENU_KEYS[parsed.key] : undefined
+  parts.push(short ?? KEY_DISPLAY[parsed.key] ?? parsed.key.toUpperCase())
   return parts.join('+')
 }
 
@@ -192,6 +210,27 @@ export function sameBinding(a: string, b: string): boolean {
 
 export const isShortcutId = (value: string): value is ShortcutId =>
   Object.prototype.hasOwnProperty.call(DEFAULT_BINDINGS, value)
+
+/**
+ * Combinations the app handles outside the rebindable table. A shortcut bound to one of
+ * these would never fire, so the settings dialog refuses them instead of saving a
+ * binding that silently does nothing.
+ */
+export const FIXED_BINDINGS: { keys: string; label: Key }[] = [
+  { keys: 'ctrl+tab', label: 'shortcut.fixedTabCycle' },
+  { keys: 'ctrl+shift+tab', label: 'shortcut.fixedTabCycle' },
+  ...Array.from({ length: 9 }, (_, index) => ({
+    keys: `ctrl+${index + 1}`,
+    label: 'shortcut.fixedTabJump' as Key,
+  })),
+  { keys: 'alt+up', label: 'shortcut.fixedUpAlias' },
+]
+
+/** Human label of a fixed combination that `binding` would shadow, if any. */
+export function fixedBindingName(binding: string, t: (key: Key) => string): string | null {
+  const clash = FIXED_BINDINGS.find((entry) => sameBinding(entry.keys, binding))
+  return clash ? t(clash.label) : null
+}
 
 /** Defaults merged with user overrides; unknown ids and blank keys are ignored. */
 export function resolveShortcuts(overrides: ShortcutOverride[] = []): Record<ShortcutId, string> {

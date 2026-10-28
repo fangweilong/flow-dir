@@ -12,7 +12,7 @@ const zh = {
   'layout.hint': '{count} 窗格 · 拖动标签到窗格边缘可拆分',
   'sidebar.quickAccess': '快速访问',
   'sidebar.thisPc': '此电脑',
-  'sidebar.toggle': '显示/隐藏侧边栏 (Ctrl+B)',
+  'sidebar.toggle': '显示/隐藏侧边栏',
   'sidebar.removePlace': '从快速访问移除',
   'place.home': '主目录',
   'place.desktop': '桌面',
@@ -27,7 +27,7 @@ const zh = {
   'drive.unavailable': '介质不可用',
   'nav.back': '后退',
   'nav.forward': '前进',
-  'nav.up': '上一级 (Backspace)',
+  'nav.up': '上一级',
   'nav.drives': '切换磁盘',
   'address.copyPath': '复制当前路径',
   'address.invalidPath': '路径不存在或不是文件夹',
@@ -194,6 +194,9 @@ const zh = {
   'shortcut.cut': '剪切',
   'shortcut.paste': '粘贴',
   'shortcut.contextMenu': '打开右键菜单',
+  'shortcut.fixedTabCycle': '切换标签页（Ctrl+Tab / Ctrl+Shift+Tab）',
+  'shortcut.fixedTabJump': '跳转到第 N 个标签页（Ctrl+1…9）',
+  'shortcut.fixedUpAlias': '上一级（Alt+↑）',
   'settings.configOpen': '打开目录',
   'settings.updates': '更新',
   'settings.updateInterval': '自动检查间隔',
@@ -243,6 +246,7 @@ const zh = {
   'preview.size': '大小',
   'preview.mtime': '修改时间',
   'search.placeholder': '搜索文件名…',
+  'search.open': '搜索文件',
   'search.searching': '搜索中…',
   'search.empty': '没有匹配的文件',
   'search.hint': 'Enter 打开 · Alt+Enter 打开所在目录 · Esc 关闭',
@@ -258,6 +262,10 @@ const zh = {
   'search.sortTime': '修改时间',
   'search.sortAsc': '升序',
   'search.sortDesc': '降序',
+  'caption.minimize': '最小化',
+  'caption.maximize': '最大化',
+  'caption.restore': '还原',
+  'caption.close': '关闭',
   'menu.open': '打开',
   'menu.newFolder': '新建文件夹',
   'menu.paste': '粘贴',
@@ -363,7 +371,7 @@ const en: Record<Key, string> = {
   'layout.hint': '{count} panes · drag a tab to a pane edge to split',
   'sidebar.quickAccess': 'Quick access',
   'sidebar.thisPc': 'This PC',
-  'sidebar.toggle': 'Show/hide sidebar (Ctrl+B)',
+  'sidebar.toggle': 'Show/hide sidebar',
   'sidebar.removePlace': 'Remove from quick access',
   'place.home': 'Home',
   'place.desktop': 'Desktop',
@@ -378,7 +386,7 @@ const en: Record<Key, string> = {
   'drive.unavailable': 'Media unavailable',
   'nav.back': 'Back',
   'nav.forward': 'Forward',
-  'nav.up': 'Up (Backspace)',
+  'nav.up': 'Up',
   'nav.drives': 'Switch drive',
   'address.copyPath': 'Copy current path',
   'address.invalidPath': 'Path does not exist or is not a folder',
@@ -546,6 +554,9 @@ const en: Record<Key, string> = {
   'shortcut.cut': 'Cut',
   'shortcut.paste': 'Paste',
   'shortcut.contextMenu': 'Open context menu',
+  'shortcut.fixedTabCycle': 'Switch tabs (Ctrl+Tab / Ctrl+Shift+Tab)',
+  'shortcut.fixedTabJump': 'Jump to tab N (Ctrl+1…9)',
+  'shortcut.fixedUpAlias': 'Parent folder (Alt+↑)',
   'settings.configOpen': 'Open folder',
   'settings.updates': 'Updates',
   'settings.updateInterval': 'Automatic check interval',
@@ -595,6 +606,7 @@ const en: Record<Key, string> = {
   'preview.size': 'Size',
   'preview.mtime': 'Modified',
   'search.placeholder': 'Search file names…',
+  'search.open': 'Search files',
   'search.searching': 'Searching…',
   'search.empty': 'No matching files',
   'search.hint': 'Enter opens · Alt+Enter shows the folder · Esc closes',
@@ -610,6 +622,10 @@ const en: Record<Key, string> = {
   'search.sortTime': 'Modified',
   'search.sortAsc': 'Ascending',
   'search.sortDesc': 'Descending',
+  'caption.minimize': 'Minimize',
+  'caption.maximize': 'Maximize',
+  'caption.restore': 'Restore',
+  'caption.close': 'Close',
   'menu.open': 'Open',
   'menu.newFolder': 'New folder',
   'menu.paste': 'Paste',
@@ -702,6 +718,19 @@ const en: Record<Key, string> = {
 }
 
 const dictionaries: Record<Lang, Record<Key, string>> = { 'zh-CN': zh, en }
+
+/**
+ * Language the UI is currently painted in. The crash screen renders outside the app's
+ * state (and its boundary has no props), so it reads the language from here instead of
+ * falling back to Chinese.
+ */
+let currentLang: Lang = 'zh-CN'
+
+export const setUiLanguage = (lang: Lang) => {
+  currentLang = lang
+}
+
+export const uiLanguage = (): Lang => currentLang
 
 export function translate(lang: Lang, key: Key, vars?: Record<string, string | number>): string {
   const template = dictionaries[lang][key] ?? dictionaries['zh-CN'][key] ?? key

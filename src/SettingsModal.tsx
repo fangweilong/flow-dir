@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { appInfo, configPath, diagnosticsExport, everythingStatus, logDirPath, pickFolder, restartApp, settingsSave, updateCheck, updateInstall } from './api'
 import { makeT } from './i18n'
 import type { Key } from './i18n'
-import { DEFAULT_BINDINGS, SHORTCUTS, bindingFromEvent, formatBinding, resolveShortcuts, sameBinding } from './shortcuts'
+import { DEFAULT_BINDINGS, SHORTCUTS, bindingFromEvent, fixedBindingName, formatBinding, resolveShortcuts, sameBinding } from './shortcuts'
 import type { ShortcutId } from './shortcuts'
 import type { AppInfo, EverythingStatus, Lang, Theme, UpdateStatus } from './types'
 import { THEMES, themeIsDark } from './themes'
@@ -420,6 +420,11 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
       }
       const binding = bindingFromEvent(ev)
       if (!binding) return
+      const fixed = fixedBindingName(binding, t)
+      if (fixed) {
+        setConflict(t('settings.shortcutConflict', { name: fixed }))
+        return
+      }
       const clash = SHORTCUTS.find((entry) => entry.id !== capturing && sameBinding(keys[entry.id], binding))
       if (clash) {
         setConflict(t('settings.shortcutConflict', { name: t(clash.label) }))
