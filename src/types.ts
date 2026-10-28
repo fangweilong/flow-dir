@@ -236,7 +236,15 @@ export const EMPTY_GIT: GitStatus = {
   dirty: false,
   repos: [],
 }
-export type SearchItem = { path: string; name: string; isDir: boolean; size: number; mtime: number }
+export type SearchItem = {
+  path: string
+  name: string
+  isDir: boolean
+  size: number
+  mtime: number
+  /** Matching line for content hits; absent for name-only hits. */
+  snippet?: string
+}
 export type SearchBatch = {
   gen: number
   provider: string

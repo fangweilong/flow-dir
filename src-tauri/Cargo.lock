@@ -1198,6 +1198,7 @@ dependencies = [
  "log",
  "notify",
  "percent-encoding",
+ "regex",
  "serde",
  "serde_json",
  "tauri",

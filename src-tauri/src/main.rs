@@ -721,6 +721,8 @@ fn search_start(
     limit: u32,
     prefer_everything: bool,
     hidden: bool,
+    filter: search::SearchFilter,
+    content: search::ContentOptions,
     on_batch: Channel<search::SearchBatch>,
 ) -> Result<(), ApiError> {
     let cancel = state.begin();
@@ -729,7 +731,18 @@ fn search_start(
     log::info!(target: "flowdir::search", "search_start gen={gen} limit={limit}");
     log::debug!(target: "flowdir::search", "search root={root}");
     let _ = tauri::async_runtime::spawn_blocking(move || {
-        search::run(root, query, gen, limit, prefer_everything, hidden, cancel, on_batch);
+        search::run(
+            root,
+            query,
+            gen,
+            limit,
+            prefer_everything,
+            hidden,
+            filter,
+            content,
+            cancel,
+            on_batch,
+        );
         log::info!(
             target: "flowdir::search",
             "search done gen={gen} in {}ms",

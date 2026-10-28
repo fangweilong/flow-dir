@@ -215,6 +215,16 @@ export const pickFolder = (title: string, initial: string) =>
   invoke<string | null>('pick_folder', { title, initial })
 export const titlebarMenu = (x: number, y: number) => invoke<void>('titlebar_menu', { x, y })
 
+export type SearchFilter = {
+  minSize?: number
+  maxSize?: number
+  afterMs?: number
+  beforeMs?: number
+  extensions?: string[]
+  kind?: '' | 'file' | 'dir'
+}
+export type ContentOptions = { enabled: boolean; regex: boolean; maxBytes?: number }
+
 export function searchStart(
   root: string,
   query: string,
@@ -222,6 +232,8 @@ export function searchStart(
   limit: number,
   preferEverything: boolean,
   hidden: boolean,
+  filter: SearchFilter,
+  content: ContentOptions,
   onBatch: (batch: SearchBatch) => void,
 ) {
   const channel = new Channel<SearchBatch>()
@@ -233,6 +245,19 @@ export function searchStart(
     limit,
     preferEverything,
     hidden,
+    filter: {
+      minSize: filter.minSize ?? 0,
+      maxSize: filter.maxSize ?? 0,
+      afterMs: filter.afterMs ?? 0,
+      beforeMs: filter.beforeMs ?? 0,
+      extensions: filter.extensions ?? [],
+      kind: filter.kind ?? '',
+    },
+    content: {
+      enabled: content.enabled,
+      regex: content.regex,
+      maxBytes: content.maxBytes ?? 10 * 1024 * 1024,
+    },
     onBatch: channel,
   })
 }
