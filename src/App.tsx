@@ -14,6 +14,7 @@ import { HistoryPanel } from './HistoryPanel'
 import { PromptDialog } from './PromptDialog'
 import { BatchRenameDialog } from './BatchRenameDialog'
 import { ConfirmDialog } from './ConfirmDialog'
+import { FileToolsPanel } from './FileToolsPanel'
 import { PreviewPanel } from './PreviewPanel'
 import { SearchOverlay } from './SearchOverlay'
 import { themeIsDark } from './themes'
@@ -223,6 +224,10 @@ export default function App() {
     names: string[]
     permanent: boolean
   } | null>(null)
+  /** Checksum / duplicate-finder dialog; the scan runs only while it is open. */
+  const [fileTools, setFileTools] = useState<
+    { mode: 'hash'; paths: string[] } | { mode: 'dup'; root: string } | null
+  >(null)
   const [ops, setOps] = useState<Record<string, OpProgress>>({})
   /** Original request per running/finished op, so an ACCESS_DENIED result can be retried. */
   const opRequests = useRef<Record<string, OpRequest>>({})
@@ -1246,7 +1251,7 @@ export default function App() {
       const current = wsRef.current
       if (!current) return
       const target = ev.target instanceof Element ? ev.target.closest<HTMLElement>('[data-pane-id]') : null
-      if (!target && (settingsOpen || searchOpen || menu || prompt || batchRename || deleteConfirm || quitBusy)) return
+      if (!target && (settingsOpen || searchOpen || menu || prompt || batchRename || deleteConfirm || fileTools || quitBusy)) return
       const pane = current.panes[target?.dataset.paneId ?? current.activePaneId]
       const tab = pane ? current.tabs[pane.activeTabId] : undefined
       if (tab) historyMove(tab.id, ev.button === 3 ? -1 : 1)
@@ -2585,6 +2590,7 @@ export default function App() {
           onSelect: () => deleteEntries(paneId, [entry.name], true),
         },
         { kind: 'sep' },
+        { kind: 'item', label: t('menu.hash'), onSelect: () => setFileTools({ mode: 'hash', paths }) },
         { kind: 'item', label: t('menu.copyPath'), onSelect: () => copyPaths(paths) },
       ]
     },
@@ -2607,15 +2613,17 @@ export default function App() {
         Math.round(point.screenX * dpr),
         Math.round(point.screenY * dpr),
         point.shiftKey,
+        t('menu.hash'),
       )
         .then((outcome) => {
-          if (outcome.invoked) refreshPanes()
+          if (outcome.action === 'hash') setFileTools({ mode: 'hash', paths })
+          else if (outcome.invoked) refreshPanes()
         })
         .catch(() => {
           setMenu({ x: point.clientX, y: point.clientY, items: rowFallback(paneId, entry, paths) })
         })
     },
-    [listData, refreshPanes, rowFallback],
+    [listData, refreshPanes, rowFallback, t],
   )
 
   // Self-drawn fallback: used when the native folder menu cannot be shown, and for the drive
@@ -2662,6 +2670,11 @@ export default function App() {
               label: pane.hidden ? t('list.hideHidden') : t('list.showHidden'),
               onSelect: () => toggleHidden(paneId),
             },
+            {
+              kind: 'item',
+              label: t('menu.findDuplicates'),
+              onSelect: () => setFileTools({ mode: 'dup', root: tab.path }),
+            },
           ]
         : [{ kind: 'item', label: t('menu.refresh'), hint: menuHint(keys.refresh), onSelect: () => manualRefresh() }]
       setMenu({ x: point.clientX, y: point.clientY, items })
@@ -2689,9 +2702,11 @@ export default function App() {
         Math.round(point.screenY * dpr),
         point.shiftKey,
         pane.hidden ? t('list.hideHidden') : t('list.showHidden'),
+        t('menu.findDuplicates'),
       )
         .then((outcome) => {
           if (outcome.action === 'toggleHidden') toggleHidden(paneId)
+          else if (outcome.action === 'findDuplicates') setFileTools({ mode: 'dup', root: tab.path })
           else if (outcome.invoked) refreshPanes()
         })
         .catch(() => blankFallbackMenu(paneId, point))
@@ -2891,7 +2906,7 @@ export default function App() {
   // list from reacting to keys typed into them.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (settingsOpen || searchOpen || deleteConfirm || prompt || batchRename || menu || quitBusy) return
+      if (settingsOpen || searchOpen || deleteConfirm || prompt || batchRename || menu || fileTools || quitBusy) return
       const bare = !event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey
       if (bare && isTextInput(event.target)) return
 
@@ -3602,6 +3617,22 @@ export default function App() {
             setBatchRename(null)
             focusList(paneId)
           }}
+        />
+      )}
+
+      {fileTools && (
+        <FileToolsPanel
+          lang={lang}
+          mode={fileTools.mode}
+          paths={fileTools.mode === 'hash' ? fileTools.paths : []}
+          root={fileTools.mode === 'dup' ? fileTools.root : ''}
+          includeHidden={activePane?.hidden ?? settings.showHidden}
+          dupConcurrency={settings.dupConcurrency}
+          dupMaxMbPerSec={settings.dupMaxMbPerSec}
+          dupExclude={settings.dupExclude}
+          onDelete={(paths) => runOp('delete', paths)}
+          onToast={showToast}
+          onClose={() => setFileTools(null)}
         />
       )}
 

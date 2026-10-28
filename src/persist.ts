@@ -69,6 +69,12 @@ export type Settings = {
   restoreTabsOnStart: boolean
   /** Middle-click / Ctrl+click a folder opens it in a background tab. */
   newTabOnMiddleClick: boolean
+  /** Duplicate-scan worker threads; 0 = auto. */
+  dupConcurrency: number
+  /** Duplicate-scan read cap in MB/s; 0 = unlimited. */
+  dupMaxMbPerSec: number
+  /** Directory names the duplicate scan never descends into. */
+  dupExclude: string[]
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -107,6 +113,17 @@ export const DEFAULT_SETTINGS: Settings = {
   closedTabLimit: 20,
   restoreTabsOnStart: true,
   newTabOnMiddleClick: true,
+  dupConcurrency: 0,
+  dupMaxMbPerSec: 0,
+  dupExclude: [
+    'node_modules',
+    '.git',
+    '$Recycle.Bin',
+    'System Volume Information',
+    'Windows',
+    'Program Files',
+    'Program Files (x86)',
+  ],
 }
 
 type Snapshot = {

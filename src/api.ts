@@ -1,5 +1,5 @@
 import { Channel, invoke } from '@tauri-apps/api/core'
-import type { AppInfo, Clip, DirBatch, Drive, ElevatedReport, MenuOutcome, OpKind, OpProgress, Place, UpdateStatus } from './types'
+import type { AppInfo, Clip, DirBatch, Drive, DupProgress, ElevatedReport, HashProgress, MenuOutcome, OpKind, OpProgress, Place, UpdateStatus } from './types'
 import type { GitStatus, PreviewInfo, SearchBatch } from './types'
 import type { Settings } from './persist'
 
@@ -89,6 +89,53 @@ export function opStart(request: OpRequest, onProgress: (progress: OpProgress) =
 
 export const opCancel = (opId: string) => invoke<void>('op_cancel', { opId })
 
+/** Streaming SHA-256/SHA-1/MD5 over the given paths; results arrive with the final message. */
+export function hashStart(
+  jobId: string,
+  paths: string[],
+  algorithm: string,
+  onProgress: (progress: HashProgress) => void,
+) {
+  const channel = new Channel<HashProgress>()
+  channel.onmessage = onProgress
+  return invoke<void>('hash_start', { jobId, paths, algorithm, onProgress: channel })
+}
+
+export type DupOptions = {
+  roots: string[]
+  includeHidden: boolean
+  minSize: number
+  concurrency: number
+  maxBytesPerSec: number
+  exclude: string[]
+}
+
+export function dupStart(
+  jobId: string,
+  options: DupOptions,
+  onProgress: (progress: DupProgress) => void,
+) {
+  const channel = new Channel<DupProgress>()
+  channel.onmessage = onProgress
+  return invoke<void>('dup_start', {
+    jobId,
+    roots: options.roots,
+    includeHidden: options.includeHidden,
+    minSize: options.minSize,
+    concurrency: options.concurrency,
+    maxBytesPerSec: options.maxBytesPerSec,
+    exclude: options.exclude,
+    onProgress: channel,
+  })
+}
+
+export const toolCancel = (jobId: string) => invoke<void>('tool_cancel', { jobId })
+export const toolPause = (jobId: string, paused: boolean) =>
+  invoke<void>('tool_pause', { jobId, paused })
+/** Writes a report into `dir`; separators in `name` are replaced so exports stay in place. */
+export const exportText = (dir: string, name: string, content: string) =>
+  invoke<string>('export_text', { dir, name, content })
+
 /** Retries a denied operation through the elevated helper; resolves when it finishes. */
 export function opRetryElevated(request: OpRequest) {
   return invoke<ElevatedReport>('op_retry_elevated', {
@@ -130,15 +177,29 @@ export const logDirPath = () => invoke<string | null>('log_dir_path')
 /** Writes a diagnostics zip into `dir` and returns its path. */
 export const diagnosticsExport = (dir: string) => invoke<string>('diagnostics_export', { dir })
 
-export const shellMenuShow = (paths: string[], x: number, y: number, extended: boolean) =>
-  invoke<MenuOutcome>('shell_menu_show', { paths, x, y, extended })
+export const shellMenuShow = (
+  paths: string[],
+  x: number,
+  y: number,
+  extended: boolean,
+  hashLabel?: string,
+) => invoke<MenuOutcome>('shell_menu_show', { paths, x, y, extended, hashLabel: hashLabel ?? null })
 export const shellMenuBackgroundShow = (
   path: string,
   x: number,
   y: number,
   extended: boolean,
   toggleLabel: string,
-) => invoke<MenuOutcome>('shell_menu_background_show', { path, x, y, extended, toggleLabel })
+  dupLabel: string,
+) =>
+  invoke<MenuOutcome>('shell_menu_background_show', {
+    path,
+    x,
+    y,
+    extended,
+    toggleLabel,
+    dupLabel,
+  })
 export const appInfo = () => invoke<AppInfo>('app_info')
 export const updateCheck = (force: boolean) => invoke<UpdateStatus>('update_check', { force })
 export const updateInstall = () => invoke<void>('update_install')

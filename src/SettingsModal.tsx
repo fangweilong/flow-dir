@@ -741,6 +741,59 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
                   className="h-6 w-16 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-blue-400"
                 />
               </div>
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-[0.71875rem] text-fg">{t('settings.dupConcurrency')}</div>
+                  <div className="text-[0.625rem] text-muted-2">{t('settings.dupConcurrencyHint')}</div>
+                </div>
+                <input
+                  type="number"
+                  min={0}
+                  max={16}
+                  value={settings.dupConcurrency}
+                  onChange={(ev) => {
+                    const next = Number(ev.target.value)
+                    if (!Number.isFinite(next)) return
+                    onChange({ ...settings, dupConcurrency: Math.min(16, Math.max(0, Math.round(next))) })
+                  }}
+                  className="h-6 w-16 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-blue-400"
+                />
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-[0.71875rem] text-fg">{t('settings.dupSpeed')}</div>
+                  <div className="text-[0.625rem] text-muted-2">{t('settings.dupSpeedHint')}</div>
+                </div>
+                <input
+                  type="number"
+                  min={0}
+                  max={4096}
+                  value={settings.dupMaxMbPerSec}
+                  onChange={(ev) => {
+                    const next = Number(ev.target.value)
+                    if (!Number.isFinite(next)) return
+                    onChange({ ...settings, dupMaxMbPerSec: Math.min(4096, Math.max(0, Math.round(next))) })
+                  }}
+                  className="h-6 w-16 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-blue-400"
+                />
+              </div>
+              <div className="space-y-1">
+                <div className="text-[0.71875rem] text-fg">{t('settings.dupExclude')}</div>
+                <div className="text-[0.625rem] text-muted-2">{t('settings.dupExcludeHint')}</div>
+                <input
+                  value={settings.dupExclude.join(', ')}
+                  onChange={(ev) =>
+                    onChange({
+                      ...settings,
+                      dupExclude: ev.target.value
+                        .split(',')
+                        .map((name) => name.trim())
+                        .filter(Boolean),
+                    })
+                  }
+                  className="h-6 w-full rounded border border-line bg-surface-2 px-1 text-[0.6875rem] text-fg outline-none focus:border-blue-400"
+                />
+              </div>
               <ToggleRow
                 label={t('settings.notifyOps')}
                 hint={t('settings.notifyOpsHint')}

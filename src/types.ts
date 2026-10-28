@@ -60,6 +60,48 @@ export type OpProgress = {
   error: ApiError | null
 }
 /** Outcome written by the elevated helper for a retried, previously denied operation. */
+export type HashResult = {
+  path: string
+  algorithm: string
+  hash: string
+  size: number
+  error: string | null
+}
+export type HashProgress = {
+  jobId: string
+  phase: string
+  current: number
+  total: number
+  name: string | null
+  bytes: number
+  bytesTotal: number
+  paused: boolean
+  done: boolean
+  aborted: boolean
+  error: ApiError | null
+  results: HashResult[]
+}
+export type DupEntry = { path: string; size: number; mtime: number }
+export type DupGroup = { size: number; hash: string; files: DupEntry[] }
+export type DupProgress = {
+  jobId: string
+  phase: string
+  current: number
+  total: number
+  name: string | null
+  bytes: number
+  bytesTotal: number
+  paused: boolean
+  done: boolean
+  aborted: boolean
+  error: ApiError | null
+  groups: DupGroup[]
+  scanned: number
+  skippedHidden: number
+  skippedCloud: number
+  skippedHardlink: number
+  elapsedMs: number
+}
 export type ElevatedReport = {
   aborted: boolean
   failed: OpFailure[]

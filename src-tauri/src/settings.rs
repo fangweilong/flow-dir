@@ -127,6 +127,12 @@ pub struct Settings {
     pub restore_tabs_on_start: bool,
     /// Middle-click / Ctrl+click on a folder opens it in a background tab.
     pub new_tab_on_middle_click: bool,
+    /// Duplicate-scan worker threads; 0 picks `min(4, cores / 2)`.
+    pub dup_concurrency: u32,
+    /// Read-rate cap for duplicate scans in MB/s; 0 means unlimited.
+    pub dup_max_mb_per_sec: u32,
+    /// Directory names the duplicate scan never descends into.
+    pub dup_exclude: Vec<String>,
 }
 
 fn default_language() -> String {
@@ -241,6 +247,21 @@ fn sanitize_list_col(value: u32, min: u32, fallback: u32) -> u32 {
     }
 }
 
+fn default_dup_exclude() -> Vec<String> {
+    [
+        "node_modules",
+        ".git",
+        "$Recycle.Bin",
+        "System Volume Information",
+        "Windows",
+        "Program Files",
+        "Program Files (x86)",
+    ]
+    .iter()
+    .map(|name| name.to_string())
+    .collect()
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -279,6 +300,9 @@ impl Default for Settings {
             closed_tab_limit: 20,
             restore_tabs_on_start: true,
             new_tab_on_middle_click: true,
+            dup_concurrency: 0,
+            dup_max_mb_per_sec: 0,
+            dup_exclude: default_dup_exclude(),
         }
     }
 }
@@ -346,6 +370,9 @@ impl Settings {
         self.preview_max_dimension = self.preview_max_dimension.clamp(256, 16384);
         self.preview_text_kb = self.preview_text_kb.clamp(1, 1024);
         self.closed_tab_limit = self.closed_tab_limit.clamp(1, 50);
+        self.dup_concurrency = self.dup_concurrency.min(16);
+        self.dup_max_mb_per_sec = self.dup_max_mb_per_sec.min(4096);
+        self.dup_exclude.retain(|name| !name.trim().is_empty());
         self
     }
 }
@@ -449,6 +476,24 @@ restore_tabs_on_start = true
 # 中键或 Ctrl+点击文件夹时在后台新标签打开；关闭则改为当前标签
 # middle-click or Ctrl+click a folder opens a background tab; off = reuse the current tab
 new_tab_on_middle_click = true
+
+# 重复文件扫描的并发线程（0 = min(4, 逻辑核心/2)，最大 16）
+# duplicate-scan worker threads; 0 picks min(4, logical cores / 2), capped at 16
+dup_concurrency = 0
+
+# 重复文件扫描的读取限速（MB/s，0 = 不限）/ duplicate-scan read limit in MB/s, 0 = unlimited
+dup_max_mb_per_sec = 0
+
+# 重复文件扫描跳过的目录名 / directory names the duplicate scan skips
+dup_exclude = [
+  "node_modules",
+  ".git",
+  "$Recycle.Bin",
+  "System Volume Information",
+  "Windows",
+  "Program Files",
+  "Program Files (x86)",
+]
 "#;
 
 /// On-disk shape: snake_case keys, no coupling to the camelCase IPC payload.
@@ -490,6 +535,9 @@ struct FileSettings {
     closed_tab_limit: u32,
     restore_tabs_on_start: bool,
     new_tab_on_middle_click: bool,
+    dup_concurrency: u32,
+    dup_max_mb_per_sec: u32,
+    dup_exclude: Vec<String>,
 }
 
 impl Default for FileSettings {
@@ -531,6 +579,9 @@ impl Default for FileSettings {
             closed_tab_limit: base.closed_tab_limit,
             restore_tabs_on_start: base.restore_tabs_on_start,
             new_tab_on_middle_click: base.new_tab_on_middle_click,
+            dup_concurrency: base.dup_concurrency,
+            dup_max_mb_per_sec: base.dup_max_mb_per_sec,
+            dup_exclude: base.dup_exclude,
         }
     }
 }
@@ -573,6 +624,9 @@ impl From<FileSettings> for Settings {
             closed_tab_limit: file.closed_tab_limit,
             restore_tabs_on_start: file.restore_tabs_on_start,
             new_tab_on_middle_click: file.new_tab_on_middle_click,
+            dup_concurrency: file.dup_concurrency,
+            dup_max_mb_per_sec: file.dup_max_mb_per_sec,
+            dup_exclude: file.dup_exclude,
         }
     }
 }
@@ -718,6 +772,22 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), A
         "new_tab_on_middle_click",
         Value::from(settings.new_tab_on_middle_click),
     );
+    set_value(
+        &mut doc,
+        "dup_concurrency",
+        Value::from(settings.dup_concurrency as i64),
+    );
+    set_value(
+        &mut doc,
+        "dup_max_mb_per_sec",
+        Value::from(settings.dup_max_mb_per_sec as i64),
+    );
+
+    let mut exclude = toml_edit::Array::new();
+    for name in &settings.dup_exclude {
+        exclude.push(name.as_str());
+    }
+    set_value(&mut doc, "dup_exclude", Value::Array(exclude));
 
     let mut hidden = toml_edit::Array::new();
     for key in &settings.hidden_places {

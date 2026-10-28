@@ -41,6 +41,16 @@ const ID_CMD_FIRST: u32 = 1;
 const ID_CMD_LAST: u32 = 0x7FFF;
 /// Local ids live above the range handed to `QueryContextMenu`, so the shell never owns them.
 const ID_CUSTOM_TOGGLE_HIDDEN: u32 = 0xC000;
+const ID_CUSTOM_FIND_DUPLICATES: u32 = 0xC001;
+const ID_CUSTOM_HASH: u32 = 0xC002;
+
+/// A FlowDir entry appended after the shell's own items. `action` is echoed to the
+/// frontend, which owns the actual command.
+struct Extra<'a> {
+    id: u32,
+    label: &'a str,
+    action: &'static str,
+}
 
 #[derive(Serialize, Clone)]
 pub struct Outcome {
@@ -94,26 +104,36 @@ unsafe extern "system" fn owner_proc(
 }
 
 /// Shows the shell menu at physical screen coordinates and waits until it closes.
-pub fn show(paths: Vec<String>, x: i32, y: i32, extended: bool) -> Result<Outcome, ApiError> {
+/// `hash_label`, when present, appends FlowDir's checksum entry.
+pub fn show(
+    paths: Vec<String>,
+    x: i32,
+    y: i32,
+    extended: bool,
+    hash_label: Option<String>,
+) -> Result<Outcome, ApiError> {
     if paths.is_empty() {
         return Err(ApiError::new("EMPTY", "no paths"));
     }
-    run_on_menu_thread(move || unsafe { run_items(&paths, x, y, extended) })
+    run_on_menu_thread(move || unsafe { run_items(&paths, x, y, extended, hash_label.as_deref()) })
 }
 
-/// Shows Explorer's folder-background menu for `path`. `toggle_label` is appended after the
-/// shell's entries because Explorer's own background menu has no hidden-items toggle.
+/// Shows Explorer's folder-background menu for `path`. `toggle_label` and `dup_label` are
+/// appended after the shell's entries because Explorer's own background menu has neither.
 pub fn show_background(
     path: String,
     x: i32,
     y: i32,
     extended: bool,
     toggle_label: String,
+    dup_label: String,
 ) -> Result<Outcome, ApiError> {
     if path.is_empty() {
         return Err(ApiError::new("EMPTY", "no path"));
     }
-    run_on_menu_thread(move || unsafe { run_background(&path, x, y, extended, &toggle_label) })
+    run_on_menu_thread(move || unsafe {
+        run_background(&path, x, y, extended, &toggle_label, &dup_label)
+    })
 }
 
 /// Runs the menu on its own STA thread: shell extensions expect one and the IPC thread must
@@ -141,13 +161,19 @@ pub(crate) fn run_offthread<T: Send + 'static>(
         .map_err(|_| ApiError::new("TIMEOUT", "shell call did not return"))
 }
 
-unsafe fn run_items(paths: &[String], x: i32, y: i32, extended: bool) -> Result<Outcome, ApiError> {
+unsafe fn run_items(
+    paths: &[String],
+    x: i32,
+    y: i32,
+    extended: bool,
+    hash_label: Option<&str>,
+) -> Result<Outcome, ApiError> {
     unsafe {
         let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         CoInitializeEx(None, COINIT_APARTMENTTHREADED)
             .ok()
             .map_err(|e| ApiError::new("COM", e.to_string()))?;
-        let result = build_items(paths, x, y, extended);
+        let result = build_items(paths, x, y, extended, hash_label);
         CoUninitialize();
         result
     }
@@ -159,13 +185,14 @@ unsafe fn run_background(
     y: i32,
     extended: bool,
     toggle_label: &str,
+    dup_label: &str,
 ) -> Result<Outcome, ApiError> {
     unsafe {
         let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         CoInitializeEx(None, COINIT_APARTMENTTHREADED)
             .ok()
             .map_err(|e| ApiError::new("COM", e.to_string()))?;
-        let result = build_background(path, x, y, extended, toggle_label);
+        let result = build_background(path, x, y, extended, toggle_label, dup_label);
         CoUninitialize();
         result
     }
@@ -176,6 +203,7 @@ unsafe fn build_items(
     x: i32,
     y: i32,
     extended: bool,
+    hash_label: Option<&str>,
 ) -> Result<Outcome, ApiError> {
     unsafe {
         let mut pidls: Vec<*const windows::Win32::UI::Shell::Common::ITEMIDLIST> =
@@ -201,7 +229,15 @@ unsafe fn build_items(
         let hwnd = create_owner().map_err(|e| ApiError::new("SHELL_MENU", e.to_string()))?;
         crate::theme::prepare_window(hwnd);
         let flags = CMF_NORMAL | if extended { CMF_EXTENDEDVERBS } else { 0 };
-        let outcome = track(hwnd, &context, x, y, flags, None);
+        let extras: Vec<Extra<'_>> = hash_label
+            .map(|label| Extra {
+                id: ID_CUSTOM_HASH,
+                label,
+                action: "hash",
+            })
+            .into_iter()
+            .collect();
+        let outcome = track(hwnd, &context, x, y, flags, &extras);
         drop(context);
         drop(array);
         drop(cleanup);
@@ -246,6 +282,7 @@ unsafe fn build_background(
     y: i32,
     extended: bool,
     toggle_label: &str,
+    dup_label: &str,
 ) -> Result<Outcome, ApiError> {
     unsafe {
         let hwnd = create_owner().map_err(|e| ApiError::new("SHELL_MENU", e.to_string()))?;
@@ -258,7 +295,19 @@ unsafe fn build_background(
             }
         };
         let flags = CMF_NORMAL | CMF_EXPLORE | if extended { CMF_EXTENDEDVERBS } else { 0 };
-        let outcome = track(hwnd, &context, x, y, flags, Some(toggle_label));
+        let extras = [
+            Extra {
+                id: ID_CUSTOM_FIND_DUPLICATES,
+                label: dup_label,
+                action: "findDuplicates",
+            },
+            Extra {
+                id: ID_CUSTOM_TOGGLE_HIDDEN,
+                label: toggle_label,
+                action: "toggleHidden",
+            },
+        ];
+        let outcome = track(hwnd, &context, x, y, flags, &extras);
         drop(context);
         drop(cleanup);
         outcome
@@ -272,7 +321,7 @@ unsafe fn track(
     x: i32,
     y: i32,
     flags: u32,
-    toggle_label: Option<&str>,
+    extras: &[Extra<'_>],
 ) -> Result<Outcome, ApiError> {
     unsafe {
         let menu2: Option<IContextMenu2> = context.cast().ok();
@@ -295,10 +344,12 @@ unsafe fn track(
             return Err(ApiError::new("SHELL_MENU", query.message()));
         }
 
-        if let Some(label) = toggle_label {
-            let wide = HSTRING::from(label);
+        if !extras.is_empty() {
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-            let _ = AppendMenuW(menu, MF_STRING, ID_CUSTOM_TOGGLE_HIDDEN as usize, &wide);
+            for extra in extras {
+                let wide = HSTRING::from(extra.label);
+                let _ = AppendMenuW(menu, MF_STRING, extra.id as usize, &wide);
+            }
         }
 
         let _ = SetForegroundWindow(hwnd);
@@ -318,8 +369,8 @@ unsafe fn track(
             id: command,
             action: None,
         };
-        if command == ID_CUSTOM_TOGGLE_HIDDEN {
-            outcome.action = Some("toggleHidden".into());
+        if let Some(extra) = extras.iter().find(|extra| extra.id == command) {
+            outcome.action = Some(extra.action.into());
         } else if (ID_CMD_FIRST..=ID_CMD_LAST).contains(&command) {
             let offset = command - ID_CMD_FIRST;
             let mut info = CMINVOKECOMMANDINFOEX::default();

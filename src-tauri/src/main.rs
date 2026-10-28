@@ -7,6 +7,8 @@ mod error;
 mod folder_picker;
 mod fs;
 mod git;
+mod hash;
+mod dup;
 mod icons;
 mod layout;
 mod logging;
@@ -513,6 +515,57 @@ fn op_cancel(state: tauri::State<'_, ops::OpState>, op_id: String) {
     state.cancel(&op_id);
 }
 
+/// Starts a checksum job; progress arrives on the channel and `tool_cancel` stops it.
+#[tauri::command(rename_all = "camelCase")]
+fn hash_start(
+    state: tauri::State<'_, hash::ToolState>,
+    job_id: String,
+    paths: Vec<String>,
+    algorithm: String,
+    on_progress: Channel<hash::HashProgress>,
+) -> Result<(), ApiError> {
+    log::info!(target: "flowdir::hash", "hash_start items={} algo={algorithm}", paths.len());
+    hash::start_hash(&state, job_id, paths, algorithm, on_progress)
+}
+
+/// Starts the three-phase duplicate scan. Concurrency and rate come from settings; the
+/// backend re-validates them so a hand-edited file cannot create hundreds of workers.
+#[tauri::command(rename_all = "camelCase")]
+fn dup_start(
+    state: tauri::State<'_, hash::ToolState>,
+    job_id: String,
+    roots: Vec<String>,
+    include_hidden: bool,
+    min_size: u64,
+    concurrency: u32,
+    max_bytes_per_sec: u64,
+    exclude: Vec<String>,
+    on_progress: Channel<dup::DupProgress>,
+) -> Result<(), ApiError> {
+    log::info!(target: "flowdir::hash", "dup_start roots={} workers={concurrency}", roots.len());
+    dup::start(
+        &state,
+        job_id,
+        roots,
+        include_hidden,
+        min_size,
+        concurrency.min(16),
+        max_bytes_per_sec,
+        exclude,
+        on_progress,
+    )
+}
+
+#[tauri::command]
+fn tool_cancel(state: tauri::State<'_, hash::ToolState>, job_id: String) {
+    state.cancel(&job_id);
+}
+
+#[tauri::command]
+fn tool_pause(state: tauri::State<'_, hash::ToolState>, job_id: String, paused: bool) {
+    state.pause(&job_id, paused);
+}
+
 /// Retries a denied operation under an elevated helper. The frontend offers this only after
 /// the ordinary run reported `ACCESS_DENIED`; the GUI itself stays non-elevated.
 #[tauri::command]
@@ -572,8 +625,9 @@ async fn shell_menu_show(
     x: i32,
     y: i32,
     extended: bool,
+    hash_label: Option<String>,
 ) -> Result<shell_menu::Outcome, ApiError> {
-    tauri::async_runtime::spawn_blocking(move || shell_menu::show(paths, x, y, extended))
+    tauri::async_runtime::spawn_blocking(move || shell_menu::show(paths, x, y, extended, hash_label))
         .await
         .map_err(|e| ApiError::new("THREAD", e.to_string()))?
 }
@@ -585,12 +639,28 @@ async fn shell_menu_background_show(
     y: i32,
     extended: bool,
     toggle_label: String,
+    dup_label: String,
 ) -> Result<shell_menu::Outcome, ApiError> {
     tauri::async_runtime::spawn_blocking(move || {
-        shell_menu::show_background(path, x, y, extended, toggle_label)
+        shell_menu::show_background(path, x, y, extended, toggle_label, dup_label)
     })
     .await
     .map_err(|e| ApiError::new("THREAD", e.to_string()))?
+}
+
+/// Writes an exported report into a user-picked folder and returns its full path.
+#[tauri::command]
+fn export_text(dir: String, name: String, content: String) -> Result<String, ApiError> {
+    let clean: String = name
+        .chars()
+        .map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c })
+        .collect();
+    if clean.trim().is_empty() {
+        return Err(ApiError::new("INVALID_NAME", "empty export name"));
+    }
+    let path = std::path::Path::new(&dir).join(&clean);
+    std::fs::write(&path, content).map_err(|e| ApiError::from_io(&path.display().to_string(), &e))?;
+    Ok(path.display().to_string())
 }
 
 include!(concat!(env!("OUT_DIR"), "/deps.rs"));
@@ -1027,6 +1097,7 @@ fn main() {
         }))
         .manage(AppState::default())
         .manage(ops::OpState::default())
+        .manage(hash::ToolState::default())
         .manage(watch::Watchers::default())
         .manage(preview::PreviewCache::default())
         .manage(settings::SettingsCache::default())
@@ -1157,8 +1228,13 @@ fn main() {
             op_start,
             op_cancel,
             op_retry_elevated,
+            hash_start,
+            dup_start,
+            tool_cancel,
+            tool_pause,
             shell_menu_show,
             shell_menu_background_show,
+            export_text,
             titlebar_menu,
             preview_info,
             preview_external,
