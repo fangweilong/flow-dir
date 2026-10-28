@@ -225,6 +225,8 @@ export default function App() {
   const [treeNodes, setTreeNodes] = useState<Record<string, string[]>>({})
   /** Folders whose child list hit the scan/row cap; the tree marks them instead of hiding the cut. */
   const [treeTruncated, setTreeTruncated] = useState<Record<string, boolean>>({})
+  /** Folders whose child read failed; kept out of the cache so expanding retries them. */
+  const [treeErrors, setTreeErrors] = useState<Record<string, boolean>>({})
   /** `git status` per folder, keyed by {@link pathKey}; empty repo = no badges. */
   const [gitByDir, setGitByDir] = useState<Record<string, GitStatus>>({})
   /** Bumped by invalidation so the fetch effect re-arms even if nothing was cached yet. */
@@ -275,6 +277,8 @@ export default function App() {
   const gitSeq = useRef(new Map<string, number>())
   const sidebarRef = useRef<HTMLElement | null>(null)
   const treeNodesRef = useRef<Record<string, string[]>>({})
+  /** Mirror of `treeErrors` for the stable fetch callbacks. */
+  const treeErrorsRef = useRef<Record<string, boolean>>({})
 
   useEffect(() => {
     gitByDirRef.current = gitByDir
@@ -300,7 +304,7 @@ export default function App() {
   const loadTree = useCallback((path: string, force = false) => {
     const key = pathKey(path)
     if (!isFsPath(path) || treePending.current.has(key)) return
-    if (!force && treeNodesRef.current[key]) return
+    if (!force && (treeNodesRef.current[key] || treeErrorsRef.current[key])) return
     treePending.current.add(key)
     const generation = ++treeCounter.current
     treeGeneration.current.set(key, generation)
@@ -311,10 +315,21 @@ export default function App() {
       setTreeTruncated((prev) =>
         prev[key] === truncated ? prev : { ...prev, [key]: truncated },
       )
+      if (treeErrorsRef.current[key]) {
+        const rest = { ...treeErrorsRef.current }
+        delete rest[key]
+        treeErrorsRef.current = rest
+        setTreeErrors(rest)
+      }
     }
     treeDirs(path, settingsRef.current.showHidden)
       .then((listing) => reply(listing.names, listing.truncated))
-      .catch(() => reply([], false))
+      .catch(() => {
+        if (treeGeneration.current.get(key) !== generation) return
+        // A failed read is not an empty folder: caching [] would hide the retry forever.
+        treeErrorsRef.current = { ...treeErrorsRef.current, [key]: true }
+        setTreeErrors(treeErrorsRef.current)
+      })
       .finally(() => {
         if (treeGeneration.current.get(key) === generation) treePending.current.delete(key)
       })
@@ -323,11 +338,21 @@ export default function App() {
   /** Drops one folder's children; open nodes refetch on the next pass. */
   const invalidateTree = useCallback((path: string) => {
     const key = pathKey(path)
-    if (!(key in treeNodesRef.current)) return
-    const next = { ...treeNodesRef.current }
-    delete next[key]
-    treeNodesRef.current = next
-    setTreeNodes(next)
+    // A reply already in flight must not repopulate the node after this invalidation.
+    treeGeneration.current.set(key, ++treeCounter.current)
+    if (!(key in treeNodesRef.current) && !treeErrorsRef.current[key]) return
+    if (key in treeNodesRef.current) {
+      const next = { ...treeNodesRef.current }
+      delete next[key]
+      treeNodesRef.current = next
+      setTreeNodes(next)
+    }
+    if (treeErrorsRef.current[key]) {
+      const rest = { ...treeErrorsRef.current }
+      delete rest[key]
+      treeErrorsRef.current = rest
+      setTreeErrors(rest)
+    }
     setTreeTruncated((prev) => {
       if (!(key in prev)) return prev
       const rest = { ...prev }
@@ -351,7 +376,16 @@ export default function App() {
         delete next[key]
         return next
       })
-      if (opening) loadTree(path, true)
+      if (opening) {
+        // Re-expanding a folder whose read failed is the retry gesture.
+        if (treeErrorsRef.current[key]) {
+          const rest = { ...treeErrorsRef.current }
+          delete rest[key]
+          treeErrorsRef.current = rest
+          setTreeErrors(rest)
+        }
+        loadTree(path, true)
+      }
     },
     [loadTree],
   )
@@ -362,9 +396,9 @@ export default function App() {
     treeOpenRef.current = treeOpen
     if (!settings.sidebarOpen) return
     for (const [key, path] of Object.entries(treeOpen)) {
-      if (!treeNodes[key]) loadTree(path)
+      if (!treeNodes[key] && !treeErrors[key]) loadTree(path)
     }
-  }, [settings.sidebarOpen, treeOpen, treeNodes, loadTree])
+  }, [settings.sidebarOpen, treeOpen, treeNodes, treeErrors, loadTree])
 
   useEffect(() => {
     // Replies requested under the previous hidden mode must not repopulate the cleared
@@ -374,8 +408,10 @@ export default function App() {
     }
     treeNodesRef.current = {}
     treePending.current.clear()
+    treeErrorsRef.current = {}
     setTreeNodes({})
     setTreeTruncated({})
+    setTreeErrors({})
   }, [settings.showHidden])
 
   /** One `git status` per visited folder; failures cache as "no repository". */
