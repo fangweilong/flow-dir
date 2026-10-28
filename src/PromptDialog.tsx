@@ -36,7 +36,7 @@ export function PromptDialog({ title, initial, lang, onConfirm, onClose }: Props
   return (
     <div
       data-prompt
-      className="fixed inset-0 z-[70] flex items-start justify-center bg-slate-950/30 pt-[18vh] backdrop-blur-[1px]"
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/30 p-4 backdrop-blur-[1px]"
       onMouseDown={(ev) => {
         if (ev.target === ev.currentTarget) onClose()
       }}
