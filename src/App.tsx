@@ -257,6 +257,10 @@ export default function App() {
   const lastScan = useRef(new Map<string, number>())
   /** Last time each tab was on screen; drives eviction of the cached rows. */
   const tabUsed = useRef(new Map<string, number>())
+  /** Latest rows, so callbacks that must not re-bind on every scan can restore a closed tab. */
+  const listDataRef = useRef<Record<string, ListData>>({})
+  /** `Ctrl+Shift+T` stack: path plus the rows, filter and selection the tab had when closed. */
+  const closedTabs = useRef<{ tab: TabState; list?: ListData }[]>([])
   /** Active tab per pane, to detect a switch that left the tab unwatched while inactive. */
   const lastActiveTab = useRef(new Map<string, string>())
   const rescanTimers = useRef(new Map<string, number>())
@@ -308,6 +312,10 @@ export default function App() {
   useEffect(() => {
     settingsRef.current = settings
   }, [settings])
+
+  useEffect(() => {
+    listDataRef.current = listData
+  }, [listData])
 
   // The crash screen renders outside this component; keep it in the user's language.
   useEffect(() => {
@@ -701,7 +709,10 @@ export default function App() {
       homeRef.current = home
       const restored = fromSnapshot(saved)
       if (saved && !restored) void layoutPreserve().catch(() => undefined)
-      const initial = restored ?? createWorkspace(home, savedSettings.showHidden)
+      // Turning session restore off starts on a single home tab; the saved file stays on
+      // disk until the next save, so flipping the switch back is not destructive.
+      const initial =
+        (merged.restoreTabsOnStart ? restored : null) ?? createWorkspace(home, merged.showHidden)
       adoptIds(initial)
       setWs(initial)
       readyRef.current = true
@@ -1347,6 +1358,15 @@ export default function App() {
     if (!current) return
     const pane = current.panes[paneId]
     if (!pane) return
+    const closing = current.tabs[tabId]
+    // The stack keeps the rows so Ctrl+Shift+T brings back the filter, selection and scroll
+    // position; an empty overview tab has nothing worth restoring.
+    if (closing?.path) {
+      const limit = Math.max(1, settingsRef.current.closedTabLimit)
+      const stack = closedTabs.current
+      stack.push({ tab: closing, list: listDataRef.current[tabId] })
+      if (stack.length > limit) stack.splice(0, stack.length - limit)
+    }
     void cancelDir(tabId).catch(() => undefined)
     delete gens.current[tabId]
     setListData((prev) => {
@@ -1395,6 +1415,54 @@ export default function App() {
       panes[paneId] = { ...pane, tabIds: remaining, activeTabId }
       return { ...prev, panes, tabs }
     })
+  }, [])
+
+  /**
+   * `Ctrl+Shift+T`: puts the newest closed tab back into the pane it was closed from when
+   * that pane still exists, otherwise the active one. Rows come from the close snapshot, so
+   * the filter, selection and scroll position survive; a missing folder falls back to its
+   * parent instead of reopening a tab that cannot be scanned.
+   */
+  const reopenTab = useCallback(() => {
+    const current = wsRef.current
+    const entry = closedTabs.current.pop()
+    if (!current || !entry) {
+      showToast(t('toast.nothingToReopen'))
+      return
+    }
+    const tab: TabState = { ...entry.tab, pinned: entry.tab.pinned }
+    const paneId = current.panes[current.activePaneId] ? current.activePaneId : Object.keys(current.panes)[0]
+    if (!paneId) return
+    if (entry.list) {
+      setListData((prev) => ({ ...prev, [tab.id]: entry.list as ListData }))
+    }
+    setWs((prev) =>
+      prev
+        ? {
+            ...prev,
+            activePaneId: paneId,
+            tabs: { ...prev.tabs, [tab.id]: tab },
+            panes: { ...prev.panes, [paneId]: { ...prev.panes[paneId], tabIds: [...prev.panes[paneId].tabIds, tab.id], activeTabId: tab.id } },
+          }
+        : prev,
+    )
+  }, [showToast, t])
+
+  /**
+   * Background tab for a folder: middle-click or Ctrl+click never steals the current tab,
+   * which is the whole point of the gesture when copying between directories.
+   */
+  const openTabAt = useCallback((paneId: string, path: string) => {
+    const tabId = uid('t')
+    setWs((prev) =>
+      prev
+        ? {
+            ...prev,
+            tabs: { ...prev.tabs, [tabId]: { id: tabId, path, history: [path], histIdx: 0 } },
+            panes: { ...prev.panes, [paneId]: { ...prev.panes[paneId], tabIds: [...prev.panes[paneId].tabIds, tabId] } },
+          }
+        : prev,
+    )
   }, [])
 
   const activateTab = useCallback((paneId: string, tabId: string) => {
@@ -2358,9 +2426,11 @@ export default function App() {
       if (!prev) return prev
       const pane = prev.panes[paneId]
       if (!pane) return prev
-      const tabs = { ...prev.tabs }
-      for (const id of pane.tabIds) if (id !== tabId) delete tabs[id]
-      return { ...prev, tabs, panes: { ...prev.panes, [paneId]: { ...pane, tabIds: [tabId], activeTabId: tabId } } }
+      // Pinned tabs opt out of the bulk close, which is what makes pinning useful.
+      const keep = pane.tabIds.filter((id) => id === tabId || prev.tabs[id]?.pinned)
+      const tabs: Record<string, TabState> = {}
+      for (const id of keep) tabs[id] = prev.tabs[id]
+      return { ...prev, tabs, panes: { ...prev.panes, [paneId]: { ...pane, tabIds: keep, activeTabId: tabId } } }
     })
   }, [])
 
@@ -2371,11 +2441,55 @@ export default function App() {
       if (!pane) return prev
       const index = pane.tabIds.indexOf(tabId)
       if (index < 0) return prev
-      const keep = pane.tabIds.slice(0, index + 1)
-      const tabs = { ...prev.tabs }
-      for (const id of pane.tabIds.slice(index + 1)) delete tabs[id]
+      const keep = pane.tabIds.filter((id, at) => at <= index || prev.tabs[id]?.pinned)
+      const tabs: Record<string, TabState> = {}
+      for (const id of keep) tabs[id] = prev.tabs[id]
       return { ...prev, tabs, panes: { ...prev.panes, [paneId]: { ...pane, tabIds: keep } } }
     })
+  }, [])
+
+  /** Pinning moves the tab to the front of its pane, so pinned tabs read left to right. */
+  const togglePin = useCallback((paneId: string, tabId: string) => {
+    setWs((prev) => {
+      if (!prev) return prev
+      const pane = prev.panes[paneId]
+      const tab = prev.tabs[tabId]
+      if (!pane || !tab) return prev
+      const pinned = !tab.pinned
+      const rest = pane.tabIds.filter((id) => id !== tabId)
+      const firstUnpinned = rest.findIndex((id) => !prev.tabs[id]?.pinned)
+      const at = pinned ? (firstUnpinned < 0 ? rest.length : firstUnpinned) : rest.length
+      const tabIds = [...rest.slice(0, at), tabId, ...rest.slice(at)]
+      return {
+        ...prev,
+        tabs: { ...prev.tabs, [tabId]: { ...tab, pinned } },
+        panes: { ...prev.panes, [paneId]: { ...pane, tabIds } },
+      }
+    })
+  }, [])
+
+  /** Same folder, same history position, new id: a scratch tab for a second view. */
+  const duplicateTab = useCallback((paneId: string, tabId: string) => {
+    const current = wsRef.current
+    const source = current?.tabs[tabId]
+    if (!current || !source) return
+    const newId = uid('t')
+    setWs((prev) =>
+      prev
+        ? {
+            ...prev,
+            tabs: { ...prev.tabs, [newId]: { ...source, id: newId, pinned: false } },
+            panes: {
+              ...prev.panes,
+              [paneId]: {
+                ...prev.panes[paneId],
+                tabIds: [...prev.panes[paneId].tabIds, newId],
+                activeTabId: newId,
+              },
+            },
+          }
+        : prev,
+    )
   }, [])
 
   const openInNewPane = useCallback((paneId: string, tabId: string) => {
@@ -2594,26 +2708,35 @@ export default function App() {
       if (!pane || !tab) return
       const index = pane.tabIds.indexOf(tabId)
       const items: MenuItem[] = [
-        { kind: 'item', label: t('menu.closeTab'), onSelect: () => closeTab(paneId, tabId) },
+        {
+          kind: 'item',
+          label: tab.pinned ? t('menu.unpinTab') : t('menu.pinTab'),
+          onSelect: () => togglePin(paneId, tabId),
+        },
+        { kind: 'item', label: t('menu.duplicateTab'), onSelect: () => duplicateTab(paneId, tabId) },
+        { kind: 'sep' },
+        { kind: 'item', label: t('menu.closeTab'), hint: menuHint(keys.closeTab), onSelect: () => closeTab(paneId, tabId) },
         {
           kind: 'item',
           label: t('menu.closeOthers'),
-          disabled: pane.tabIds.length < 2,
+          disabled: pane.tabIds.filter((id) => id === tabId || !current.tabs[id]?.pinned).length < 2,
           onSelect: () => closeOthers(paneId, tabId),
         },
         {
           kind: 'item',
           label: t('menu.closeRight'),
-          disabled: index >= pane.tabIds.length - 1,
+          disabled: !pane.tabIds.slice(index + 1).some((id) => !current.tabs[id]?.pinned),
           onSelect: () => closeRight(paneId, tabId),
         },
+        { kind: 'sep' },
+        { kind: 'item', label: t('menu.reopenTab'), hint: menuHint(keys.reopenTab), disabled: !closedTabs.current.length, onSelect: reopenTab },
         { kind: 'sep' },
         { kind: 'item', label: t('menu.copyPath'), disabled: !tab.path, onSelect: () => copyPaths([tab.path]) },
         { kind: 'item', label: t('menu.openInNewPane'), onSelect: () => openInNewPane(paneId, tabId) },
       ]
       setMenu({ x: point.clientX, y: point.clientY, items })
     },
-    [closeOthers, closeRight, closeTab, copyPaths, openInNewPane, showToast, t],
+    [closeOthers, closeRight, closeTab, copyPaths, duplicateTab, keys, openInNewPane, reopenTab, showToast, t, togglePin],
   )
 
   const activePane = ws?.panes[ws.activePaneId]
@@ -2840,6 +2963,11 @@ export default function App() {
         newTab(activePane.id)
         return
       }
+      if (matchBinding(event, keys.reopenTab)) {
+        event.preventDefault()
+        reopenTab()
+        return
+      }
       if (activePane && activeTab && matchBinding(event, keys.closeTab)) {
         event.preventDefault()
         closeTab(activePane.id, activeTab.id)
@@ -2870,6 +2998,7 @@ export default function App() {
     activeList,
     previewName,
     newTab,
+    reopenTab,
     closeTab,
     activateTab,
     openExternalPreview,
@@ -3027,6 +3156,8 @@ export default function App() {
               draggingTabId={drag?.tabId ?? null}
               onFocusPane={() => focusPane(pane.id)}
               onNewTab={() => newTab(pane.id)}
+              onOpenInNewTab={(path) => openTabAt(pane.id, path)}
+              newTabOnMiddleClick={settings.newTabOnMiddleClick}
               onCloseTab={(tabId) => closeTab(pane.id, tabId)}
               onActivateTab={(tabId) => activateTab(pane.id, tabId)}
               onOpenTarget={openTarget}
@@ -3086,6 +3217,7 @@ export default function App() {
       openBlankMenu,
       openTabMenu,
       openProperties,
+      openTabAt,
       startRename,
       deleteEntries,
       pasteInto,
@@ -3098,6 +3230,7 @@ export default function App() {
       settings.tabFontSize,
       settings.listFontSize,
       settings.navFontSize,
+      settings.newTabOnMiddleClick,
       settings.listSizeWidth,
       settings.listTimeWidth,
       settings.driveCapacityWidth,

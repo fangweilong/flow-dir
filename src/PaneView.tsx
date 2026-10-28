@@ -106,6 +106,10 @@ type Props = {
   onNewTab: () => void
   onCloseTab: (tabId: string) => void
   onActivateTab: (tabId: string) => void
+  /** Opens `path` in a background tab; middle-click and Ctrl+click land here. */
+  onOpenInNewTab: (path: string) => void
+  /** Whether those gestures open a tab at all; off means they act like a plain click. */
+  newTabOnMiddleClick: boolean
   /** Opens a file or non-filesystem drive root with the shell, reporting failures. */
   onOpenTarget: (path: string) => void
   onNavigate: (tabId: string, path: string) => void
@@ -170,6 +174,8 @@ export function PaneView({
   onNewTab,
   onCloseTab,
   onActivateTab,
+  onOpenInNewTab,
+  newTabOnMiddleClick,
   onOpenTarget,
   onNavigate,
   onHistoryMove,
@@ -229,6 +235,31 @@ export function PaneView({
   const [typed, setTyped] = useState('')
   const typeAheadRef = useRef<HTMLInputElement>(null)
   const typeAheadTimer = useRef<number | null>(null)
+  /** Tab strip scroller and whether its tabs no longer fit, which arms the overflow UI. */
+  const stripRef = useRef<HTMLDivElement>(null)
+  const [stripOverflow, setStripOverflow] = useState(false)
+  const [tabListOpen, setTabListOpen] = useState(false)
+
+  useEffect(() => {
+    const strip = stripRef.current
+    if (!strip) return
+    const measure = () => setStripOverflow(strip.scrollWidth > strip.clientWidth + 1)
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(strip)
+    return () => observer.disconnect()
+  }, [pane.tabIds, tabs])
+
+  // The active tab must stay on screen: with 20+ tabs it would otherwise open offscreen.
+  useEffect(() => {
+    const strip = stripRef.current
+    const item = strip?.querySelector<HTMLElement>(`[data-tab="${CSS.escape(pane.activeTabId)}"]`)
+    if (!strip || !item) return
+    const left = item.offsetLeft
+    const right = left + item.offsetWidth
+    if (left < strip.scrollLeft) strip.scrollLeft = left
+    else if (right > strip.scrollLeft + strip.clientWidth) strip.scrollLeft = right - strip.clientWidth
+  }, [pane.activeTabId, pane.tabIds, stripOverflow])
 
   useEffect(
     () => () => {
@@ -796,10 +827,22 @@ export function PaneView({
           if ((ev.target as HTMLElement).closest('[data-tab]')) return
           onNewTab()
         }}
-        className="typo-tab flex shrink-0 items-stretch gap-0.5 border-b border-line bg-surface-2 px-1 pt-[2px]"
+        className="typo-tab relative flex shrink-0 items-stretch gap-0.5 border-b border-line bg-surface-2 px-1 pt-[2px]"
         style={{ height: tabBarHeight }}
       >
-        <div className="no-bar flex min-w-0 flex-1 items-stretch gap-0.5 overflow-x-auto">
+        {stripOverflow && (
+          <button
+            type="button"
+            data-tab-scroll="left"
+            title={t('tab.scrollLeft')}
+            aria-label={t('tab.scrollLeft')}
+            onClick={() => stripRef.current?.scrollBy({ left: -160, behavior: 'smooth' })}
+            className="grid w-[1.5em] shrink-0 place-items-center rounded text-muted-2 hover:bg-surface-3 hover:text-fg"
+          >
+            ‹
+          </button>
+        )}
+        <div ref={stripRef} data-tab-strip className="no-bar flex min-w-0 flex-1 items-stretch gap-0.5 overflow-x-auto">
           {pane.tabIds.map((id) => {
             const tabState = tabs[id]
             if (!tabState) return null
@@ -809,10 +852,17 @@ export function PaneView({
                 key={id}
                 data-tab={id}
                 data-tab-active={selected ? '1' : '0'}
+                data-tab-pinned={tabState.pinned ? '1' : '0'}
                 onPointerDown={(ev) => {
                   if (ev.button !== 0) return
                   onActivateTab(id)
                   onTabDragStart(id, ev)
+                }}
+                onAuxClick={(ev) => {
+                  // Middle-click on a tab closes it, the gesture browsers and terminals share.
+                  if (ev.button !== 1) return
+                  ev.preventDefault()
+                  onCloseTab(id)
                 }}
                 onContextMenu={(ev) => {
                   ev.preventDefault()
@@ -827,7 +877,11 @@ export function PaneView({
                 style={{ height: tabItemHeight }}
                 title={tabState.path || t('sidebar.thisPc')}
               >
-                {tabState.path ? (
+                {tabState.pinned ? (
+                  <svg viewBox="0 0 16 16" className="h-[1em] w-[1em] shrink-0 text-blue-500" fill="currentColor" aria-hidden>
+                    <path d="M9.2 1.8a1 1 0 0 1 1.4 0l3.6 3.6a1 1 0 0 1 0 1.4l-1.5 1.5-.8-.3-3.3 3.3.2 2.2-1.1 1.1-2.6-2.6L2 10.3l1.1-1.1 2.2.2 3.3-3.3-.3-.8 1.5-1.5Z" />
+                  </svg>
+                ) : tabState.path ? (
                   <FileIcon name={tabState.path} dir path={tabState.path} scale={tabScale} />
                 ) : (
                   <svg viewBox="0 0 16 16" className="h-[1.17em] w-[1.17em] shrink-0 text-muted-2" fill="currentColor">
@@ -856,6 +910,32 @@ export function PaneView({
             )
           })}
         </div>
+        {stripOverflow && (
+          <>
+            <button
+              type="button"
+              data-tab-scroll="right"
+              title={t('tab.scrollRight')}
+              aria-label={t('tab.scrollRight')}
+              onClick={() => stripRef.current?.scrollBy({ left: 160, behavior: 'smooth' })}
+              className="grid w-[1.5em] shrink-0 place-items-center rounded text-muted-2 hover:bg-surface-3 hover:text-fg"
+            >
+              ›
+            </button>
+            {/* Dropdown fallback: scrolling alone cannot show which tabs exist. */}
+            <button
+              type="button"
+              data-tab-overflow="1"
+              title={t('tab.overflow')}
+              aria-label={t('tab.overflow')}
+              aria-expanded={tabListOpen}
+              onClick={() => setTabListOpen((open) => !open)}
+              className="grid w-[1.5em] shrink-0 place-items-center rounded text-muted-2 hover:bg-surface-3 hover:text-fg"
+            >
+              ⌄
+            </button>
+          </>
+        )}
         <button
           type="button"
           title={t('tab.new')}
@@ -867,6 +947,38 @@ export function PaneView({
             <path d="M8 3.5v9M3.5 8h9" strokeLinecap="round" />
           </svg>
         </button>
+        {tabListOpen && (
+          <>
+            <div className="fixed inset-0 z-40" onMouseDown={() => setTabListOpen(false)} />
+            <div
+              data-tab-list
+              className="absolute right-1 top-full z-50 max-h-[50vh] w-[16rem] overflow-auto rounded-md border border-line bg-surface py-1 shadow-xl"
+            >
+              {pane.tabIds.map((id) => {
+                const state = tabs[id]
+                if (!state) return null
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => {
+                      onActivateTab(id)
+                      setTabListOpen(false)
+                    }}
+                    className={`flex w-full items-center gap-1.5 px-2 py-1 text-left text-[0.75rem] hover:bg-surface-3 ${
+                      id === pane.activeTabId ? 'bg-sel text-fg-strong' : 'text-fg'
+                    }`}
+                  >
+                    <span className="w-[1em] shrink-0 text-center text-[0.625rem] text-muted-2">
+                      {state.pinned ? '★' : ''}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate">{state.path || t('sidebar.thisPc')}</span>
+                  </button>
+                )
+              })}
+            </div>
+          </>
+        )}
       </div>
 
       <div
@@ -1274,9 +1386,21 @@ export function PaneView({
                 data-dir={dir ? '1' : '0'}
                 data-drop-dir={dir ? joinPath(tab.path, entry.name) : undefined}
                 onPointerDown={(e) => {
+                  // Ctrl+click belongs to the "open in a background tab" gesture; without
+                  // this guard the row would also grab the selection and start a drag.
+                  if (e.button === 0 && (e.ctrlKey || e.metaKey) && dir && newTabOnMiddleClick) {
+                    e.preventDefault()
+                    onOpenInNewTab(joinPath(tab.path, entry.name))
+                    return
+                  }
                   if (e.button !== 0) return
                   selectRow(vi.index, e)
                   onRowDragStart(entry, e)
+                }}
+                onAuxClick={(e) => {
+                  if (e.button !== 1 || !dir || !newTabOnMiddleClick) return
+                  e.preventDefault()
+                  onOpenInNewTab(joinPath(tab.path, entry.name))
                 }}
                 onContextMenu={(e) => {
                   e.preventDefault()

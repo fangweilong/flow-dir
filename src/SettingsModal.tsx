@@ -714,6 +714,34 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
                 onChange={(value) => onChange({ ...settings, showHidden: value })}
               />
               <ToggleRow
+                label={t('settings.restoreTabs')}
+                value={settings.restoreTabsOnStart}
+                onChange={(value) => onChange({ ...settings, restoreTabsOnStart: value })}
+              />
+              <ToggleRow
+                label={t('settings.middleClickNewTab')}
+                value={settings.newTabOnMiddleClick}
+                onChange={(value) => onChange({ ...settings, newTabOnMiddleClick: value })}
+              />
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-[0.71875rem] text-fg">{t('settings.closedTabLimit')}</div>
+                  <div className="text-[0.625rem] text-muted-2">{t('settings.closedTabLimitHint')}</div>
+                </div>
+                <input
+                  type="number"
+                  min={1}
+                  max={50}
+                  value={settings.closedTabLimit}
+                  onChange={(ev) => {
+                    const next = Number(ev.target.value)
+                    if (!Number.isFinite(next)) return
+                    onChange({ ...settings, closedTabLimit: Math.min(50, Math.max(1, Math.round(next))) })
+                  }}
+                  className="h-6 w-16 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-blue-400"
+                />
+              </div>
+              <ToggleRow
                 label={t('settings.notifyOps')}
                 hint={t('settings.notifyOpsHint')}
                 value={settings.notifyOps}

@@ -9,6 +9,7 @@ export type ShortcutId =
   | 'externalPreview'
   | 'toggleSidebar'
   | 'newTab'
+  | 'reopenTab'
   | 'closeTab'
   | 'openSettings'
   | 'undo'
@@ -39,6 +40,7 @@ export const DEFAULT_BINDINGS: Record<ShortcutId, string> = {
   externalPreview: 'f3',
   toggleSidebar: 'ctrl+b',
   newTab: 'ctrl+t',
+  reopenTab: 'ctrl+shift+t',
   closeTab: 'ctrl+w',
   openSettings: 'ctrl+,',
   undo: 'ctrl+z',
@@ -65,6 +67,7 @@ export const SHORTCUTS: Shortcut[] = [
   { id: 'externalPreview', scope: 'app', label: 'shortcut.externalPreview' },
   { id: 'toggleSidebar', scope: 'app', label: 'shortcut.toggleSidebar' },
   { id: 'newTab', scope: 'app', label: 'shortcut.newTab' },
+  { id: 'reopenTab', scope: 'app', label: 'shortcut.reopenTab' },
   { id: 'closeTab', scope: 'app', label: 'shortcut.closeTab' },
   { id: 'openSettings', scope: 'app', label: 'shortcut.openSettings' },
   { id: 'undo', scope: 'app', label: 'shortcut.undo' },

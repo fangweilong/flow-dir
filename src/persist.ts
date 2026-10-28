@@ -63,6 +63,12 @@ export type Settings = {
   previewMaxDimension: number
   /** How much of a text file the preview shows, in KB (1–1024). */
   previewTextKb: number
+  /** Closed tabs remembered for Ctrl+Shift+T (1–50). */
+  closedTabLimit: number
+  /** Restore the previous tab set on launch. */
+  restoreTabsOnStart: boolean
+  /** Middle-click / Ctrl+click a folder opens it in a background tab. */
+  newTabOnMiddleClick: boolean
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -98,6 +104,9 @@ export const DEFAULT_SETTINGS: Settings = {
   previewMaxFileMb: 64,
   previewMaxDimension: 4096,
   previewTextKb: 8,
+  closedTabLimit: 20,
+  restoreTabsOnStart: true,
+  newTabOnMiddleClick: true,
 }
 
 type Snapshot = {

@@ -121,6 +121,12 @@ pub struct Settings {
     pub preview_max_dimension: u32,
     /// How much of a text file is shown, in KB (1–1024).
     pub preview_text_kb: u32,
+    /// Reopened-tab stack depth (1–50); `Ctrl+Shift+T` walks it.
+    pub closed_tab_limit: u32,
+    /// Restore the previous tab set on launch.
+    pub restore_tabs_on_start: bool,
+    /// Middle-click / Ctrl+click on a folder opens it in a background tab.
+    pub new_tab_on_middle_click: bool,
 }
 
 fn default_language() -> String {
@@ -270,6 +276,9 @@ impl Default for Settings {
             preview_max_file_mb: 64,
             preview_max_dimension: 4096,
             preview_text_kb: 8,
+            closed_tab_limit: 20,
+            restore_tabs_on_start: true,
+            new_tab_on_middle_click: true,
         }
     }
 }
@@ -336,6 +345,7 @@ impl Settings {
         self.preview_max_file_mb = self.preview_max_file_mb.clamp(1, 4096);
         self.preview_max_dimension = self.preview_max_dimension.clamp(256, 16384);
         self.preview_text_kb = self.preview_text_kb.clamp(1, 1024);
+        self.closed_tab_limit = self.closed_tab_limit.clamp(1, 50);
         self
     }
 }
@@ -429,6 +439,16 @@ undo_limit = 10
 preview_max_file_mb = 64
 preview_max_dimension = 4096
 preview_text_kb = 8
+
+# 可恢复的已关闭标签数量（1–50）/ closed tabs remembered for Ctrl+Shift+T, 1–50
+closed_tab_limit = 20
+
+# 启动时恢复上次的标签 / restore the previous tabs on launch
+restore_tabs_on_start = true
+
+# 中键或 Ctrl+点击文件夹时在后台新标签打开；关闭则改为当前标签
+# middle-click or Ctrl+click a folder opens a background tab; off = reuse the current tab
+new_tab_on_middle_click = true
 "#;
 
 /// On-disk shape: snake_case keys, no coupling to the camelCase IPC payload.
@@ -467,6 +487,9 @@ struct FileSettings {
     preview_max_file_mb: u32,
     preview_max_dimension: u32,
     preview_text_kb: u32,
+    closed_tab_limit: u32,
+    restore_tabs_on_start: bool,
+    new_tab_on_middle_click: bool,
 }
 
 impl Default for FileSettings {
@@ -505,6 +528,9 @@ impl Default for FileSettings {
             preview_max_file_mb: base.preview_max_file_mb,
             preview_max_dimension: base.preview_max_dimension,
             preview_text_kb: base.preview_text_kb,
+            closed_tab_limit: base.closed_tab_limit,
+            restore_tabs_on_start: base.restore_tabs_on_start,
+            new_tab_on_middle_click: base.new_tab_on_middle_click,
         }
     }
 }
@@ -544,6 +570,9 @@ impl From<FileSettings> for Settings {
             preview_max_file_mb: file.preview_max_file_mb,
             preview_max_dimension: file.preview_max_dimension,
             preview_text_kb: file.preview_text_kb,
+            closed_tab_limit: file.closed_tab_limit,
+            restore_tabs_on_start: file.restore_tabs_on_start,
+            new_tab_on_middle_click: file.new_tab_on_middle_click,
         }
     }
 }
@@ -673,6 +702,21 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), A
         &mut doc,
         "preview_text_kb",
         Value::from(settings.preview_text_kb as i64),
+    );
+    set_value(
+        &mut doc,
+        "closed_tab_limit",
+        Value::from(settings.closed_tab_limit as i64),
+    );
+    set_value(
+        &mut doc,
+        "restore_tabs_on_start",
+        Value::from(settings.restore_tabs_on_start),
+    );
+    set_value(
+        &mut doc,
+        "new_tab_on_middle_click",
+        Value::from(settings.new_tab_on_middle_click),
     );
 
     let mut hidden = toml_edit::Array::new();

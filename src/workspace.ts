@@ -1,6 +1,13 @@
 import type { SortState } from './types'
 
-export type TabState = { id: string; path: string; history: string[]; histIdx: number }
+export type TabState = {
+  id: string
+  path: string
+  history: string[]
+  histIdx: number
+  /** Pinned tabs survive "close others" and are restored first at launch. */
+  pinned?: boolean
+}
 export type PaneState = {
   id: string
   tabIds: string[]
