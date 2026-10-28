@@ -252,3 +252,49 @@ export type SearchBatch = {
   done: boolean
   error?: ApiError | null
 }
+
+/** One side's metadata in a folder comparison; `size` is 0 for folders. */
+export type CompareMeta = { size: number; mtime: number; isDir: boolean }
+export type CompareStatus = 'left' | 'right' | 'different' | 'same'
+export type CompareEntry = {
+  /** Path relative to the two compare roots. */
+  rel: string
+  name: string
+  left: CompareMeta | null
+  right: CompareMeta | null
+  status: CompareStatus
+}
+export type CompareLevel = { entries: CompareEntry[] }
+/** Recursive file counts for one shared child folder. */
+export type CompareCount = {
+  name: string
+  leftOnly: number
+  rightOnly: number
+  different: number
+  same: number
+  scanned: number
+  done: boolean
+  aborted: boolean
+  error: ApiError | null
+}
+export type CompareHashPair = { rel: string; left: string; right: string }
+export type CompareHashResult = {
+  rel: string
+  equal: boolean
+  leftHash: string | null
+  rightHash: string | null
+  error: string | null
+}
+export type CompareHashEvent = {
+  jobId: string
+  current: number
+  total: number
+  name: string | null
+  bytes: number
+  bytesTotal: number
+  paused: boolean
+  done: boolean
+  aborted: boolean
+  error: ApiError | null
+  results: CompareHashResult[]
+}

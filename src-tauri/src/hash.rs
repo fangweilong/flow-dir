@@ -117,11 +117,6 @@ impl ToolState {
     pub fn finish(&self, job_id: &str) {
         self.jobs.lock().unwrap().remove(job_id);
     }
-
-    /// Ids still running; quitting warns about them like it does for file operations.
-    pub fn active(&self) -> Vec<String> {
-        self.jobs.lock().unwrap().keys().cloned().collect()
-    }
 }
 
 /// Streaming hash over one algorithm id (`sha256`, `sha1`, `md5`).

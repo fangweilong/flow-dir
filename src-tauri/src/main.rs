@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod clipboard;
+mod compare;
 mod dragout;
 mod elevated;
 mod error;
@@ -482,6 +483,7 @@ fn op_start(
     new_name: Option<String>,
     new_names: Option<Vec<String>>,
     permanent: bool,
+    overwrite: bool,
     on_progress: Channel<ops::OpProgress>,
 ) -> Result<(), ApiError> {
     let hwnd = app
@@ -504,6 +506,7 @@ fn op_start(
             new_name,
             new_names,
             permanent,
+            overwrite,
         },
         hwnd,
         on_progress,
@@ -526,6 +529,46 @@ fn hash_start(
 ) -> Result<(), ApiError> {
     log::info!(target: "flowdir::hash", "hash_start items={} algo={algorithm}", paths.len());
     hash::start_hash(&state, job_id, paths, algorithm, on_progress)
+}
+
+/// Lists one level of the two compare roots; the frontend expands a folder by asking for
+/// that folder's level, so nothing below it is read until it is opened.
+#[tauri::command(rename_all = "camelCase")]
+fn compare_level(
+    left: String,
+    right: String,
+    prefix: String,
+    options: compare::Options,
+) -> Result<compare::Level, ApiError> {
+    compare::level(&left, &right, &prefix, &options)
+}
+
+/// Recursive difference counts for the shared child folders of one level; separately
+/// cancellable so a slow network share cannot hold the first screen hostage.
+#[tauri::command(rename_all = "camelCase")]
+fn compare_counts_start(
+    state: tauri::State<'_, hash::ToolState>,
+    job_id: String,
+    left: String,
+    right: String,
+    prefix: String,
+    options: compare::Options,
+    on_event: Channel<compare::CountEvent>,
+) -> Result<(), ApiError> {
+    compare::start_counts(&state, job_id, left, right, prefix, options, on_event)
+}
+
+/// SHA-256 verification for pairs the user asked to confirm; shares the byte rate limit
+/// with the duplicate scanner.
+#[tauri::command(rename_all = "camelCase")]
+fn compare_hash_start(
+    state: tauri::State<'_, hash::ToolState>,
+    job_id: String,
+    pairs: Vec<compare::HashPair>,
+    max_bytes_per_sec: u64,
+    on_event: Channel<compare::HashEvent>,
+) -> Result<(), ApiError> {
+    compare::start_hash(&state, job_id, pairs, max_bytes_per_sec, on_event)
 }
 
 /// Starts the three-phase duplicate scan. Concurrency and rate come from settings; the
@@ -1243,6 +1286,9 @@ fn main() {
             op_retry_elevated,
             hash_start,
             dup_start,
+            compare_level,
+            compare_counts_start,
+            compare_hash_start,
             tool_cancel,
             tool_pause,
             shell_menu_show,

@@ -247,6 +247,9 @@ pub struct Request {
     /// One new name per source for a batch rename; mutually exclusive with `new_name`.
     pub new_names: Option<Vec<String>>,
     pub permanent: bool,
+    /// Sync previews answer the shell's replace prompt up front; ordinary copies keep it.
+    #[serde(default)]
+    pub overwrite: bool,
 }
 
 impl Request {
@@ -254,7 +257,7 @@ impl Request {
     /// pointed at a different target than the run that was actually denied.
     pub fn fingerprint(&self) -> String {
         format!(
-            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
             self.kind,
             self.sources.join("\u{1f}"),
             self.target_dir.as_deref().unwrap_or(""),
@@ -263,7 +266,8 @@ impl Request {
                 .as_ref()
                 .map(|names| names.join("\u{1f}"))
                 .unwrap_or_default(),
-            self.permanent
+            self.permanent,
+            self.overwrite
         )
     }
 }
@@ -518,6 +522,10 @@ fn perform(
         let mut flags = FOF_SILENT | FOF_WANTNUKEWARNING | FOF_NOERRORUI;
         if !request.permanent {
             flags |= FOF_ALLOWUNDO;
+        }
+        // A sync preview already showed every overwrite; asking per file would defeat it.
+        if request.overwrite {
+            flags |= FOF_NOCONFIRMATION;
         }
         if kind == Kind::Delete {
             if request.permanent {
@@ -938,6 +946,7 @@ mod tests {
             new_name: Some("after.txt".into()),
             new_names: None,
             permanent: false,
+            overwrite: false,
         });
         assert!(report.error.is_none(), "{:?}", report.error);
         assert_eq!(report.failed_total, 0);
@@ -957,6 +966,7 @@ mod tests {
             new_name: None,
             new_names: None,
             permanent: false,
+            overwrite: false,
         });
         assert_eq!(report.error.unwrap().code, "BAD_KIND");
     }
@@ -972,6 +982,7 @@ mod tests {
             new_name: None,
             new_names: Some(vec!["one".into()]),
             permanent: false,
+            overwrite: false,
         };
         let error = start(&OpState::default(), request, None, channel).unwrap_err();
         assert_eq!(error.code, "BAD_ARGS");
@@ -1008,6 +1019,7 @@ mod tests {
             new_name: None,
             new_names: Some(vec!["one.txt".into(), "two.txt".into()]),
             permanent: false,
+            overwrite: false,
         };
         start(&OpState::default(), request, None, channel).unwrap();
         let done = rx
@@ -1030,6 +1042,7 @@ mod tests {
             new_name: None,
             new_names: None,
             permanent: false,
+            overwrite: false,
         }
     }
 
@@ -1042,6 +1055,7 @@ mod tests {
             new_name: Some(name.into()),
             new_names: None,
             permanent: false,
+            overwrite: false,
         }
     }
 
@@ -1137,6 +1151,7 @@ pub(crate) fn recycle_for_test(path: &str) -> u32 {
         new_name: None,
         new_names: None,
         permanent: false,
+        overwrite: false,
     };
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);

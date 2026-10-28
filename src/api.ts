@@ -1,5 +1,5 @@
 import { Channel, invoke } from '@tauri-apps/api/core'
-import type { AppInfo, Clip, DirBatch, Drive, DupProgress, ElevatedReport, HashProgress, MenuOutcome, OpKind, OpProgress, Place, UpdateStatus } from './types'
+import type { AppInfo, Clip, CompareCount, CompareHashEvent, CompareHashPair, CompareLevel, DirBatch, Drive, DupProgress, ElevatedReport, HashProgress, MenuOutcome, OpKind, OpProgress, Place, UpdateStatus } from './types'
 import type { GitStatus, PreviewInfo, SearchBatch } from './types'
 import type { Settings } from './persist'
 
@@ -70,6 +70,8 @@ export type OpRequest = {
   /** One name per source for a batch rename; takes precedence over `newName`. */
   newNames?: string[]
   permanent?: boolean
+  /** Answer the shell's replace prompt automatically; used by the sync preview. */
+  overwrite?: boolean
 }
 
 export function opStart(request: OpRequest, onProgress: (progress: OpProgress) => void) {
@@ -83,6 +85,7 @@ export function opStart(request: OpRequest, onProgress: (progress: OpProgress) =
     newName: request.newName ?? null,
     newNames: request.newNames ?? null,
     permanent: request.permanent ?? false,
+    overwrite: request.overwrite ?? false,
     onProgress: channel,
   })
 }
@@ -147,6 +150,7 @@ export function opRetryElevated(request: OpRequest) {
       newName: request.newName ?? null,
       newNames: request.newNames ?? null,
       permanent: request.permanent ?? false,
+      overwrite: request.overwrite ?? false,
     },
   })
 }
@@ -259,6 +263,60 @@ export function searchStart(
       maxBytes: content.maxBytes ?? 10 * 1024 * 1024,
     },
     onBatch: channel,
+  })
+}
+
+export type CompareOptions = {
+  includeHidden: boolean
+  extensions: string[]
+  minSize: number
+  maxSize: number
+  afterMs: number
+  beforeMs: number
+  exclude: string[]
+  toleranceMs: number
+}
+
+export const compareLevel = (
+  left: string,
+  right: string,
+  prefix: string,
+  options: CompareOptions,
+) => invoke<CompareLevel>('compare_level', { left, right, prefix, options })
+
+export function compareCountsStart(
+  jobId: string,
+  left: string,
+  right: string,
+  prefix: string,
+  options: CompareOptions,
+  onEvent: (event: CompareCount) => void,
+) {
+  const channel = new Channel<CompareCount>()
+  channel.onmessage = onEvent
+  return invoke<void>('compare_counts_start', {
+    jobId,
+    left,
+    right,
+    prefix,
+    options,
+    onEvent: channel,
+  })
+}
+
+export function compareHashStart(
+  jobId: string,
+  pairs: CompareHashPair[],
+  maxBytesPerSec: number,
+  onEvent: (event: CompareHashEvent) => void,
+) {
+  const channel = new Channel<CompareHashEvent>()
+  channel.onmessage = onEvent
+  return invoke<void>('compare_hash_start', {
+    jobId,
+    pairs,
+    maxBytesPerSec,
+    onEvent: channel,
   })
 }
 

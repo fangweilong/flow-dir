@@ -17,6 +17,8 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { FileToolsPanel } from './FileToolsPanel'
 import { PreviewPanel } from './PreviewPanel'
 import { SearchOverlay } from './SearchOverlay'
+import { ComparePanel } from './ComparePanel'
+import type { SyncAction } from './ComparePanel'
 import { themeIsDark } from './themes'
 import { SettingsModal } from './SettingsModal'
 import { SidebarTree } from './SidebarTree'
@@ -228,6 +230,7 @@ export default function App() {
   const [fileTools, setFileTools] = useState<
     { mode: 'hash'; paths: string[] } | { mode: 'dup'; root: string } | null
   >(null)
+  const [compareOpen, setCompareOpen] = useState(false)
   const [ops, setOps] = useState<Record<string, OpProgress>>({})
   /** Original request per running/finished op, so an ACCESS_DENIED result can be retried. */
   const opRequests = useRef<Record<string, OpRequest>>({})
@@ -1251,14 +1254,14 @@ export default function App() {
       const current = wsRef.current
       if (!current) return
       const target = ev.target instanceof Element ? ev.target.closest<HTMLElement>('[data-pane-id]') : null
-      if (!target && (settingsOpen || searchOpen || menu || prompt || batchRename || deleteConfirm || fileTools || quitBusy)) return
+      if (!target && (settingsOpen || searchOpen || menu || prompt || batchRename || deleteConfirm || fileTools || compareOpen || quitBusy)) return
       const pane = current.panes[target?.dataset.paneId ?? current.activePaneId]
       const tab = pane ? current.tabs[pane.activeTabId] : undefined
       if (tab) historyMove(tab.id, ev.button === 3 ? -1 : 1)
     }
     window.addEventListener('mouseup', onMouseUp)
     return () => window.removeEventListener('mouseup', onMouseUp)
-  }, [historyMove, settingsOpen, searchOpen, menu, prompt, batchRename, deleteConfirm, quitBusy])
+  }, [historyMove, settingsOpen, searchOpen, menu, prompt, batchRename, deleteConfirm, fileTools, compareOpen, quitBusy])
 
   /** Tree rows: folders navigate the active tab, non-path locations go to the shell. */
   const openTreePath = useCallback(
@@ -1765,6 +1768,8 @@ export default function App() {
         newName?: string
         newNames?: string[]
         permanent?: boolean
+        /** Sync previews confirmed the overwrite already; skip the shell's per-file prompt. */
+        overwrite?: boolean
         after?: () => void
         /**
          * `false` skips the undo stack; undo and redo move the entry themselves once the
@@ -1785,6 +1790,7 @@ export default function App() {
         newName: options?.newName,
         newNames: options?.newNames,
         permanent: options?.permanent,
+        overwrite: options?.overwrite,
       }
       opRequests.current[opId] = { opId, ...request }
       const recordEntry = (payload: UndoPayload | null, dirs: string[]) => {
@@ -1843,6 +1849,7 @@ export default function App() {
           newName: options?.newName,
           newNames: options?.newNames,
           permanent: options?.permanent,
+          overwrite: options?.overwrite,
         },
         (progress) => {
           setOps((prev) => (prev[opId] ? { ...prev, [opId]: progress } : prev))
@@ -1963,6 +1970,46 @@ export default function App() {
   )
 
   /**
+   * Runs a compare preview one shell operation at a time. Copies that share a target
+   * folder are batched so one sync does not fill the undo stack with single files.
+   */
+  const runSyncActions = useCallback(
+    (actions: SyncAction[]) =>
+      new Promise<void>((resolve) => {
+        const copies = new Map<string, string[]>()
+        const deletes: string[] = []
+        for (const action of actions) {
+          if (action.kind === 'copy') {
+            const list = copies.get(action.targetDir) ?? []
+            list.push(action.source)
+            copies.set(action.targetDir, list)
+          } else {
+            deletes.push(...action.paths)
+          }
+        }
+        const steps: (() => void)[] = []
+        for (const [targetDir, sources] of copies) {
+          steps.push(() =>
+            runOp('copy', sources, { targetDir, overwrite: true, onDone: runNext }),
+          )
+        }
+        if (deletes.length) {
+          steps.push(() => runOp('delete', deletes, { onDone: runNext }))
+        }
+        let index = 0
+        function runNext() {
+          if (index >= steps.length) {
+            resolve()
+            return
+          }
+          steps[index++]()
+        }
+        runNext()
+      }),
+    [runOp],
+  )
+
+  /**
    * Reverses one entry. The stack is peeked, not popped: a failed undo keeps the step in
    * place, so pressing Ctrl+Z again targets the same operation instead of losing it.
    */
@@ -2053,6 +2100,7 @@ export default function App() {
       newName: request.newName,
       newNames: request.newNames,
       permanent: request.permanent,
+      overwrite: request.overwrite,
       after: () => {
         for (const dir of new Set(entry.dirs)) {
           invalidateTree(dir)
@@ -2756,6 +2804,19 @@ export default function App() {
 
   const activePane = ws?.panes[ws.activePaneId]
   const activeTab = activePane ? ws?.tabs[activePane.activeTabId] : undefined
+  // The compare view uses the first two panes in layout order; a pane showing a virtual
+  // root (drives overview, search result) has no folder to compare.
+  const comparePanes = useMemo(() => {
+    if (!ws) return []
+    const paths: string[] = []
+    for (const id of paneIds(ws.root)) {
+      const pane = ws.panes[id]
+      const path = pane ? ws.tabs[pane.activeTabId]?.path ?? '' : ''
+      if (path && isFsPath(path) && !paths.includes(path)) paths.push(path)
+      if (paths.length === 2) break
+    }
+    return paths
+  }, [ws])
 
   /**
    * Keeps the active folder centred in the sidebar instead of parking it on the bottom
@@ -2906,7 +2967,7 @@ export default function App() {
   // list from reacting to keys typed into them.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (settingsOpen || searchOpen || deleteConfirm || prompt || batchRename || menu || fileTools || quitBusy) return
+      if (settingsOpen || searchOpen || deleteConfirm || prompt || batchRename || menu || fileTools || compareOpen || quitBusy) return
       const bare = !event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey
       if (bare && isTextInput(event.target)) return
 
@@ -3007,6 +3068,8 @@ export default function App() {
     prompt,
     batchRename,
     menu,
+    fileTools,
+    compareOpen,
     quitBusy,
     activePane,
     activeTab,
@@ -3332,6 +3395,20 @@ export default function App() {
         </button>
         <button
           type="button"
+          onClick={() => setCompareOpen(true)}
+          disabled={comparePanes.length < 2}
+          title={comparePanes.length < 2 ? t('compare.needPanes') : t('compare.open')}
+          aria-label={t('compare.open')}
+          className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-muted hover:bg-surface-3 hover:text-fg disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted"
+        >
+          <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.4">
+            <rect x="2" y="3.5" width="5" height="9" rx="1" />
+            <rect x="9" y="3.5" width="5" height="9" rx="1" />
+            <path d="M7 8h2" strokeLinecap="round" />
+          </svg>
+        </button>
+        <button
+          type="button"
           onClick={() => setSearchOpen(true)}
           title={`${t('search.open')} (${formatBinding(keys.search)})`}
           aria-label={t('search.open')}
@@ -3634,6 +3711,20 @@ export default function App() {
           onDelete={(paths) => runOp('delete', paths)}
           onToast={showToast}
           onClose={() => setFileTools(null)}
+        />
+      )}
+
+      {compareOpen && comparePanes.length >= 2 && (
+        <ComparePanel
+          lang={lang}
+          initialLeft={comparePanes[0]}
+          initialRight={comparePanes[1]}
+          includeHidden={activePane?.hidden ?? settings.showHidden}
+          fontSize={settings.fontSize}
+          hashRateBytes={settings.dupMaxMbPerSec * 1024 * 1024}
+          onClose={() => setCompareOpen(false)}
+          onToast={showToast}
+          onSync={runSyncActions}
         />
       )}
 
