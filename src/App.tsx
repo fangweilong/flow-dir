@@ -2982,6 +2982,16 @@ export default function App() {
     return paths
   }, [ws])
 
+  /** Folders the compare panel offers as shortcuts: every open tab with a real path. */
+  const openFolders = useMemo(() => {
+    if (!ws) return []
+    const paths: string[] = []
+    for (const tab of Object.values(ws.tabs)) {
+      if (tab.path && isFsPath(tab.path) && !paths.includes(tab.path)) paths.push(tab.path)
+    }
+    return paths
+  }, [ws])
+
   /**
    * Keeps the active folder centred in the sidebar instead of parking it on the bottom
    * edge the way `scrollIntoView({block:'nearest'})` does. Rows that are already fully
@@ -3887,6 +3897,7 @@ export default function App() {
           lang={lang}
           initialLeft={comparePaths[0] ?? ''}
           initialRight={comparePaths[1] ?? ''}
+          openFolders={openFolders}
           includeHidden={activePane?.hidden ?? settings.showHidden}
           fontSize={settings.fontSize}
           hashRateBytes={settings.dupMaxMbPerSec * 1024 * 1024}

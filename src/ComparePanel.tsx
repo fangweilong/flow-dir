@@ -52,6 +52,8 @@ type Props = {
   lang: Lang
   initialLeft: string
   initialRight: string
+  /** Folders of the open tabs, offered as one-click targets on both sides. */
+  openFolders: string[]
   /** Seeds the hidden-items switch; the panel's own switch is what the compare uses. */
   includeHidden: boolean
   fontSize: number
@@ -67,6 +69,7 @@ export function ComparePanel({
   lang,
   initialLeft,
   initialRight,
+  openFolders,
   includeHidden,
   fontSize,
   hashRateBytes,
@@ -470,6 +473,22 @@ export function ComparePanel({
     }
   }
 
+  /** git-diff markers: `+` only on the right, `-` only on the left, `~` modified, `=` same. */
+  const statusMark = (status: CompareStatus) =>
+    status === 'right' ? '+' : status === 'left' ? '-' : status === 'different' ? '~' : '='
+
+  const browse = async (side: 'left' | 'right') => {
+    try {
+      const current = side === 'left' ? leftRoot : rightRoot
+      const dir = await pickFolder(t('compare.browse'), current)
+      if (!dir) return
+      if (side === 'left') setLeftRoot(dir)
+      else setRightRoot(dir)
+    } catch (e: unknown) {
+      onToast(String(e))
+    }
+  }
+
   const fmtTime = (ms: number) =>
     ms ? new Date(ms).toLocaleString(lang === 'zh-CN' ? 'zh-CN' : 'en-US') : '—'
 
@@ -479,19 +498,75 @@ export function ComparePanel({
         <div className="flex items-center gap-2 border-b border-line px-3 py-2">
           <span className="shrink-0 text-[0.8125rem] font-semibold text-fg-strong">{t('compare.title')}</span>
           <div className="flex min-w-0 flex-1 items-center gap-1.5">
-            <input
-              value={leftRoot}
-              onChange={(e) => setLeftRoot(e.target.value)}
-              aria-label={t('compare.left')}
-              className="h-7 min-w-0 flex-1 rounded border border-line bg-surface-2 px-2 text-[0.6875rem] outline-none"
-            />
+            <div className="flex min-w-0 flex-1 items-center gap-1">
+              <select
+                value={openFolders.includes(leftRoot) ? leftRoot : ''}
+                onChange={(e) => setLeftRoot(e.target.value)}
+                aria-label={t('compare.fromTabs')}
+                title={t('compare.fromTabs')}
+                className="h-7 w-[7.5rem] shrink-0 rounded border border-line bg-surface-2 px-1 text-[0.65625rem] text-muted outline-none"
+              >
+                <option value="">{t('compare.fromTabs')}</option>
+                {openFolders.map((path) => (
+                  <option key={path} value={path}>
+                    {path}
+                  </option>
+                ))}
+              </select>
+              <input
+                value={leftRoot}
+                onChange={(e) => setLeftRoot(e.target.value)}
+                aria-label={t('compare.left')}
+                placeholder={t('compare.left')}
+                className="h-7 min-w-0 flex-1 rounded border border-line bg-surface-2 px-2 text-[0.6875rem] outline-none"
+              />
+              <button
+                type="button"
+                onClick={() => void browse('left')}
+                aria-label={t('compare.browse')}
+                title={t('compare.browse')}
+                className="grid h-7 w-7 shrink-0 place-items-center rounded border border-line text-muted hover:bg-surface-3 hover:text-fg"
+              >
+                <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.4">
+                  <path d="M2 4.5h4l1.2 1.5H14v6.5H2z" strokeLinejoin="round" />
+                </svg>
+              </button>
+            </div>
             <span className="shrink-0 text-muted-2">⇄</span>
-            <input
-              value={rightRoot}
-              onChange={(e) => setRightRoot(e.target.value)}
-              aria-label={t('compare.right')}
-              className="h-7 min-w-0 flex-1 rounded border border-line bg-surface-2 px-2 text-[0.6875rem] outline-none"
-            />
+            <div className="flex min-w-0 flex-1 items-center gap-1">
+              <select
+                value={openFolders.includes(rightRoot) ? rightRoot : ''}
+                onChange={(e) => setRightRoot(e.target.value)}
+                aria-label={t('compare.fromTabs')}
+                title={t('compare.fromTabs')}
+                className="h-7 w-[7.5rem] shrink-0 rounded border border-line bg-surface-2 px-1 text-[0.65625rem] text-muted outline-none"
+              >
+                <option value="">{t('compare.fromTabs')}</option>
+                {openFolders.map((path) => (
+                  <option key={path} value={path}>
+                    {path}
+                  </option>
+                ))}
+              </select>
+              <input
+                value={rightRoot}
+                onChange={(e) => setRightRoot(e.target.value)}
+                aria-label={t('compare.right')}
+                placeholder={t('compare.right')}
+                className="h-7 min-w-0 flex-1 rounded border border-line bg-surface-2 px-2 text-[0.6875rem] outline-none"
+              />
+              <button
+                type="button"
+                onClick={() => void browse('right')}
+                aria-label={t('compare.browse')}
+                title={t('compare.browse')}
+                className="grid h-7 w-7 shrink-0 place-items-center rounded border border-line text-muted hover:bg-surface-3 hover:text-fg"
+              >
+                <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.4">
+                  <path d="M2 4.5h4l1.2 1.5H14v6.5H2z" strokeLinejoin="round" />
+                </svg>
+              </button>
+            </div>
           </div>
           <button
             type="button"
@@ -675,10 +750,10 @@ export function ComparePanel({
             <table className="w-full table-fixed border-collapse text-left text-[0.6875rem]">
               <thead className="sticky top-0 z-10 bg-surface-2 text-[0.625rem] text-muted-2">
                 <tr>
-                  <th className="w-[40%] px-2 py-1 font-normal">{t('compare.name')}</th>
-                  <th className="w-[15%] px-2 py-1 text-right font-normal">{t('compare.leftSize')}</th>
-                  <th className="w-[15%] px-2 py-1 text-right font-normal">{t('compare.rightSize')}</th>
-                  <th className="w-[18%] px-2 py-1 font-normal">{t('compare.status')}</th>
+                  <th className="w-7 px-1 py-1 font-normal" aria-label={t('compare.status')} />
+                  <th className="w-[36%] px-2 py-1 font-normal">{t('compare.name')}</th>
+                  <th className="w-[25%] px-2 py-1 text-right font-normal">{t('compare.leftSize')}</th>
+                  <th className="w-[25%] px-2 py-1 text-right font-normal">{t('compare.rightSize')}</th>
                   <th className="w-[12%] px-2 py-1 text-right font-normal">{t('compare.counts')}</th>
                 </tr>
               </thead>
@@ -701,6 +776,12 @@ export function ComparePanel({
                       className={`border-b border-row-line ${rowClass} hover:bg-surface-3`}
                       onDoubleClick={() => canEnter && session && void loadLevel(entry.rel, session, false)}
                     >
+                      <td
+                        className={`px-1 py-1 text-center font-mono text-[0.8125rem] font-semibold ${statusClass(entry.status)}`}
+                        title={statusLabel(entry.status)}
+                      >
+                        {statusMark(entry.status)}
+                      </td>
                       <td className="px-2 py-1">
                         <div className="flex min-w-0 items-center gap-1.5">
                           <FileIcon
@@ -709,9 +790,20 @@ export function ComparePanel({
                             path={joinPath(session?.left ?? '', entry.rel)}
                             scale={iconScale}
                           />
-                          <span className="truncate text-fg-strong" title={entry.rel}>
+                          <span
+                            className={`truncate ${entry.status === 'same' ? 'text-muted' : 'text-fg-strong'}`}
+                            title={entry.rel}
+                          >
                             {entry.name}
                           </span>
+                          {hash && (
+                            <span
+                              title={`${hash.leftHash ?? ''} / ${hash.rightHash ?? ''}${hash.error ? ` — ${hash.error}` : ''}`}
+                              className={`shrink-0 font-mono ${hash.equal ? 'text-emerald-500' : 'text-rose-500'}`}
+                            >
+                              {hash.equal ? '=' : '≠'}
+                            </span>
+                          )}
                           {canEnter && (
                             <button
                               type="button"
@@ -723,22 +815,23 @@ export function ComparePanel({
                           )}
                         </div>
                       </td>
-                      <td className="truncate px-2 py-1 text-right text-muted-2">
-                        {entry.left ? `${formatSize(entry.left.size, entry.left.isDir) || '—'} · ${fmtTime(entry.left.mtime)}` : '—'}
+                      <td
+                        className={`truncate px-2 py-1 text-right font-mono text-[0.625rem] ${
+                          entry.left ? 'text-muted-2' : 'text-muted-2/50'
+                        }`}
+                      >
+                        {entry.left
+                          ? `${formatSize(entry.left.size, entry.left.isDir) || '—'} · ${fmtTime(entry.left.mtime)}`
+                          : '—'}
                       </td>
-                      <td className="truncate px-2 py-1 text-right text-muted-2">
-                        {entry.right ? `${formatSize(entry.right.size, entry.right.isDir) || '—'} · ${fmtTime(entry.right.mtime)}` : '—'}
-                      </td>
-                      <td className={`px-2 py-1 ${statusClass(entry.status)}`}>
-                        {statusLabel(entry.status)}
-                        {hash && (
-                          <span
-                            title={`${hash.leftHash ?? ''} / ${hash.rightHash ?? ''}${hash.error ? ` — ${hash.error}` : ''}`}
-                            className={hash.equal ? 'ml-1 text-emerald-500' : 'ml-1 text-rose-500'}
-                          >
-                            {hash.equal ? '=' : '≠'}
-                          </span>
-                        )}
+                      <td
+                        className={`truncate px-2 py-1 text-right font-mono text-[0.625rem] ${
+                          entry.right ? 'text-muted-2' : 'text-muted-2/50'
+                        }`}
+                      >
+                        {entry.right
+                          ? `${formatSize(entry.right.size, entry.right.isDir) || '—'} · ${fmtTime(entry.right.mtime)}`
+                          : '—'}
                       </td>
                       <td className="truncate px-2 py-1 text-right text-muted-2">
                         {count ? (
