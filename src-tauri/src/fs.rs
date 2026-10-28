@@ -17,7 +17,7 @@ use windows::Win32::System::Com::{
     COINIT_MULTITHREADED, STGM_READ,
 };
 use windows::Win32::UI::Shell::{
-    IShellLinkW, SLGP_RAWPATH, ShellLink, FOLDERID_Desktop, FOLDERID_Documents,
+    IShellLinkW, SLGP_RAWPATH, ShellLink, StrCmpLogicalW, FOLDERID_Desktop, FOLDERID_Documents,
     FOLDERID_Downloads, FOLDERID_Profile,
 };
 
@@ -42,27 +42,29 @@ pub struct Entry {
     pub mtime: u64,
     pub attrs: u32,
     pub id: u64,
-    key: Vec<u8>,
     ext_key: Vec<u8>,
+    /// NUL-terminated UTF-16 of `name`, kept so the Explorer collation can compare
+    /// without allocating once per comparison.
+    wide: Vec<u16>,
 }
 
 impl Entry {
     fn new(name: String, size: u64, mtime: u64, attrs: u32, id: u64) -> Self {
-        let key = natural_key(&name);
         let ext_key = natural_key(
             name.rsplit_once('.')
                 .map(|(_, ext)| ext)
                 .unwrap_or("")
                 .trim_end(),
         );
+        let wide = name.encode_utf16().chain(std::iter::once(0)).collect();
         Self {
             name,
             size,
             mtime,
             attrs,
             id,
-            key,
             ext_key,
+            wide,
         }
     }
 
@@ -72,8 +74,8 @@ impl Entry {
 }
 
 /// Locale-agnostic sort key: lowercase, with digit runs zero-padded so that
-/// "file2" sorts before "file10". CJK sorts by code point (locale collation
-/// via LCMapStringEx is a later refinement).
+/// "file2" sorts before "file10". Used for extension/type ordering, where Explorer has
+/// no linguistic rules; file names themselves go through {@link logical_cmp}.
 fn natural_key(name: &str) -> Vec<u8> {
     let lower = name.to_lowercase();
     let bytes = lower.as_bytes();
@@ -305,13 +307,74 @@ pub fn sort_entries(entries: &mut [Entry], key: &str, dir: &str) {
             "size" => a.size.cmp(&b.size),
             "mtime" => a.mtime.cmp(&b.mtime),
             "type" => a.ext_key.cmp(&b.ext_key),
-            _ => a.key.cmp(&b.key),
+            _ => logical_wide(&a.wide, &b.wide),
         };
         let primary = if desc { primary.reverse() } else { primary };
         primary
-            .then_with(|| a.key.cmp(&b.key))
+            .then_with(|| logical_wide(&a.wide, &b.wide))
             .then_with(|| a.id.cmp(&b.id))
     });
+}
+
+/// Explorer's own natural-order comparison (`StrCmpLogicalW`): case-insensitive,
+/// digit runs compare numerically, and non-ASCII follows the user's locale, which is
+/// what makes a Chinese file list match the one File Explorer shows.
+fn logical_wide(a: &[u16], b: &[u16]) -> std::cmp::Ordering {
+    let result = unsafe {
+        StrCmpLogicalW(
+            PCWSTR(a.as_ptr()),
+            PCWSTR(b.as_ptr()),
+        )
+    };
+    result.cmp(&0)
+}
+
+/// One row handed back for a client-side re-sort, so changing the sort column does not
+/// re-enumerate the folder.
+pub struct SortItem {
+    pub name: String,
+    pub size: u64,
+    pub mtime: u64,
+    pub is_dir: bool,
+}
+
+/// Indices of `items` in display order. Mirrors [`sort_entries`] so a re-sort in the
+/// frontend produces exactly the order a fresh scan would.
+pub fn sort_order(items: &[SortItem], key: &str, dir: &str) -> Vec<u32> {
+    let desc = dir == "desc";
+    let wide: Vec<Vec<u16>> = items
+        .iter()
+        .map(|item| item.name.encode_utf16().chain(std::iter::once(0)).collect())
+        .collect();
+    let ext: Vec<Vec<u8>> = items
+        .iter()
+        .map(|item| {
+            natural_key(
+                item.name
+                    .rsplit_once('.')
+                    .map(|(_, ext)| ext)
+                    .unwrap_or("")
+                    .trim_end(),
+            )
+        })
+        .collect();
+    let mut order: Vec<u32> = (0..items.len() as u32).collect();
+    order.sort_by(|&a, &b| {
+        let (x, y) = (&items[a as usize], &items[b as usize]);
+        let folder_order = y.is_dir.cmp(&x.is_dir);
+        if folder_order != std::cmp::Ordering::Equal {
+            return folder_order;
+        }
+        let primary = match key {
+            "size" => x.size.cmp(&y.size),
+            "mtime" => x.mtime.cmp(&y.mtime),
+            "type" => ext[a as usize].cmp(&ext[b as usize]),
+            _ => logical_wide(&wide[a as usize], &wide[b as usize]),
+        };
+        let primary = if desc { primary.reverse() } else { primary };
+        primary.then_with(|| logical_wide(&wide[a as usize], &wide[b as usize]))
+    });
+    order
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -722,6 +785,35 @@ mod tests {
         assert!(capped.truncated);
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Folders first, digit runs numerically, and the same order a fresh scan would give.
+    #[test]
+    fn sort_order_matches_the_scanner() {
+        let items = vec![
+            SortItem { name: "file10.txt".into(), size: 10, mtime: 3, is_dir: false },
+            SortItem { name: "file2.txt".into(), size: 20, mtime: 2, is_dir: false },
+            SortItem { name: "Docs".into(), size: 0, mtime: 1, is_dir: true },
+            SortItem { name: "中文.txt".into(), size: 30, mtime: 4, is_dir: false },
+        ];
+        let names = |order: Vec<u32>| {
+            order
+                .into_iter()
+                .map(|i| items[i as usize].name.clone())
+                .collect::<Vec<_>>()
+        };
+        let by_name = names(sort_order(&items, "name", "asc"));
+        assert_eq!(by_name[0], "Docs");
+        assert_eq!(&by_name[1..3], ["file2.txt", "file10.txt"]);
+        assert_eq!(by_name.len(), 4);
+
+        let by_size = names(sort_order(&items, "size", "asc"));
+        assert_eq!(by_size[0], "Docs");
+        assert_eq!(&by_size[1..], ["file10.txt", "file2.txt", "中文.txt"]);
+
+        // A descending sort flips the key but keeps folders on top, like Explorer.
+        let desc = names(sort_order(&items, "name", "desc"));
+        assert_eq!(desc[0], "Docs");
     }
 
     /// The overview must show real capacity for a system drive and mark dead devices as

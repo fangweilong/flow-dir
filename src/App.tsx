@@ -49,6 +49,7 @@ import {
   shellMenuBackgroundShow,
   shellMenuShow,
   shellProperties,
+  sortOrder,
   taskbarProgress,
   titlebarMenu,
   treeDirs,
@@ -57,7 +58,7 @@ import {
   watchClear,
   watchSet,
 } from './api'
-import type { OpRequest } from './api'
+import type { OpRequest, SortItem } from './api'
 import { EMPTY_GIT, EMPTY_LIST, emptyList, filterMatches } from './types'
 import type {
   Drive,
@@ -1186,16 +1187,52 @@ export default function App() {
     [navigate, openTarget],
   )
 
+  /**
+   * Changing the sort column reorders the rows already in memory. Re-enumerating the
+   * folder would clear the selection, lose the scroll position and cost a full scan; only
+   * a tab with no cached rows falls back to a scan.
+   */
+  const sortGens = useRef<Record<string, number>>({})
   const setPaneSort = useCallback(
     (paneId: string, sort: SortState) => {
       const current = wsRef.current
       if (!current) return
       const pane = current.panes[paneId]
       const tab = current.tabs[pane.activeTabId]
-      setWs((prev) => (prev ? { ...prev, panes: { ...prev.panes, [paneId]: { ...prev.panes[paneId], sort } } } : prev))
-      if (tab) startScan(tab.id, tab.path, sort, pane.hidden)
+      setWs((prev) =>
+        prev ? { ...prev, panes: { ...prev.panes, [paneId]: { ...prev.panes[paneId], sort } } } : prev,
+      )
+      if (!tab) return
+      const source = listData[tab.id]?.entries ?? []
+      if (!source.length) {
+        startScan(tab.id, tab.path, sort, pane.hidden, true)
+        return
+      }
+      const gen = (sortGens.current[tab.id] ?? 0) + 1
+      sortGens.current[tab.id] = gen
+      const items: SortItem[] = source.map((entry) => ({
+        name: entry.name,
+        size: entry.size,
+        mtime: entry.mtime,
+        isDir: isDir(entry.attrs),
+      }))
+      void sortOrder(items, sort.key, sort.dir)
+        .then((order) => {
+          if (sortGens.current[tab.id] !== gen) return
+          setListData((prev) => {
+            const live = prev[tab.id]
+            // A scan landed while the sort was in flight; its rows are already ordered
+            // by the new key, so this stale permutation must not be applied.
+            if (!live || live.entries !== source || order.length !== source.length) return prev
+            return { ...prev, [tab.id]: { ...live, entries: order.map((i) => source[i]) } }
+          })
+        })
+        .catch(() => {
+          if (sortGens.current[tab.id] !== gen) return
+          startScan(tab.id, tab.path, sort, pane.hidden, true)
+        })
     },
-    [startScan],
+    [listData, startScan],
   )
 
   const toggleHidden = useCallback(

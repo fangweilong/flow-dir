@@ -362,6 +362,37 @@ async fn unique_paths(paths: Vec<String>) -> Vec<String> {
         .unwrap_or(fallback)
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SortItemIn {
+    name: String,
+    size: u64,
+    mtime: u64,
+    is_dir: bool,
+}
+
+/// Display order for rows already in the frontend: changing the sort column must not
+/// re-enumerate the folder. Uses the same comparator as a fresh scan, so the result is
+/// identical to what `list_dir` would return.
+#[tauri::command]
+async fn sort_order(items: Vec<SortItemIn>, key: String, dir: String) -> Vec<u32> {
+    let fallback: Vec<u32> = (0..items.len() as u32).collect();
+    tauri::async_runtime::spawn_blocking(move || {
+        let rows: Vec<fs::SortItem> = items
+            .into_iter()
+            .map(|item| fs::SortItem {
+                name: item.name,
+                size: item.size,
+                mtime: item.mtime,
+                is_dir: item.is_dir,
+            })
+            .collect();
+        fs::sort_order(&rows, &key, &dir)
+    })
+    .await
+    .unwrap_or(fallback)
+}
+
 #[tauri::command]
 fn layout_save(app: tauri::AppHandle, workspace: serde_json::Value) -> Result<(), ApiError> {
     layout::save(&app, workspace)
@@ -1100,6 +1131,7 @@ fn main() {
             path_is_dir,
             paths_exist,
             unique_paths,
+            sort_order,
             git_status,
             quick_access,
             open_path,

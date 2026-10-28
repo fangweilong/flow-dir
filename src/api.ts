@@ -34,6 +34,15 @@ export const openWith = (path: string) => invoke<void>('open_with', { path })
 export const pathsExist = (paths: string[]) => invoke<boolean[]>('paths_exist', { paths })
 /** Free `name (n)` variants, in the same order, for conflict-free batch renames. */
 export const uniquePaths = (paths: string[]) => invoke<string[]>('unique_paths', { paths })
+
+/** Row shape for {@link sortOrder}; mirrors the fields a listing already carries. */
+export type SortItem = { name: string; size: number; mtime: number; isDir: boolean }
+/**
+ * Display order for rows already on screen. Uses the backend's Explorer-compatible
+ * comparator, so changing the sort column never re-enumerates the folder.
+ */
+export const sortOrder = (items: SortItem[], key: string, dir: string) =>
+  invoke<number[]>('sort_order', { items, key, dir })
 export const revealPath = (path: string) => invoke<void>('reveal_path', { path })
 export const explorerOpen = (path: string) => invoke<void>('explorer_open', { path })
 

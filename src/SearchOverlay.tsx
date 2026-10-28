@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { searchCancel, searchStart } from './api'
+import { searchCancel, searchStart, sortOrder } from './api'
 import { makeT } from './i18n'
 import { formatSize, parentPath, volumeRoot } from './paths'
 import { FileIcon } from './icons'
@@ -10,7 +10,7 @@ import type { SearchItem } from './types'
 type SearchScope = 'folder' | 'drive'
 type SearchSort = { key: 'name' | 'size' | 'mtime'; dir: 'asc' | 'desc' }
 
-/** Result ordering is client-side: both providers stream and stop at the same cap. */
+/** Fallback order while the backend answers, and if the call fails. */
 function sortResults(items: SearchItem[], sort: SearchSort, collator: Intl.Collator): SearchItem[] {
   const factor = sort.dir === 'desc' ? -1 : 1
   return [...items].sort((a, b) => {
@@ -70,7 +70,42 @@ export function SearchOverlay({
     () => new Intl.Collator(lang === 'zh-CN' ? 'zh-CN' : 'en', { numeric: true, sensitivity: 'base' }),
     [lang],
   )
-  const ordered = useMemo(() => sortResults(items, sort, collator), [items, sort, collator])
+  /**
+   * Rows the backend ordered with Explorer's comparator, so a hit list and a file list
+   * show the same names in the same order. While the call is in flight (and if it fails)
+   * the local collator keeps the list usable.
+   */
+  const [permutation, setPermutation] = useState<number[] | null>(null)
+  useEffect(() => {
+    if (!items.length) {
+      setPermutation(null)
+      return
+    }
+    let stale = false
+    const timer = window.setTimeout(() => {
+      void sortOrder(
+        items.map((item) => ({ name: item.name, size: item.size, mtime: item.mtime, isDir: item.isDir })),
+        sort.key,
+        sort.dir,
+      )
+        .then((order) => {
+          if (!stale) setPermutation(order)
+        })
+        .catch(() => {
+          if (!stale) setPermutation(null)
+        })
+    }, 120)
+    return () => {
+      stale = true
+      window.clearTimeout(timer)
+    }
+  }, [items, sort])
+  const ordered = useMemo(() => {
+    if (permutation && permutation.length === items.length) {
+      return permutation.map((index) => items[index]).filter(Boolean)
+    }
+    return sortResults(items, sort, collator)
+  }, [items, sort, collator, permutation])
   const activeIndex = Math.max(0, ordered.findIndex((item) => item.path === activePath))
   const current = ordered[activeIndex]
 
