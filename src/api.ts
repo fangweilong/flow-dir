@@ -200,6 +200,7 @@ export const shellMenuBackgroundShow = (
   extended: boolean,
   toggleLabel: string,
   dupLabel: string,
+  compareLabel: string,
 ) =>
   invoke<MenuOutcome>('shell_menu_background_show', {
     path,
@@ -208,6 +209,7 @@ export const shellMenuBackgroundShow = (
     extended,
     toggleLabel,
     dupLabel,
+    compareLabel,
   })
 export const appInfo = () => invoke<AppInfo>('app_info')
 export const updateCheck = (force: boolean) => invoke<UpdateStatus>('update_check', { force })

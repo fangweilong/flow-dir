@@ -2876,6 +2876,7 @@ export default function App() {
               label: t('menu.findDuplicates'),
               onSelect: () => setFileTools({ mode: 'dup', root: tab.path }),
             },
+            { kind: 'item', label: t('compare.entry'), onSelect: () => setCompareOpen(true) },
           ]
         : [{ kind: 'item', label: t('menu.refresh'), hint: menuHint(keys.refresh), onSelect: () => manualRefresh() }]
       setMenu({ x: point.clientX, y: point.clientY, items })
@@ -2904,10 +2905,12 @@ export default function App() {
         point.shiftKey,
         pane.hidden ? t('list.hideHidden') : t('list.showHidden'),
         t('menu.findDuplicates'),
+        t('compare.entry'),
       )
         .then((outcome) => {
           if (outcome.action === 'toggleHidden') toggleHidden(paneId)
           else if (outcome.action === 'findDuplicates') setFileTools({ mode: 'dup', root: tab.path })
+          else if (outcome.action === 'compare') setCompareOpen(true)
           else if (outcome.invoked) refreshPanes()
         })
         .catch(() => blankFallbackMenu(paneId, point))
@@ -2957,9 +2960,10 @@ export default function App() {
 
   const activePane = ws?.panes[ws.activePaneId]
   const activeTab = activePane ? ws?.tabs[activePane.activeTabId] : undefined
-  // The compare view uses the first two panes in layout order; a pane showing a virtual
-  // root (drives overview, search result) has no folder to compare.
-  const comparePanes = useMemo(() => {
+  // Seeds for the compare view: the first two panes in layout order that show a real folder.
+  // The panel can also take a typed or picked folder, so one pane is enough and the second
+  // seed may stay empty. A virtual root (drives overview, search result) has nothing to compare.
+  const comparePaths = useMemo(() => {
     if (!ws) return []
     const paths: string[] = []
     for (const id of paneIds(ws.root)) {
@@ -3549,8 +3553,8 @@ export default function App() {
         <button
           type="button"
           onClick={() => setCompareOpen(true)}
-          disabled={comparePanes.length < 2}
-          title={comparePanes.length < 2 ? t('compare.needPanes') : t('compare.open')}
+          disabled={comparePaths.length < 1}
+          title={comparePaths.length < 2 ? t('compare.needPane') : t('compare.open')}
           aria-label={t('compare.open')}
           className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-muted hover:bg-surface-3 hover:text-fg disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted"
         >
@@ -3867,11 +3871,11 @@ export default function App() {
         />
       )}
 
-      {compareOpen && comparePanes.length >= 2 && (
+      {compareOpen && (
         <ComparePanel
           lang={lang}
-          initialLeft={comparePanes[0]}
-          initialRight={comparePanes[1]}
+          initialLeft={comparePaths[0] ?? ''}
+          initialRight={comparePaths[1] ?? ''}
           includeHidden={activePane?.hidden ?? settings.showHidden}
           fontSize={settings.fontSize}
           hashRateBytes={settings.dupMaxMbPerSec * 1024 * 1024}

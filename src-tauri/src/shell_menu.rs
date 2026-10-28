@@ -43,6 +43,7 @@ const ID_CMD_LAST: u32 = 0x7FFF;
 const ID_CUSTOM_TOGGLE_HIDDEN: u32 = 0xC000;
 const ID_CUSTOM_FIND_DUPLICATES: u32 = 0xC001;
 const ID_CUSTOM_HASH: u32 = 0xC002;
+const ID_CUSTOM_COMPARE: u32 = 0xC003;
 
 /// A FlowDir entry appended after the shell's own items. `action` is echoed to the
 /// frontend, which owns the actual command.
@@ -118,8 +119,9 @@ pub fn show(
     run_on_menu_thread(move || unsafe { run_items(&paths, x, y, extended, hash_label.as_deref()) })
 }
 
-/// Shows Explorer's folder-background menu for `path`. `toggle_label` and `dup_label` are
-/// appended after the shell's entries because Explorer's own background menu has neither.
+/// Shows Explorer's folder-background menu for `path`. `toggle_label`, `dup_label` and
+/// `compare_label` are appended after the shell's entries because Explorer's own background
+/// menu has none of them.
 pub fn show_background(
     path: String,
     x: i32,
@@ -127,12 +129,13 @@ pub fn show_background(
     extended: bool,
     toggle_label: String,
     dup_label: String,
+    compare_label: String,
 ) -> Result<Outcome, ApiError> {
     if path.is_empty() {
         return Err(ApiError::new("EMPTY", "no path"));
     }
     run_on_menu_thread(move || unsafe {
-        run_background(&path, x, y, extended, &toggle_label, &dup_label)
+        run_background(&path, x, y, extended, &toggle_label, &dup_label, &compare_label)
     })
 }
 
@@ -186,13 +189,14 @@ unsafe fn run_background(
     extended: bool,
     toggle_label: &str,
     dup_label: &str,
+    compare_label: &str,
 ) -> Result<Outcome, ApiError> {
     unsafe {
         let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         CoInitializeEx(None, COINIT_APARTMENTTHREADED)
             .ok()
             .map_err(|e| ApiError::new("COM", e.to_string()))?;
-        let result = build_background(path, x, y, extended, toggle_label, dup_label);
+        let result = build_background(path, x, y, extended, toggle_label, dup_label, compare_label);
         CoUninitialize();
         result
     }
@@ -283,6 +287,7 @@ unsafe fn build_background(
     extended: bool,
     toggle_label: &str,
     dup_label: &str,
+    compare_label: &str,
 ) -> Result<Outcome, ApiError> {
     unsafe {
         let hwnd = create_owner().map_err(|e| ApiError::new("SHELL_MENU", e.to_string()))?;
@@ -305,6 +310,11 @@ unsafe fn build_background(
                 id: ID_CUSTOM_TOGGLE_HIDDEN,
                 label: toggle_label,
                 action: "toggleHidden",
+            },
+            Extra {
+                id: ID_CUSTOM_COMPARE,
+                label: compare_label,
+                action: "compare",
             },
         ];
         let outcome = track(hwnd, &context, x, y, flags, &extras);

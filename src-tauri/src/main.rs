@@ -699,9 +699,10 @@ async fn shell_menu_background_show(
     extended: bool,
     toggle_label: String,
     dup_label: String,
+    compare_label: String,
 ) -> Result<shell_menu::Outcome, ApiError> {
     tauri::async_runtime::spawn_blocking(move || {
-        shell_menu::show_background(path, x, y, extended, toggle_label, dup_label)
+        shell_menu::show_background(path, x, y, extended, toggle_label, dup_label, compare_label)
     })
     .await
     .map_err(|e| ApiError::new("THREAD", e.to_string()))?
