@@ -331,16 +331,25 @@ export function PaneView({
     [view, list.anchor],
   )
 
+  /** Names the filter currently shows; rebuilt only when the visible view changes. */
+  const viewNameSet = useMemo(() => new Set(view.map((entry) => entry.name)), [view])
+
   /**
    * Operations only ever touch rows the user can see. The filter input prunes the state, so
    * this intersection is the second line of defence for a selection that outlived its view.
    */
   const visibleSelected = useMemo(() => {
-    const names = new Set(view.map((e) => e.name))
-    const picked = new Set<string>()
-    for (const name of list.selected) if (names.has(name)) picked.add(name)
-    return picked
-  }, [view, list.selected])
+    const picked = list.selected
+    if (!picked.size) return picked
+    // Common case: nothing is hidden, so the selection set itself is already the answer and
+    // a 10k-item selection costs no allocation at all.
+    let hidden = 0
+    for (const name of picked) if (!viewNameSet.has(name)) hidden += 1
+    if (!hidden) return picked
+    const next = new Set<string>()
+    for (const name of picked) if (viewNameSet.has(name)) next.add(name)
+    return next
+  }, [viewNameSet, list.selected])
 
   const virtualizer = useVirtualizer({
     count: view.length,
@@ -565,6 +574,33 @@ export function PaneView({
 
   const onKeyDown = (ev: React.KeyboardEvent) => {
     if (!tab) return
+    // An IME owns the keystrokes until it commits: Enter picks a candidate, Backspace
+    // edits pinyin. Nothing below may fire mid-composition, or typing a name would
+    // jump folders.
+    if (ev.nativeEvent.isComposing) return
+    // A type-ahead run owns the keys it consumes, Backspace included, so deleting a
+    // mistyped character never navigates to the parent folder.
+    if (typed) {
+      if (ev.key === 'Backspace') {
+        ev.preventDefault()
+        setTyped(typed.slice(0, -1))
+        return
+      }
+      if (ev.key === 'Escape') {
+        ev.preventDefault()
+        clearTypeAhead()
+        return
+      }
+      if (ev.key === 'Enter') {
+        ev.preventDefault()
+        const entry = view[anchorIdx]
+        clearTypeAhead()
+        if (entry) activate(entry)
+        return
+      }
+      // Any other navigation ends the run, so the buffer cannot leak into the next action.
+      clearTypeAhead()
+    }
     if (matchBinding(ev, keys.properties)) {
       ev.preventDefault()
       const names = visibleSelected.size
