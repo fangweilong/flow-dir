@@ -113,6 +113,12 @@ const errorCode = (err: unknown): string =>
 /** Folders whose full change list stays cached; older ones refetch on demand. */
 const GIT_CACHE_LIMIT = 64
 
+/**
+ * Inactive tabs whose rows stay in memory, so returning to one shows its filter,
+ * selection and scroll position immediately instead of a fresh full-screen scan.
+ */
+const KEEP_TABS = 8
+
 /** Same rows in the same order; a quiet rescan must not replace the state object. */
 const sameEntries = (a: Entry[], b: Entry[]): boolean => {
   if (a.length !== b.length) return false
@@ -244,6 +250,8 @@ export default function App() {
   const watched = useRef(new Map<string, string>())
   /** Wall-clock of the last scan per tab; a stale tab is refreshed when it becomes active. */
   const lastScan = useRef(new Map<string, number>())
+  /** Last time each tab was on screen; drives eviction of the cached rows. */
+  const tabUsed = useRef(new Map<string, number>())
   /** Active tab per pane, to detect a switch that left the tab unwatched while inactive. */
   const lastActiveTab = useRef(new Map<string, string>())
   const rescanTimers = useRef(new Map<string, number>())
@@ -708,17 +716,36 @@ export default function App() {
   useEffect(() => {
     if (!ws) return
     const visible = new Set<string>()
+    const now = Date.now()
     for (const pane of Object.values(ws.panes)) {
       const tab = ws.tabs[pane.activeTabId]
       if (!tab) continue
       visible.add(tab.id)
-      if (!listData[tab.id]) startScan(tab.id, tab.path, pane.sort, pane.hidden)
+      tabUsed.current.set(tab.id, now)
+      const cached = listData[tab.id]
+      if (!cached) {
+        startScan(tab.id, tab.path, pane.sort, pane.hidden)
+        continue
+      }
+      // A tab restored from cache paints immediately; refresh it behind the rows only
+      // when the snapshot is a few seconds old, so switching tabs stays instant.
+      const scannedAt = lastScan.current.get(tab.id) ?? 0
+      if (!cached.loading && !cached.error && now - scannedAt > 1_500) {
+        startScan(tab.id, tab.path, pane.sort, pane.hidden, true)
+      }
     }
     setListData((prev) => {
       const keys = Object.keys(prev)
-      if (!keys.some((k) => !visible.has(k))) return prev
+      const hidden = keys.filter((k) => !visible.has(k))
+      if (!hidden.length) return prev
+      // Recently visited tabs keep their rows (filter, selection, scroll) up to a small
+      // budget, which is what makes switching back feel like a tab instead of a link.
+      const budget = Math.max(0, KEEP_TABS - visible.size)
+      hidden.sort((a, b) => (tabUsed.current.get(b) ?? 0) - (tabUsed.current.get(a) ?? 0))
+      const keep = new Set([...visible, ...hidden.slice(0, budget)])
+      if (keys.every((k) => keep.has(k))) return prev
       const next: Record<string, ListData> = {}
-      for (const k of keys) if (visible.has(k)) next[k] = prev[k]
+      for (const k of keys) if (keep.has(k)) next[k] = prev[k]
       return next
     })
   }, [ws, listData, startScan])
@@ -1423,12 +1450,26 @@ export default function App() {
 
   const dropTab = useCallback(
     (tabId: string, fromPaneId: string, target: { paneId: string; mode: DropMode }) => {
-      setListData((prev) => {
-        if (!(tabId in prev)) return prev
-        const next = { ...prev }
-        delete next[tabId]
-        return next
-      })
+      const current = wsRef.current
+      const fromPane = current?.panes[fromPaneId]
+      // Dropping a tab back onto its own pane is a no-op; dropping it elsewhere keeps the
+      // cached rows unless the destination sorts or hides differently.
+      if (target.mode === 'center' && target.paneId === fromPaneId) return
+      const dest = current?.panes[target.paneId]
+      const keepsRows =
+        !!fromPane &&
+        !!dest &&
+        fromPane.sort.key === dest.sort.key &&
+        fromPane.sort.dir === dest.sort.dir &&
+        fromPane.hidden === dest.hidden
+      if (!keepsRows) {
+        setListData((prev) => {
+          if (!(tabId in prev)) return prev
+          const next = { ...prev }
+          delete next[tabId]
+          return next
+        })
+      }
       setWs((prev) => {
         if (!prev) return prev
         const from = prev.panes[fromPaneId]
@@ -1507,7 +1548,8 @@ export default function App() {
       let started = false
 
       const move = (e: PointerEvent) => {
-        if (!started && Math.hypot(e.clientX - startX, e.clientY - startY) < 4) return
+        // A few pixels of jitter while clicking a tab must not turn into a drag.
+        if (!started && Math.hypot(e.clientX - startX, e.clientY - startY) < 6) return
         started = true
         setDrag({ tabId, fromPane, x: e.clientX, y: e.clientY, started: true, target: hitTest(e.clientX, e.clientY) })
       }
