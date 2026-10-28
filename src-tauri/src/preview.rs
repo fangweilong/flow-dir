@@ -194,10 +194,16 @@ const RESERVED_NAMES: [&str; 22] = [
 ];
 
 /// Rejects NTFS alternate data streams (`file.txt:stream`, `::$DATA`) and device names.
-/// The drive-letter colon at index 1 is the only one a normal path may contain.
+/// Only the drive-letter colon of an absolute path may appear, at index 1 — after the
+/// `\\?\`/`\\?\UNC\` prefix `canonicalize` adds, that is index 1 of the stripped path.
 fn has_ads_or_device(path: &str) -> bool {
+    let path = path
+        .strip_prefix(r"\\?\UNC\")
+        .or_else(|| path.strip_prefix(r"\\?\"))
+        .unwrap_or(path);
+    let starts_with_drive = path.as_bytes().first().is_some_and(u8::is_ascii_alphabetic);
     for (index, ch) in path.char_indices() {
-        if ch == ':' && index != 1 {
+        if ch == ':' && !(index == 1 && starts_with_drive) {
             return true;
         }
     }
@@ -1115,6 +1121,20 @@ mod tests {
         assert!(has_ads_or_device("C:\\data\\trailing."));
         assert!(has_ads_or_device("C:\\data\\trailing "));
         assert!(!has_ads_or_device(r"C:\data\console.txt"));
+        // `validate` re-checks the canonicalized path, which carries a `\\?\` verbatim
+        // prefix; the drive-letter colon is no longer at index 1.
+        assert!(!has_ads_or_device(r"\\?\C:\data\file.txt"));
+        assert!(!has_ads_or_device(r"\\?\UNC\server\share\file.txt"));
+        assert!(has_ads_or_device(r"\\?\C:\data\file.txt:stream"));
+    }
+
+    #[test]
+    fn canonical_path_of_a_real_file_validates() {
+        let path = std::env::temp_dir().join("flowdir_preview_validate.png");
+        std::fs::write(&path, b"\x89PNG").unwrap();
+        let result = validate(path.to_str().unwrap(), Limits::default());
+        let _ = std::fs::remove_file(&path);
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[test]
