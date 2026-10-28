@@ -47,8 +47,16 @@ export type Settings = {
   navFontFamily: string
   /** Navigation-bar text size in px (10–20); drives its controls. */
   navFontSize: number
+  /** File-list "size" column visibility. */
+  listColSize: boolean
+  /** File-list "type" column visibility. */
+  listColType: boolean
+  /** File-list "modified" column visibility. */
+  listColTime: boolean
   /** File-list "size" column width in px at the default font size; drag-resizable. */
   listSizeWidth: number
+  /** File-list "type" column width in px at the default font size; drag-resizable. */
+  listTypeWidth: number
   /** File-list "modified" column width in px at the default font size; drag-resizable. */
   listTimeWidth: number
   /** Drive overview "capacity" column width in px at the default font size; drag-resizable. */
@@ -114,7 +122,11 @@ export const DEFAULT_SETTINGS: Settings = {
   listFontSize: 13,
   navFontFamily: '',
   navFontSize: 12,
+  listColSize: true,
+  listColType: true,
+  listColTime: true,
   listSizeWidth: 96,
+  listTypeWidth: 88,
   listTimeWidth: 142,
   driveCapacityWidth: 150,
   driveFreeWidth: 84,

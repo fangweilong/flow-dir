@@ -113,6 +113,14 @@ pub struct Settings {
     pub drive_capacity_width: u32,
     /// Drive overview free-space column width in px at the default font size; drag-resizable.
     pub drive_free_width: u32,
+    /// File-list "size" column visibility.
+    pub list_col_size: bool,
+    /// File-list "type" column visibility.
+    pub list_col_type: bool,
+    /// File-list "modified" column visibility.
+    pub list_col_time: bool,
+    /// File-list "type" column width in px at the default font size; drag-resizable.
+    pub list_type_width: u32,
     /// Undo/redo history depth, 1–100.
     pub undo_limit: u32,
     /// Largest file the preview will read, in MB (1–4096).
@@ -189,6 +197,10 @@ fn default_drive_capacity_width() -> u32 {
 
 fn default_drive_free_width() -> u32 {
     84
+}
+
+fn default_list_type_width() -> u32 {
+    88
 }
 
 const FONT_SIZE_MIN: u32 = 12;
@@ -309,6 +321,10 @@ impl Default for Settings {
             list_time_width: default_list_time_width(),
             drive_capacity_width: default_drive_capacity_width(),
             drive_free_width: default_drive_free_width(),
+            list_col_size: true,
+            list_col_type: true,
+            list_col_time: true,
+            list_type_width: default_list_type_width(),
             undo_limit: 10,
             preview_max_file_mb: 64,
             preview_max_dimension: 4096,
@@ -385,6 +401,11 @@ impl Settings {
         );
         self.drive_free_width =
             sanitize_list_col(self.drive_free_width, DRIVE_FREE_MIN, default_drive_free_width());
+        self.list_type_width = sanitize_list_col(
+            self.list_type_width,
+            LIST_COL_MIN,
+            default_list_type_width(),
+        );
         self.undo_limit = self.undo_limit.clamp(1, 100);
         // Preview caps: the file cap also bounds what the fd:// handler will read, so the
         // upper bound keeps one accidental keystroke from reserving gigabytes.
@@ -444,9 +465,13 @@ sidebar_open = true
 sidebar_width = 176
 preview_width = 320
 
-# 文件列表“大小/修改时间”列宽（像素，拖表头分隔线调整，双击恢复默认）
-# file-list size and modified column widths in px; drag the header divider, double-click to reset
+# 文件列表列显隐与“大小/类型/修改时间”列宽（像素，拖表头分隔线调整，双击恢复默认）
+# file-list column visibility and column widths in px; drag a header divider, double-click to reset
+list_col_size = true
+list_col_type = true
+list_col_time = true
 list_size_width = 96
+list_type_width = 88
 list_time_width = 142
 
 # 此电脑“容量/剩余”列宽（像素，可拖拽，双击恢复默认）
@@ -568,6 +593,10 @@ struct FileSettings {
     list_time_width: u32,
     drive_capacity_width: u32,
     drive_free_width: u32,
+    list_col_size: bool,
+    list_col_type: bool,
+    list_col_time: bool,
+    list_type_width: u32,
     custom_places: Vec<QuickPlace>,
     hidden_places: Vec<String>,
     external_preview: Vec<ExternalPreview>,
@@ -618,6 +647,10 @@ impl Default for FileSettings {
             list_time_width: base.list_time_width,
             drive_capacity_width: base.drive_capacity_width,
             drive_free_width: base.drive_free_width,
+            list_col_size: base.list_col_size,
+            list_col_type: base.list_col_type,
+            list_col_time: base.list_col_time,
+            list_type_width: base.list_type_width,
             custom_places: base.custom_places,
             hidden_places: base.hidden_places,
             external_preview: base.external_preview,
@@ -669,6 +702,10 @@ impl From<FileSettings> for Settings {
             list_time_width: file.list_time_width,
             drive_capacity_width: file.drive_capacity_width,
             drive_free_width: file.drive_free_width,
+            list_col_size: file.list_col_size,
+            list_col_type: file.list_col_type,
+            list_col_time: file.list_col_time,
+            list_type_width: file.list_type_width,
             custom_places: file.custom_places,
             hidden_places: file.hidden_places,
             external_preview: file.external_preview,
@@ -802,6 +839,14 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), A
         &mut doc,
         "drive_free_width",
         Value::from(settings.drive_free_width as i64),
+    );
+    set_value(&mut doc, "list_col_size", Value::from(settings.list_col_size));
+    set_value(&mut doc, "list_col_type", Value::from(settings.list_col_type));
+    set_value(&mut doc, "list_col_time", Value::from(settings.list_col_time));
+    set_value(
+        &mut doc,
+        "list_type_width",
+        Value::from(settings.list_type_width as i64),
     );
     set_value(&mut doc, "undo_limit", Value::from(settings.undo_limit as i64));
     set_value(

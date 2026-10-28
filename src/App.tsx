@@ -1079,10 +1079,17 @@ export default function App() {
 
   /** Column widths are global: every pane and tab shares them. */
   const setColWidths = useCallback(
-    (listSizeWidth: number, listTimeWidth: number, driveCapacityWidth: number, driveFreeWidth: number) => {
+    (
+      listSizeWidth: number,
+      listTypeWidth: number,
+      listTimeWidth: number,
+      driveCapacityWidth: number,
+      driveFreeWidth: number,
+    ) => {
       updateSettings({
         ...settingsRef.current,
         listSizeWidth,
+        listTypeWidth,
         listTimeWidth,
         driveCapacityWidth,
         driveFreeWidth,
@@ -3382,7 +3389,11 @@ export default function App() {
               tabFontSize={settings.tabFontSize}
               listFontSize={settings.listFontSize}
               navFontSize={settings.navFontSize}
+              showColSize={settings.listColSize}
+              showColType={settings.listColType}
+              showColTime={settings.listColTime}
               colSize={settings.listSizeWidth}
+              colType={settings.listTypeWidth}
               colTime={settings.listTimeWidth}
               colDriveCapacity={settings.driveCapacityWidth}
               colDriveFree={settings.driveFreeWidth}

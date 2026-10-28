@@ -31,6 +31,7 @@ type Props = {
 
 type SectionId =
   | 'general'
+  | 'columns'
   | 'shortcuts'
   | 'integration'
   | 'graphics'
@@ -43,6 +44,7 @@ type SectionId =
 
 const SECTIONS: { id: SectionId; label: Key }[] = [
   { id: 'general', label: 'settings.general' },
+  { id: 'columns', label: 'settings.columns' },
   { id: 'shortcuts', label: 'settings.shortcuts' },
   { id: 'integration', label: 'settings.integration' },
   { id: 'graphics', label: 'settings.graphics' },
@@ -302,6 +304,7 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
       t('settings.showHidden'),
       t('settings.useEverything'),
     ].join(' '),
+    columns: [t('settings.columns'), t('list.size'), t('list.type'), t('list.mtime'), t('settings.columnsHint')].join(' '),
     shortcuts: [t('settings.shortcuts'), ...SHORTCUTS.map((shortcut) => t(shortcut.label))].join(' '),
     integration: [
       t('settings.integration'),
@@ -883,6 +886,28 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
                   className="h-6 w-16 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-blue-400"
                 />
               </div>
+            </div>
+          </section>
+
+          <section className={sectionClass('columns')}>
+            <h2 className="pb-2 text-[0.6875rem] font-semibold tracking-wide text-muted-2">{t('settings.columns')}</h2>
+            <div className="space-y-1.5" data-columns>
+              <div className="text-[0.65625rem] text-muted-2">{t('settings.columnsHint')}</div>
+              <ToggleRow
+                label={t('list.size')}
+                value={settings.listColSize}
+                onChange={(value) => onChange({ ...settings, listColSize: value })}
+              />
+              <ToggleRow
+                label={t('list.type')}
+                value={settings.listColType}
+                onChange={(value) => onChange({ ...settings, listColType: value })}
+              />
+              <ToggleRow
+                label={t('list.mtime')}
+                value={settings.listColTime}
+                onChange={(value) => onChange({ ...settings, listColTime: value })}
+              />
             </div>
           </section>
 

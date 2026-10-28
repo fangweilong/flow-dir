@@ -51,13 +51,15 @@ const MIN_DRIVE_CAPACITY = 120
 const MIN_DRIVE_FREE = 56
 /** Drive "type" column; fixed, since the label is short and never wraps. */
 const DRIVE_TYPE_COL = 72
+/** File-list "type" column: an extension or a short folder label never wraps. */
+const MIN_COL_TYPE = 56
 const MAX_COL_WIDTH = 480
 /** Name column floor, so dragging a divider can never starve the file names. */
 const MIN_COL_NAME = 140
 const MIN_WIDTH_FILTER = 420
 
 /** Header dividers govern the column on their right; the drive grid reuses the same drag. */
-type ColKey = 'size' | 'time' | 'capacity' | 'free'
+type ColKey = 'size' | 'type' | 'time' | 'capacity' | 'free'
 
 /** Screen/client coordinates for a context-menu request. */
 export type MenuPoint = {
@@ -90,8 +92,16 @@ type Props = {
   listFontSize: number
   /** Navigation-bar text size in px; drives the toolbar controls. */
   navFontSize: number
+  /** File-list "size" column switch; a narrow pane still drops it on its own. */
+  showColSize: boolean
+  /** File-list "type" column switch. */
+  showColType: boolean
+  /** File-list "modified" column switch. */
+  showColTime: boolean
   /** Stored "size" column width in px at the base font size; shared by every pane. */
   colSize: number
+  /** Stored "type" column width in px at the base font size; shared by every pane. */
+  colType: number
   /** Stored "modified" column width in px at the base font size; shared by every pane. */
   colTime: number
   /** Stored drive-overview "capacity" column width in px at the base font size. */
@@ -99,7 +109,7 @@ type Props = {
   /** Stored drive-overview "free" column width in px at the base font size. */
   colDriveFree: number
   /** Persists every column width after a drag or a double-click reset. */
-  onColWidths: (size: number, time: number, capacity: number, free: number) => void
+  onColWidths: (size: number, type: number, time: number, capacity: number, free: number) => void
   dropHint: DropMode | null
   draggingTabId: string | null
   onFocusPane: () => void
@@ -163,7 +173,11 @@ export function PaneView({
   tabFontSize,
   listFontSize,
   navFontSize,
+  showColSize,
+  showColType,
+  showColTime,
   colSize,
+  colType,
   colTime,
   colDriveCapacity,
   colDriveFree,
@@ -221,6 +235,7 @@ export function PaneView({
   /** Live column widths while a header divider is dragged; committed once on release. */
   const [draft, setDraft] = useState<{
     size: number
+    type: number
     time: number
     capacity: number
     free: number
@@ -299,20 +314,30 @@ export function PaneView({
   const headerHeight = Math.round(HEADER_H * listScale)
   const nameMin = Math.round(MIN_COL_NAME * listScale)
   const minSizeCol = Math.round(MIN_COL_SIZE * listScale)
+  const minTypeCol = Math.round(MIN_COL_TYPE * listScale)
   const minTimeCol = Math.round(MIN_COL_TIME * listScale)
   // Dragged widths stay local until release, so one gesture writes settings once.
   const wantSize = Math.round((draft?.size ?? colSize) * listScale)
+  const wantType = Math.round((draft?.type ?? colType) * listScale)
   const wantTime = Math.round((draft?.time ?? colTime) * listScale)
   // Columns keep their stored width. A narrow pane scrolls horizontally instead of
-  // squeezing the neighbour, so dragging the size column can never deform the time column.
-  const showSize = width === 0 || width >= nameMin + minSizeCol
-  const showTime = width === 0 || width >= nameMin + minSizeCol + minTimeCol
+  // squeezing the neighbour, so dragging one column can never deform another. Settings can
+  // hide a column outright; a pane too narrow for the rest drops them left to right.
+  const showSize = showColSize && (width === 0 || width >= nameMin + minSizeCol)
+  const showType =
+    showColType && (width === 0 || width >= nameMin + (showSize ? minSizeCol : 0) + minTypeCol)
+  const showTime =
+    showColTime &&
+    (width === 0 ||
+      width >= nameMin + (showSize ? minSizeCol : 0) + (showType ? minTypeCol : 0) + minTimeCol)
   // Stored widths below the floor are lifted so a legacy narrow column cannot wrap its text.
   const sizeCol = Math.max(minSizeCol, wantSize)
+  const typeCol = Math.max(minTypeCol, wantType)
   const timeCol = Math.max(minTimeCol, wantTime)
   // Rows carry `pr-1.5` that the header repeats, so the scroll range covers both without
   // clipping the last column; `0.375rem` is that padding at the root font size.
-  const listWidth = nameMin + (showSize ? sizeCol : 0) + (showTime ? timeCol : 0)
+  const listWidth =
+    nameMin + (showSize ? sizeCol : 0) + (showType ? typeCol : 0) + (showTime ? timeCol : 0)
   const listMinWidth = `calc(${listWidth}px + 0.375rem)`
   const showFilter = width === 0 || width >= Math.round(MIN_WIDTH_FILTER * listScale)
   // The overview drops the label column first, then the capacity pair, the same way the
@@ -343,11 +368,21 @@ export function PaneView({
     `${driveTypeCol}px`,
     ...(showDriveCapacity ? [`${capacityCol}px`, `${freeCol}px`] : []),
   ].join(' ')
-  const grid = showTime
-    ? `minmax(${nameMin}px, 1fr) ${sizeCol}px ${timeCol}px`
-    : showSize
-      ? `minmax(${nameMin}px, 1fr) ${sizeCol}px`
-      : `minmax(${nameMin}px, 1fr)`
+  const grid = [
+    `minmax(${nameMin}px, 1fr)`,
+    showSize && `${sizeCol}px`,
+    showType && `${typeCol}px`,
+    showTime && `${timeCol}px`,
+  ]
+    .filter(Boolean)
+    .join(' ')
+  /** Explorer-style short type: the folder label, an upper-case extension, or a plain file. */
+  const typeOf = (name: string, dir: boolean) => {
+    if (dir) return t('list.typeFolder')
+    const dot = name.lastIndexOf('.')
+    return dot > 0 && dot < name.length - 1 ? name.slice(dot + 1).toUpperCase() : t('list.typeFile')
+  }
+
   const navButtonStyle = { width: navControlHeight, height: navControlHeight }
   const navFieldStyle = { height: navControlHeight }
 
@@ -468,18 +503,21 @@ export function PaneView({
     const startX = ev.clientX
     const rendered: Record<ColKey, number> = {
       size: sizeCol,
+      type: typeCol,
       time: timeCol,
       capacity: capacityCol,
       free: freeCol,
     }
     const stored: Record<ColKey, number> = {
       size: colSize,
+      type: colType,
       time: colTime,
       capacity: colDriveCapacity,
       free: colDriveFree,
     }
     const floors: Record<ColKey, number> = {
       size: MIN_COL_SIZE,
+      type: MIN_COL_TYPE,
       time: MIN_COL_TIME,
       capacity: MIN_DRIVE_CAPACITY,
       free: MIN_DRIVE_FREE,
@@ -490,13 +528,14 @@ export function PaneView({
     const start = rendered[key] / listScale
     const min = floors[key]
     const max =
-      key === 'size' || key === 'time' || width === 0
+      key === 'size' || key === 'type' || key === 'time' || width === 0
         ? MAX_COL_WIDTH
         : Math.max(min, Math.min(MAX_COL_WIDTH, (width - nameMin - fixed) / listScale))
     let next = start
     let moved = false
-    const live = (): { size: number; time: number; capacity: number; free: number } => ({
+    const live = (): { size: number; type: number; time: number; capacity: number; free: number } => ({
       size: stored.size,
+      type: stored.type,
       time: stored.time,
       capacity: stored.capacity,
       free: stored.free,
@@ -515,7 +554,7 @@ export function PaneView({
       setDraft(null)
       if (!moved || Math.round(next) === Math.round(start)) return
       const widths = live()
-      onColWidths(widths.size, widths.time, widths.capacity, widths.free)
+      onColWidths(widths.size, widths.type, widths.time, widths.capacity, widths.free)
     }
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', end)
@@ -526,18 +565,20 @@ export function PaneView({
   const resetCol = (key: ColKey) => {
     const defaults: Record<ColKey, number> = {
       size: DEFAULT_SETTINGS.listSizeWidth,
+      type: DEFAULT_SETTINGS.listTypeWidth,
       time: DEFAULT_SETTINGS.listTimeWidth,
       capacity: DEFAULT_SETTINGS.driveCapacityWidth,
       free: DEFAULT_SETTINGS.driveFreeWidth,
     }
     const stored: Record<ColKey, number> = {
       size: colSize,
+      type: colType,
       time: colTime,
       capacity: colDriveCapacity,
       free: colDriveFree,
     }
     const widths = { ...stored, [key]: defaults[key] }
-    onColWidths(widths.size, widths.time, widths.capacity, widths.free)
+    onColWidths(widths.size, widths.type, widths.time, widths.capacity, widths.free)
   }
 
   /** Opens the full-path editor; Ctrl+L uses it even at the drive overview. */
@@ -1185,6 +1226,16 @@ export function PaneView({
                 />
               </div>
             )}
+            {showType && (
+              <div className="relative flex h-full min-w-0">
+                <HeaderCell label={t('list.type')} k="type" sort={pane.sort} onSort={changeSort} align="left" />
+                <ColDivider
+                  label={t('list.type')}
+                  onPointerDown={(ev) => startColDrag('type', ev)}
+                  onDoubleClick={() => resetCol('type')}
+                />
+              </div>
+            )}
             {showTime && (
               <div className="relative flex h-full min-w-0">
                 <HeaderCell label={t('list.mtime')} k="mtime" sort={pane.sort} onSort={changeSort} align="left" />
@@ -1424,6 +1475,11 @@ export function PaneView({
                 {showSize && (
                   <div className="tabular whitespace-nowrap pr-1.5 text-right text-[0.88em] text-muted">
                     {formatSize(entry.size, dir)}
+                  </div>
+                )}
+                {showType && (
+                  <div className="truncate whitespace-nowrap pl-1.5 text-[0.88em] text-muted">
+                    {typeOf(entry.name, dir)}
                   </div>
                 )}
                 {showTime && (
