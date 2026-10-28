@@ -634,29 +634,6 @@ export function PaneView({
     }
     // The drive overview holds no entries: skip selection, clipboard, and rename actions.
     if (!tab.path) return
-    // An IME owns the keystrokes until it commits; shortcuts must not fire mid-composition.
-    if (ev.nativeEvent.isComposing) return
-    if (typed) {
-      if (ev.key === 'Backspace') {
-        ev.preventDefault()
-        setTyped(typed.slice(0, -1))
-        return
-      }
-      if (ev.key === 'Escape') {
-        ev.preventDefault()
-        clearTypeAhead()
-        return
-      }
-      if (ev.key === 'Enter') {
-        ev.preventDefault()
-        const entry = view[anchorIdx]
-        clearTypeAhead()
-        if (entry) activate(entry)
-        return
-      }
-      // Any other navigation ends the run, so the buffer cannot leak into the next action.
-      clearTypeAhead()
-    }
     if (!ev.ctrlKey && !ev.altKey && !ev.metaKey && ev.key.length === 1) {
       ev.preventDefault()
       typeAhead(ev.key)

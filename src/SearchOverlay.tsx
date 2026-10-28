@@ -123,6 +123,9 @@ export function SearchOverlay({
   useEffect(() => {
     const value = query.trim()
     if (!value) {
+      // Bump the generation before cancelling: a batch already in flight must not write
+      // its hits back, or Enter would open a result for a query that was cleared.
+      gen.current += 1
       setItems([])
       setActivePath(null)
       setProvider('')
@@ -177,6 +180,14 @@ export function SearchOverlay({
       onMouseDown={(ev) => {
         if (ev.target === ev.currentTarget) onClose()
       }}
+      // Escape closes from anywhere in the panel, not only while the query field has
+      // focus; the scope and sort controls would otherwise trap the user.
+      onKeyDown={(ev) => {
+        if (ev.key === 'Escape' && !ev.nativeEvent.isComposing) {
+          ev.preventDefault()
+          onClose()
+        }
+      }}
     >
       <div className="flex max-h-[64vh] w-[40rem] max-w-[calc(100vw-1.5rem)] flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-2xl">
         <div className="flex items-center gap-2 border-b border-line px-3 py-2">
@@ -189,7 +200,9 @@ export function SearchOverlay({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'Escape') onClose()
+              // While an IME composes, Enter confirms a candidate and the arrows page
+              // through it; moving the result selection instead would fight the input.
+              if (e.nativeEvent.isComposing) return
               if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
                 e.preventDefault()
                 if (!ordered.length) return

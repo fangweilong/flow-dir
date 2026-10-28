@@ -176,8 +176,12 @@ export function BatchRenameDialog({ dir, names, lang, onConfirm, onClose }: Prop
           if (ev.key === 'Escape') {
             ev.preventDefault()
             onClose()
+            return
           }
           if (ev.key === 'Enter') {
+            // A focused button already has Enter semantics (Cancel, mode switch, …);
+            // hijacking it here would submit the rename the user did not confirm.
+            if (ev.target instanceof Element && ev.target.closest('button')) return
             ev.preventDefault()
             submit()
           }

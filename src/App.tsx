@@ -209,7 +209,12 @@ export default function App() {
   })
   const [toast, setToast] = useState<string | null>(null)
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null)
-  const [prompt, setPrompt] = useState<{ title: string; initial: string; submit: (value: string) => void } | null>(null)
+  const [prompt, setPrompt] = useState<{
+    paneId: string
+    title: string
+    initial: string
+    submit: (value: string) => void
+  } | null>(null)
   /** Multi-selection waiting for the batch rename preview. */
   const [batchRename, setBatchRename] = useState<{ paneId: string; dir: string; names: string[] } | null>(null)
   /** Pending delete waiting for the confirmation dialog; nothing leaves the disk until it closes. */
@@ -2260,6 +2265,7 @@ export default function App() {
       if (!tab?.path) return
       const target = joinPath(tab.path, name)
       setPrompt({
+        paneId,
         title: t('dialog.renameTitle'),
         initial: name,
         submit: (value) => runOp('rename', [target], { newName: value }),
@@ -2291,6 +2297,7 @@ export default function App() {
       const tab = pane ? current.tabs[pane.activeTabId] : undefined
       if (!tab?.path) return
       setPrompt({
+        paneId,
         title: t('dialog.newFolderTitle'),
         initial: '',
         submit: (value) => runOp('newdir', [tab.path], { targetDir: tab.path, newName: value }),
@@ -3353,7 +3360,10 @@ export default function App() {
           fontSize={settings.fontSize}
           preferEverything={settings.useEverything}
           showHidden={settings.showHidden}
-          onClose={() => setSearchOpen(false)}
+          onClose={() => {
+            setSearchOpen(false)
+            if (activePane) focusList(activePane.id)
+          }}
           onActivate={(item) => {
             if (item.isDir) navigate(activeTab.id, item.path)
             else openTarget(item.path)
@@ -3424,10 +3434,17 @@ export default function App() {
           initial={prompt.initial}
           lang={lang}
           onConfirm={(value) => {
+            const pending = prompt
             prompt.submit(value)
             setPrompt(null)
+            // Hand the keyboard back to the list, so Delete/F2 keep working.
+            focusList(pending.paneId)
           }}
-          onClose={() => setPrompt(null)}
+          onClose={() => {
+            const pending = prompt
+            setPrompt(null)
+            if (pending) focusList(pending.paneId)
+          }}
         />
       )}
 
@@ -3436,15 +3453,21 @@ export default function App() {
           dir={batchRename.dir}
           names={batchRename.names}
           lang={lang}
-          onClose={() => setBatchRename(null)}
+          onClose={() => {
+            const pending = batchRename
+            setBatchRename(null)
+            focusList(pending.paneId)
+          }}
           onConfirm={(pairs) => {
             const dir = batchRename.dir
+            const paneId = batchRename.paneId
             runOp(
               'rename',
               pairs.map((pair) => joinPath(dir, pair.from)),
               { newNames: pairs.map((pair) => pair.to) },
             )
             setBatchRename(null)
+            focusList(paneId)
           }}
         />
       )}

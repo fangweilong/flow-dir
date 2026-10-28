@@ -49,6 +49,9 @@ export function PromptDialog({ title, initial, lang, onConfirm, onClose }: Props
           value={value}
           onChange={(ev) => setValue(ev.target.value)}
           onKeyDown={(ev) => {
+            // Enter/Escape belong to the IME while a composition is open: Enter picks a
+            // candidate, and committing here would rename before the user finished typing.
+            if (ev.nativeEvent.isComposing) return
             if (ev.key === 'Enter') {
               ev.preventDefault()
               submit()
