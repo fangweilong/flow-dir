@@ -492,9 +492,74 @@ export function ComparePanel({
   const fmtTime = (ms: number) =>
     ms ? new Date(ms).toLocaleString(lang === 'zh-CN' ? 'zh-CN' : 'en-US') : '—'
 
+  /**
+   * One half of the split diff. A side that lacks the entry keeps the row height with a
+   * muted blank so the two halves stay aligned, the way a side-by-side diff renders an
+   * absent line.
+   */
+  const sideCell = (entry: CompareEntry, side: 'left' | 'right') => {
+    const meta = entry[side]
+    if (!meta) {
+      return <div className="min-w-0 bg-surface-2/40 px-2 py-1 text-muted-2/40">—</div>
+    }
+    const root = side === 'left' ? session?.left ?? '' : session?.right ?? ''
+    const canEnter = !!entry.left?.isDir && !!entry.right?.isDir
+    const count = counts[entry.rel]
+    const hash = hashResults[entry.rel]
+    const tint =
+      entry.status === 'different'
+        ? 'bg-amber-50/60 dark:bg-amber-950/25'
+        : entry.status === 'left' && side === 'left'
+          ? 'bg-rose-50/60 dark:bg-rose-950/25'
+          : entry.status === 'right' && side === 'right'
+            ? 'bg-emerald-50/60 dark:bg-emerald-950/25'
+            : ''
+    return (
+      <div className={`flex min-w-0 items-center gap-1.5 px-2 py-1 ${tint}`}>
+        <FileIcon
+          name={entry.name}
+          dir={meta.isDir}
+          path={joinPath(root, entry.rel)}
+          scale={iconScale}
+        />
+        <span
+          className={`truncate ${entry.status === 'same' ? 'text-muted' : 'text-fg-strong'}`}
+          title={entry.rel}
+        >
+          {entry.name}
+        </span>
+        {side === 'left' && count && (
+          <span className="shrink-0 text-[0.625rem] text-muted-2" title={t('compare.countsHint')}>
+            {count.leftOnly}/{count.different}/{count.rightOnly}
+          </span>
+        )}
+        {side === 'left' && canEnter && (
+          <button
+            type="button"
+            onClick={() => session && void loadLevel(entry.rel, session, false)}
+            className="shrink-0 rounded border border-line px-1 text-[0.625rem] text-muted hover:text-fg"
+          >
+            {t('compare.enter')}
+          </button>
+        )}
+        {side === 'right' && hash && (
+          <span
+            title={`${hash.leftHash ?? ''} / ${hash.rightHash ?? ''}${hash.error ? ` — ${hash.error}` : ''}`}
+            className={`shrink-0 font-mono ${hash.equal ? 'text-emerald-500' : 'text-rose-500'}`}
+          >
+            {hash.equal ? '=' : '≠'}
+          </span>
+        )}
+        <span className="ml-auto shrink-0 font-mono text-[0.625rem] text-muted-2">
+          {formatSize(meta.size, meta.isDir) || '—'} · {fmtTime(meta.mtime)}
+        </span>
+      </div>
+    )
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-3 backdrop-blur-[1px]">
-      <div className="flex max-h-[92vh] w-[72rem] max-w-full flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-2xl">
+      <div className="flex max-h-[92vh] w-[86rem] max-w-full flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-2xl">
         <div className="flex items-center gap-2 border-b border-line px-3 py-2">
           <span className="shrink-0 text-[0.8125rem] font-semibold text-fg-strong">{t('compare.title')}</span>
           <div className="flex min-w-0 flex-1 items-center gap-1.5">
@@ -747,108 +812,36 @@ export function ComparePanel({
             </div>
           )}
           {!loading && !error && (
-            <table className="w-full table-fixed border-collapse text-left text-[0.6875rem]">
-              <thead className="sticky top-0 z-10 bg-surface-2 text-[0.625rem] text-muted-2">
-                <tr>
-                  <th className="w-7 px-1 py-1 font-normal" aria-label={t('compare.status')} />
-                  <th className="w-[36%] px-2 py-1 font-normal">{t('compare.name')}</th>
-                  <th className="w-[25%] px-2 py-1 text-right font-normal">{t('compare.leftSize')}</th>
-                  <th className="w-[25%] px-2 py-1 text-right font-normal">{t('compare.rightSize')}</th>
-                  <th className="w-[12%] px-2 py-1 text-right font-normal">{t('compare.counts')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {visible.map((entry) => {
-                  const count = counts[entry.rel]
-                  const hash = hashResults[entry.rel]
-                  const canEnter = !!entry.left?.isDir && !!entry.right?.isDir
-                  const rowClass =
-                    entry.status === 'left'
-                      ? 'bg-rose-50/50 dark:bg-rose-950/20'
-                      : entry.status === 'right'
-                        ? 'bg-emerald-50/50 dark:bg-emerald-950/20'
-                        : entry.status === 'different'
-                          ? 'bg-amber-50/50 dark:bg-amber-950/20'
-                          : ''
-                  return (
-                    <tr
-                      key={entry.rel}
-                      className={`border-b border-row-line ${rowClass} hover:bg-surface-3`}
-                      onDoubleClick={() => canEnter && session && void loadLevel(entry.rel, session, false)}
+            <div className="min-w-[40rem] text-[0.6875rem]">
+              <div className="sticky top-0 z-10 grid grid-cols-[1fr_2.25rem_1fr] border-b border-line bg-surface-2 text-[0.625rem] text-muted-2">
+                <div className="truncate px-2 py-1" title={session?.left ?? ''}>
+                  {session?.left}
+                </div>
+                <div className="border-x border-line" />
+                <div className="truncate px-2 py-1" title={session?.right ?? ''}>
+                  {session?.right}
+                </div>
+              </div>
+              {visible.map((entry) => {
+                const canEnter = !!entry.left?.isDir && !!entry.right?.isDir
+                return (
+                  <div
+                    key={entry.rel}
+                    className="grid grid-cols-[1fr_2.25rem_1fr] border-b border-row-line hover:bg-surface-3"
+                    onDoubleClick={() => canEnter && session && void loadLevel(entry.rel, session, false)}
+                  >
+                    {sideCell(entry, 'left')}
+                    <div
+                      className={`grid place-items-center border-x border-row-line font-mono text-[0.8125rem] font-semibold ${statusClass(entry.status)}`}
+                      title={statusLabel(entry.status)}
                     >
-                      <td
-                        className={`px-1 py-1 text-center font-mono text-[0.8125rem] font-semibold ${statusClass(entry.status)}`}
-                        title={statusLabel(entry.status)}
-                      >
-                        {statusMark(entry.status)}
-                      </td>
-                      <td className="px-2 py-1">
-                        <div className="flex min-w-0 items-center gap-1.5">
-                          <FileIcon
-                            name={entry.name}
-                            dir={!!entry.left?.isDir || !!entry.right?.isDir}
-                            path={joinPath(session?.left ?? '', entry.rel)}
-                            scale={iconScale}
-                          />
-                          <span
-                            className={`truncate ${entry.status === 'same' ? 'text-muted' : 'text-fg-strong'}`}
-                            title={entry.rel}
-                          >
-                            {entry.name}
-                          </span>
-                          {hash && (
-                            <span
-                              title={`${hash.leftHash ?? ''} / ${hash.rightHash ?? ''}${hash.error ? ` — ${hash.error}` : ''}`}
-                              className={`shrink-0 font-mono ${hash.equal ? 'text-emerald-500' : 'text-rose-500'}`}
-                            >
-                              {hash.equal ? '=' : '≠'}
-                            </span>
-                          )}
-                          {canEnter && (
-                            <button
-                              type="button"
-                              onClick={() => session && void loadLevel(entry.rel, session, false)}
-                              className="shrink-0 rounded border border-line px-1 text-[0.625rem] text-muted hover:text-fg"
-                            >
-                              {t('compare.enter')}
-                            </button>
-                          )}
-                        </div>
-                      </td>
-                      <td
-                        className={`truncate px-2 py-1 text-right font-mono text-[0.625rem] ${
-                          entry.left ? 'text-muted-2' : 'text-muted-2/50'
-                        }`}
-                      >
-                        {entry.left
-                          ? `${formatSize(entry.left.size, entry.left.isDir) || '—'} · ${fmtTime(entry.left.mtime)}`
-                          : '—'}
-                      </td>
-                      <td
-                        className={`truncate px-2 py-1 text-right font-mono text-[0.625rem] ${
-                          entry.right ? 'text-muted-2' : 'text-muted-2/50'
-                        }`}
-                      >
-                        {entry.right
-                          ? `${formatSize(entry.right.size, entry.right.isDir) || '—'} · ${fmtTime(entry.right.mtime)}`
-                          : '—'}
-                      </td>
-                      <td className="truncate px-2 py-1 text-right text-muted-2">
-                        {count ? (
-                          <span title={t('compare.countsHint')}>
-                            {count.leftOnly} / {count.different} / {count.rightOnly}
-                          </span>
-                        ) : canEnter ? (
-                          <span title={t('compare.scanning')}>…</span>
-                        ) : (
-                          ''
-                        )}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
+                      {statusMark(entry.status)}
+                    </div>
+                    {sideCell(entry, 'right')}
+                  </div>
+                )
+              })}
+            </div>
           )}
           {!loading && !error && !visible.length && (
             <div className="px-3 py-8 text-center text-[0.71875rem] text-muted-2">
