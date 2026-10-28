@@ -2640,8 +2640,11 @@ export default function App() {
   }, [ws])
 
   const activeList = activeTab ? listData[activeTab.id] : undefined
-  const selectedNames = activeList ? Array.from(activeList.selected) : []
-  const selectionKey = selectedNames.join('\u0001')
+  const selectedSet = activeList?.selected
+  // A 10k-row Ctrl+A must not rebuild this array and its join on every render; both are
+  // pure functions of the selection set, which is replaced only when it changes.
+  const selectedNames = useMemo(() => (selectedSet ? Array.from(selectedSet) : []), [selectedSet])
+  const selectionKey = useMemo(() => selectedNames.join('\u0001'), [selectedNames])
 
   /** The single selected folder, if the list selection points at one. */
   const selectedFolderPath = useMemo(() => {
