@@ -298,3 +298,11 @@ export type CompareHashEvent = {
   error: ApiError | null
   results: CompareHashResult[]
 }
+
+/** Folder (and optional row) to open on launch or from the tray; mirrors the Rust type. */
+export type LaunchRequest = {
+  path: string | null
+  select: string | null
+  newWindow: boolean
+  autostart: boolean
+}

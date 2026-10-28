@@ -49,6 +49,8 @@ import {
   setAppTheme,
   settingsLoad,
   settingsSave,
+  takeLaunchRequest,
+  trayRecent,
   shellMenuBackgroundShow,
   shellMenuShow,
   shellProperties,
@@ -68,6 +70,7 @@ import type {
   Entry,
   GitStatus,
   Lang,
+  LaunchRequest,
   ListData,
   OpKind,
   OpProgress,
@@ -996,6 +999,21 @@ export default function App() {
     }
   }, [invalidateGit])
 
+  /** Integration failures come back as stable codes; the toast text lives in i18n. */
+  const reportIntegrationWarnings = useCallback(
+    (codes: string[]) => {
+      if (!codes.length) return
+      const tr = makeT(settingsRef.current.language)
+      const labels = codes.map((code) => {
+        if (code === 'HOTKEY_CONFLICT') return tr('settings.hotkeyConflict')
+        if (code === 'HOTKEY_INVALID') return tr('settings.hotkeyInvalid')
+        return tr('settings.integrationFailed')
+      })
+      showToast(tr('toast.integrationWarnings', { list: labels.join('; ') }))
+    },
+    [showToast],
+  )
+
   const updateSettings = useCallback((next: Settings) => {
     setSettings(next)
     settingsRef.current = next
@@ -1006,9 +1024,11 @@ export default function App() {
       settingsSaveTimer.current = null
       const snapshot = pendingSettings.current
       pendingSettings.current = null
-      if (snapshot) void settingsSave(snapshot).catch(reportSaveError)
+      if (snapshot) {
+        void settingsSave(snapshot).then(reportIntegrationWarnings).catch(reportSaveError)
+      }
     }, 300)
-  }, [reportSaveError])
+  }, [reportIntegrationWarnings, reportSaveError])
 
   /** Writes a pending change before the window closes; the debounce must not lose it. */
   const flushSettings = useCallback(() => {
@@ -1018,8 +1038,10 @@ export default function App() {
     }
     const snapshot = pendingSettings.current
     pendingSettings.current = null
-    if (snapshot) void settingsSave(snapshot).catch(reportSaveError)
-  }, [reportSaveError])
+    if (snapshot) {
+      void settingsSave(snapshot).then(reportIntegrationWarnings).catch(reportSaveError)
+    }
+  }, [reportIntegrationWarnings, reportSaveError])
 
   useEffect(() => {
     let disposed = false
@@ -1472,6 +1494,137 @@ export default function App() {
         : prev,
     )
   }, [])
+
+  /** Row a launch request asked to select; applied once its listing finishes. */
+  const pendingSelect = useRef<{ tabId: string; name: string } | null>(null)
+
+  /** Opens a command-line or tray target; `--new-window` becomes a new tab here. */
+  const openRequest = useCallback(
+    (req: LaunchRequest) => {
+      const current = wsRef.current
+      if (!current) return
+      const paneId = current.activePaneId
+      const pane = current.panes[paneId]
+      if (!pane) return
+      const path = (req.path ?? '').trim()
+      if (!path) {
+        if (req.newWindow) newTab(paneId)
+        return
+      }
+      const tab = current.tabs[pane.activeTabId]
+      if (req.newWindow || !tab) {
+        const tabId = uid('t')
+        if (req.select) pendingSelect.current = { tabId, name: req.select }
+        setWs((prev) =>
+          prev
+            ? {
+                ...prev,
+                activePaneId: paneId,
+                tabs: { ...prev.tabs, [tabId]: { id: tabId, path, history: [path], histIdx: 0 } },
+                panes: {
+                  ...prev.panes,
+                  [paneId]: {
+                    ...prev.panes[paneId],
+                    tabIds: [...prev.panes[paneId].tabIds, tabId],
+                    activeTabId: tabId,
+                  },
+                },
+              }
+            : prev,
+        )
+        return
+      }
+      if (req.select) pendingSelect.current = { tabId: tab.id, name: req.select }
+      if (tab.path === path) {
+        // Reuse the rows on screen: a launch may point at a file that was just created.
+        startScan(tab.id, path, pane.sort, pane.hidden, true)
+      } else {
+        navigate(tab.id, path)
+      }
+    },
+    [navigate, newTab, startScan],
+  )
+
+  useEffect(() => {
+    const request = pendingSelect.current
+    if (!request) return
+    const data = listData[request.tabId]
+    if (!data || data.loading) return
+    pendingSelect.current = null
+    const match = data.entries.find(
+      (entry) => entry.name.toLowerCase() === request.name.toLowerCase(),
+    )
+    if (!match) return
+    setListData((prev) => {
+      const current = prev[request.tabId]
+      if (!current) return prev
+      return {
+        ...prev,
+        [request.tabId]: { ...current, selected: new Set([match.name]), anchor: match.name },
+      }
+    })
+  }, [listData])
+
+  // A path from Explorer or the command line has to wait for the restored workspace,
+  // otherwise it would be replaced by the layout loaded a moment later.
+  const launchApplied = useRef(false)
+  useEffect(() => {
+    if (!ws || launchApplied.current) return
+    launchApplied.current = true
+    void takeLaunchRequest()
+      .then((request) => {
+        if (request) openRequest(request)
+      })
+      .catch(() => undefined)
+  }, [ws, openRequest])
+
+  useEffect(() => {
+    let disposed = false
+    const unlisteners: (() => void)[] = []
+    const subscribe = <T,>(name: string, handler: (payload: T) => void) => {
+      void listen<T>(name, (event) => handler(event.payload)).then((unlisten) => {
+        if (disposed) unlisten()
+        else unlisteners.push(unlisten)
+      })
+    }
+    subscribe<LaunchRequest>('flowdir:open-request', openRequest)
+    subscribe('flowdir:search', () => setSearchOpen(true))
+    subscribe('flowdir:hotkey', () => setSearchOpen(true))
+    return () => {
+      disposed = true
+      for (const unlisten of unlisteners) unlisten()
+    }
+  }, [openRequest])
+
+  /** Recent folders for the tray: the active tab's back stack first, then other tabs. */
+  const recentDirs = useMemo(() => {
+    if (!ws) return [] as string[]
+    const activePane = ws.panes[ws.activePaneId]
+    const active = activePane ? ws.tabs[activePane.activeTabId] : undefined
+    const ordered = active
+      ? [active, ...Object.values(ws.tabs).filter((tab) => tab !== active)]
+      : Object.values(ws.tabs)
+    const seen = new Set<string>()
+    const dirs: string[] = []
+    for (const tab of ordered) {
+      for (let index = Math.min(tab.histIdx, tab.history.length - 1); index >= 0; index -= 1) {
+        const path = tab.history[index]
+        if (!path) continue
+        const key = path.toLowerCase()
+        if (seen.has(key)) continue
+        seen.add(key)
+        dirs.push(path)
+        if (dirs.length >= 10) return dirs
+      }
+    }
+    return dirs
+  }, [ws])
+
+  const recentKey = recentDirs.join('\n')
+  useEffect(() => {
+    // Keyed by content: dragging a split rebuilds `ws` but must not rebuild the tray menu.
+    void trayRecent(recentDirs).catch(() => undefined)
+  }, [recentKey])
 
   const activateTab = useCallback((paneId: string, tabId: string) => {
     setWs((prev) =>

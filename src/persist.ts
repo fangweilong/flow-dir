@@ -75,6 +75,18 @@ export type Settings = {
   dupMaxMbPerSec: number
   /** Directory names the duplicate scan never descends into. */
   dupExclude: string[]
+  /** Global hotkey switch; the combination itself is in `globalHotkey`. */
+  hotkeyEnabled: boolean
+  /** Canonical combination such as `ctrl+alt+f`. */
+  globalHotkey: string
+  /** "Open with FlowDir" entries in Explorer's context menus. */
+  contextMenu: boolean
+  /** FlowDir appears under "Open with" for folders and drives; never the default verb. */
+  associateFolders: boolean
+  /** Start with Windows through the HKCU Run key. */
+  autostart: boolean
+  /** With `autostart`, start hidden in the tray. */
+  autostartMinimized: boolean
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -124,6 +136,12 @@ export const DEFAULT_SETTINGS: Settings = {
     'Program Files',
     'Program Files (x86)',
   ],
+  hotkeyEnabled: false,
+  globalHotkey: 'ctrl+alt+f',
+  contextMenu: false,
+  associateFolders: false,
+  autostart: false,
+  autostartMinimized: true,
 }
 
 type Snapshot = {

@@ -1,6 +1,6 @@
 import { Channel, invoke } from '@tauri-apps/api/core'
 import type { AppInfo, Clip, CompareCount, CompareHashEvent, CompareHashPair, CompareLevel, DirBatch, Drive, DupProgress, ElevatedReport, HashProgress, MenuOutcome, OpKind, OpProgress, Place, UpdateStatus } from './types'
-import type { GitStatus, PreviewInfo, SearchBatch } from './types'
+import type { GitStatus, LaunchRequest, PreviewInfo, SearchBatch } from './types'
 import type { Settings } from './persist'
 
 export function listDir(
@@ -52,7 +52,12 @@ export const layoutPreserve = () => invoke<string>('layout_preserve')
 
 export const settingsLoad = () => invoke<Settings>('settings_load')
 export const configWarnings = () => invoke<string[]>('config_warnings')
-export const settingsSave = (settings: Settings) => invoke<void>('settings_save', { settings })
+/** Returns integration warning codes so the caller can toast a hotkey conflict. */
+export const settingsSave = (settings: Settings) => invoke<string[]>('settings_save', { settings })
+/** Folder requested by the command line on first launch; consumed once. */
+export const takeLaunchRequest = () => invoke<LaunchRequest | null>('take_launch_request')
+/** Rebuilds the tray's recent-folder submenu. */
+export const trayRecent = (dirs: string[]) => invoke<void>('tray_recent', { dirs })
 export const setAppTheme = (theme: string) => invoke<void>('set_app_theme', { theme })
 export const watchSet = (paneId: string, path: string) => invoke<void>('watch_set', { paneId, path })
 export const watchClear = (paneId: string) => invoke<void>('watch_clear', { paneId })

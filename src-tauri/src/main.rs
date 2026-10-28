@@ -19,6 +19,7 @@ mod preview;
 mod restore;
 mod search;
 mod settings;
+mod shell_integration;
 mod shell_menu;
 mod store;
 mod taskbar;
@@ -426,12 +427,27 @@ fn settings_save(
     app: tauri::AppHandle,
     cache: tauri::State<'_, settings::SettingsCache>,
     settings: settings::Settings,
-) -> Result<(), ApiError> {
+) -> Result<Vec<String>, ApiError> {
     let settings = settings.normalize();
     settings::save(&app, &settings)?;
     crate::logging::set_level(&settings.log_level);
+    // Integration switches apply immediately; the returned codes let the frontend toast a
+    // hotkey that another program already owns.
+    let warnings = shell_integration::apply(&app, &settings);
     cache.set(settings);
-    Ok(())
+    Ok(warnings)
+}
+
+#[tauri::command]
+fn take_launch_request(
+    state: tauri::State<'_, shell_integration::Integration>,
+) -> Option<shell_integration::LaunchRequest> {
+    state.take_launch()
+}
+
+#[tauri::command]
+fn tray_recent(app: tauri::AppHandle, dirs: Vec<String>) -> Result<(), ApiError> {
+    shell_integration::set_recent(&app, dirs)
 }
 
 #[tauri::command]
@@ -1061,7 +1077,7 @@ fn reveal_path(path: String) -> Result<(), ApiError> {
         .map_err(|e| ApiError::from_io(&path, &e))
 }
 
-fn show_main(app: &tauri::AppHandle) {
+pub(crate) fn show_main(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
@@ -1110,12 +1126,9 @@ fn request_quit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
 }
 
 fn init_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
-    use tauri::menu::{Menu, MenuItem};
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
-    let show = MenuItem::with_id(app, "show", "显示窗口 / Show", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "退出 / Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &quit])?;
+    let menu = shell_integration::tray_menu(app, &[])?;
     TrayIconBuilder::with_id("main")
         .icon(app.default_window_icon().cloned().unwrap())
         .tooltip(store::display_name(app))
@@ -1123,8 +1136,7 @@ fn init_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "quit" => request_quit(app),
-            "show" => show_main(app),
-            _ => {}
+            id => shell_integration::on_menu_event(app, id),
         })
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
@@ -1148,10 +1160,20 @@ fn main() {
     }
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // `argv` includes the executable, as `std::env::args` does.
+            let request = shell_integration::parse_launch(argv.into_iter().skip(1));
+            if request.autostart {
+                // The Run entry firing while the app is already up: stay in the tray.
+                return;
+            }
             show_main(app);
+            if !request.is_empty() {
+                let _ = app.emit("flowdir:open-request", request);
+            }
         }))
         .manage(AppState::default())
+        .manage(shell_integration::Integration::default())
         .manage(ops::OpState::default())
         .manage(hash::ToolState::default())
         .manage(watch::Watchers::default())
@@ -1173,6 +1195,11 @@ fn main() {
         .setup(|app| {
             store::migrate_legacy(app.handle());
             update::cleanup_leftovers();
+            // The frontend asks for this once its workspace is restored, so a path from
+            // Explorer or the command line lands on a ready list.
+            let launch = shell_integration::parse_launch(std::env::args().skip(1));
+            app.state::<shell_integration::Integration>()
+                .set_launch(launch.clone());
             let saved = settings::load(app.handle());
             // The logger starts before the window so every later failure has somewhere to go.
             if let Ok(cache) = store::cache_dir(app.handle()) {
@@ -1215,10 +1242,17 @@ fn main() {
             titlebar::apply(&window);
             webview_mem::watch(app.handle().clone());
             update::spawn_scheduler(app.handle().clone());
-            let _ = window.show();
-            let _ = window.set_focus();
+            // Autostart can stay in the tray; the hotkey and tray menu still work.
+            let hidden = launch.autostart && saved.autostart_minimized;
+            if !hidden {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
             if let Err(err) = init_tray(app.handle()) {
                 eprintln!("tray init failed: {err}");
+            }
+            for code in shell_integration::apply(app.handle(), &saved) {
+                log::warn!(target: "flowdir::shell", "integration: {code}");
             }
             Ok(())
         })
@@ -1270,6 +1304,8 @@ fn main() {
             layout_load,
             settings_load,
             settings_save,
+            take_launch_request,
+            tray_recent,
             config_path,
             restart_app,
             quit_app,

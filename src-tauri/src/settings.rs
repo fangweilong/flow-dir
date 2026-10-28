@@ -133,6 +133,18 @@ pub struct Settings {
     pub dup_max_mb_per_sec: u32,
     /// Directory names the duplicate scan never descends into.
     pub dup_exclude: Vec<String>,
+    /// Global hotkey switch; the combination itself is in `global_hotkey`.
+    pub hotkey_enabled: bool,
+    /// Canonical combination such as `ctrl+alt+f`; recorded by the settings page.
+    pub global_hotkey: String,
+    /// "Open with FlowDir" entries in Explorer's file and folder context menus.
+    pub context_menu: bool,
+    /// Adds FlowDir to the "Open with" list for folders and drives; never the default verb.
+    pub associate_folders: bool,
+    /// HKCU Run entry, written as `"<exe>" --autostart`.
+    pub autostart: bool,
+    /// With `autostart`, launch without showing the main window.
+    pub autostart_minimized: bool,
 }
 
 fn default_language() -> String {
@@ -247,6 +259,10 @@ fn sanitize_list_col(value: u32, min: u32, fallback: u32) -> u32 {
     }
 }
 
+fn default_hotkey() -> String {
+    "ctrl+alt+f".to_string()
+}
+
 fn default_dup_exclude() -> Vec<String> {
     [
         "node_modules",
@@ -303,6 +319,12 @@ impl Default for Settings {
             dup_concurrency: 0,
             dup_max_mb_per_sec: 0,
             dup_exclude: default_dup_exclude(),
+            hotkey_enabled: false,
+            global_hotkey: default_hotkey(),
+            context_menu: false,
+            associate_folders: false,
+            autostart: false,
+            autostart_minimized: true,
         }
     }
 }
@@ -373,6 +395,10 @@ impl Settings {
         self.dup_concurrency = self.dup_concurrency.min(16);
         self.dup_max_mb_per_sec = self.dup_max_mb_per_sec.min(4096);
         self.dup_exclude.retain(|name| !name.trim().is_empty());
+        self.global_hotkey = self.global_hotkey.trim().to_ascii_lowercase();
+        if self.global_hotkey.is_empty() || self.global_hotkey.len() > 64 {
+            self.global_hotkey = default_hotkey();
+        }
         self
     }
 }
@@ -494,6 +520,24 @@ dup_exclude = [
   "Program Files",
   "Program Files (x86)",
 ]
+
+# 系统集成（全部写入 HKCU，可随时关闭；dev 构建使用独立命名空间）
+# system integration; every entry is user-level and reversible, dev builds use
+# their own key namespace
+# 全局热键开关与组合（至少一个 Ctrl/Alt/Shift）/ global hotkey switch and combination
+hotkey_enabled = false
+global_hotkey = "ctrl+alt+f"
+
+# 资源管理器右键菜单「用 FlowDir 打开」/ Explorer context menu entry
+context_menu = false
+
+# 在「打开方式」中提供文件夹和驱动器，不接管系统默认 / add folders and drives to
+# "Open with"; never claims the default verb
+associate_folders = false
+
+# 开机自启（HKCU Run）与启动时隐藏到托盘 / autostart and start minimized to the tray
+autostart = false
+autostart_minimized = true
 "#;
 
 /// On-disk shape: snake_case keys, no coupling to the camelCase IPC payload.
@@ -538,6 +582,12 @@ struct FileSettings {
     dup_concurrency: u32,
     dup_max_mb_per_sec: u32,
     dup_exclude: Vec<String>,
+    hotkey_enabled: bool,
+    global_hotkey: String,
+    context_menu: bool,
+    associate_folders: bool,
+    autostart: bool,
+    autostart_minimized: bool,
 }
 
 impl Default for FileSettings {
@@ -582,6 +632,12 @@ impl Default for FileSettings {
             dup_concurrency: base.dup_concurrency,
             dup_max_mb_per_sec: base.dup_max_mb_per_sec,
             dup_exclude: base.dup_exclude,
+            hotkey_enabled: base.hotkey_enabled,
+            global_hotkey: base.global_hotkey,
+            context_menu: base.context_menu,
+            associate_folders: base.associate_folders,
+            autostart: base.autostart,
+            autostart_minimized: base.autostart_minimized,
         }
     }
 }
@@ -627,6 +683,12 @@ impl From<FileSettings> for Settings {
             dup_concurrency: file.dup_concurrency,
             dup_max_mb_per_sec: file.dup_max_mb_per_sec,
             dup_exclude: file.dup_exclude,
+            hotkey_enabled: file.hotkey_enabled,
+            global_hotkey: file.global_hotkey,
+            context_menu: file.context_menu,
+            associate_folders: file.associate_folders,
+            autostart: file.autostart,
+            autostart_minimized: file.autostart_minimized,
         }
     }
 }
@@ -781,6 +843,28 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), A
         &mut doc,
         "dup_max_mb_per_sec",
         Value::from(settings.dup_max_mb_per_sec as i64),
+    );
+    set_value(
+        &mut doc,
+        "hotkey_enabled",
+        Value::from(settings.hotkey_enabled),
+    );
+    set_value(
+        &mut doc,
+        "global_hotkey",
+        Value::from(settings.global_hotkey.as_str()),
+    );
+    set_value(&mut doc, "context_menu", Value::from(settings.context_menu));
+    set_value(
+        &mut doc,
+        "associate_folders",
+        Value::from(settings.associate_folders),
+    );
+    set_value(&mut doc, "autostart", Value::from(settings.autostart));
+    set_value(
+        &mut doc,
+        "autostart_minimized",
+        Value::from(settings.autostart_minimized),
     );
 
     let mut exclude = toml_edit::Array::new();
