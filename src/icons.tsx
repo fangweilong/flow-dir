@@ -54,6 +54,34 @@ function extOf(name: string) {
   return i > 0 ? name.slice(i + 1).toLowerCase() : ''
 }
 
+/** Menu marks for FlowDir's own commands, drawn in the app accent so they stand apart
+ * from shell entries. Sized in ems to follow the row text. */
+export function FeatureIcon({ name }: { name: 'compare' | 'duplicate' }) {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      className="h-[1.1em] w-[1.1em] shrink-0 text-blue-500"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      {name === 'compare' ? (
+        <>
+          <rect x="2" y="3.5" width="5" height="9" rx="1" />
+          <rect x="9" y="3.5" width="5" height="9" rx="1" />
+        </>
+      ) : (
+        <>
+          <rect x="2" y="2" width="7" height="7" rx="1" />
+          <rect x="7" y="7" width="7" height="7" rx="1" />
+        </>
+      )}
+    </svg>
+  )
+}
+
 export function FileIcon({
   name,
   dir,

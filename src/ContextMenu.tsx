@@ -1,7 +1,16 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 
 export type MenuItem =
-  | { kind: 'item'; label: string; hint?: string; disabled?: boolean; danger?: boolean; onSelect: () => void }
+  | {
+      kind: 'item'
+      label: string
+      hint?: string
+      disabled?: boolean
+      danger?: boolean
+      /** FlowDir's own commands carry a mark; menus holding any icon reserve the gutter. */
+      icon?: ReactNode
+      onSelect: () => void
+    }
   | { kind: 'sep' }
 
 type Props = {
@@ -18,6 +27,8 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
   /** Enabled entries in DOM order; arrow keys walk this list, skips separators. */
   const entries = () =>
     Array.from(ref.current?.querySelectorAll<HTMLButtonElement>('[data-menu-item]:not(:disabled)') ?? [])
+  /** Icons share one left gutter; labels without a mark keep the same indent. */
+  const hasIcons = items.some((item) => item.kind === 'item' && item.icon)
 
   useLayoutEffect(() => {
     const el = ref.current
@@ -94,7 +105,10 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
               item.danger ? 'text-red-600 hover:bg-red-500/10 dark:text-red-400' : 'text-fg hover:bg-surface-3'
             }`}
           >
-            <span className="truncate">{item.label}</span>
+            <span className="flex min-w-0 items-center gap-2">
+              {hasIcons && <span className="grid w-[1.1em] shrink-0 place-items-center">{item.icon}</span>}
+              <span className="truncate">{item.label}</span>
+            </span>
             {item.hint && <span className="shrink-0 font-mono text-[0.625rem] text-muted-2">{item.hint}</span>}
           </button>
         ),

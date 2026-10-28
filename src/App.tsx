@@ -6,7 +6,7 @@ import { getCurrentWebview } from '@tauri-apps/api/webview'
 import iconUrl from './assets/icon.png'
 import { PaneView } from './PaneView'
 import type { MenuPoint } from './PaneView'
-import { refreshIconCache } from './icons'
+import { FeatureIcon, refreshIconCache } from './icons'
 import { ContextMenu } from './ContextMenu'
 import type { MenuItem } from './ContextMenu'
 import { OpsPanel } from './OpsPanel'
@@ -2881,9 +2881,15 @@ export default function App() {
             {
               kind: 'item',
               label: t('menu.findDuplicates'),
+              icon: <FeatureIcon name="duplicate" />,
               onSelect: () => setFileTools({ mode: 'dup', root: tab.path }),
             },
-            { kind: 'item', label: t('compare.entry'), onSelect: () => setCompareOpen(true) },
+            {
+              kind: 'item',
+              label: t('compare.entry'),
+              icon: <FeatureIcon name="compare" />,
+              onSelect: () => setCompareOpen(true),
+            },
           ]
         : [{ kind: 'item', label: t('menu.refresh'), hint: menuHint(keys.refresh), onSelect: () => manualRefresh() }]
       setMenu({ x: point.clientX, y: point.clientY, items })

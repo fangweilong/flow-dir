@@ -8,17 +8,28 @@
 use std::cell::RefCell;
 use std::ffi::{c_void, CString};
 use std::sync::mpsc;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde::Serialize;
-use windows::core::{w, Interface, HSTRING, PCSTR, PCWSTR, PSTR};
+use windows::core::{w, Interface, HSTRING, PCSTR, PCWSTR, PSTR, PWSTR};
 use windows::Win32::Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    DeleteObject, MonitorFromPoint, HBITMAP, HGDIOBJ, MONITOR_DEFAULTTONEAREST,
+};
+use windows::Win32::Graphics::GdiPlus::{
+    GdipCreateBitmapFromScan0, GdipCreateHBITMAPFromBitmap, GdipCreatePen1, GdipDeleteGraphics,
+    GdipDeletePen, GdipDisposeImage, GdipDrawRectangleI, GdipGetImageGraphicsContext,
+    GdipSetSmoothingMode, GdiplusStartup, GdiplusStartupInput, GpBitmap, GpGraphics, GpImage, GpPen,
+    SmoothingModeAntiAlias, Status, UnitPixel,
+};
 use windows::Win32::System::Com::{
     CoInitializeEx, CoTaskMemFree, CoUninitialize, IBindCtx, COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
-    SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    GetDpiForMonitor, GetSystemMetricsForDpi, SetThreadDpiAwarenessContext, MDT_EFFECTIVE_DPI,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Shell::{
     BHID_SFUIObject, IContextMenu, IContextMenu2, IContextMenu3, IShellFolder,
@@ -28,10 +39,11 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    GetMenuItemCount, GetMenuItemID, PostMessageW, RegisterClassW, SetForegroundWindow,
-    TrackPopupMenuEx, HMENU, MF_SEPARATOR, MF_STRING, SW_SHOWNORMAL, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, TPM_WORKAREA, WM_DRAWITEM, WM_INITMENUPOPUP, WM_MEASUREITEM, WM_MENUCHAR,
-    WM_NULL, WNDCLASSW, WS_POPUP,
+    GetMenuItemCount, GetMenuItemID, InsertMenuItemW, PostMessageW, RegisterClassW,
+    SetForegroundWindow, TrackPopupMenuEx, HMENU, MENUITEMINFOW, MF_SEPARATOR, MF_STRING, MFT_STRING,
+    MIIM_BITMAP, MIIM_ID, MIIM_STRING, SM_CXSMICON, SW_SHOWNORMAL, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TPM_WORKAREA, WM_DRAWITEM, WM_INITMENUPOPUP, WM_MEASUREITEM, WM_MENUCHAR, WM_NULL, WNDCLASSW,
+    WS_POPUP,
 };
 
 use crate::error::ApiError;
@@ -45,12 +57,133 @@ const ID_CUSTOM_FIND_DUPLICATES: u32 = 0xC001;
 const ID_CUSTOM_HASH: u32 = 0xC002;
 const ID_CUSTOM_COMPARE: u32 = 0xC003;
 
+/// GDI+'s `PixelFormat32bppARGB`; the crate exposes no constant for it.
+const PIXEL_FORMAT_32BPP_ARGB: i32 = 0x0026_200A;
+/// The app's accent (Tailwind blue-500 as ARGB), so FlowDir's entries share one mark.
+const GLYPH_COLOR: u32 = 0xFF3B_82F6;
+
 /// A FlowDir entry appended after the shell's own items. `action` is echoed to the
-/// frontend, which owns the actual command.
+/// frontend, which owns the actual command; `glyph` marks the app's own features so
+/// they do not read as one more shell verb.
 struct Extra<'a> {
     id: u32,
     label: &'a str,
     action: &'static str,
+    glyph: Option<MenuGlyph>,
+}
+
+#[derive(Clone, Copy)]
+enum MenuGlyph {
+    /// Two panels with a gap — the same mark the toolbar uses for compare.
+    Compare,
+    /// Two offset rectangles, read as "the same file twice".
+    Duplicates,
+}
+
+/// Keeps the menu bitmaps alive while the popup is on screen: the menu does not copy them.
+struct GlyphBitmaps(Vec<HBITMAP>);
+
+impl Drop for GlyphBitmaps {
+    fn drop(&mut self) {
+        unsafe {
+            for bitmap in &self.0 {
+                let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            }
+        }
+    }
+}
+
+/// GDI+ is initialised once per process; the token deliberately lives to process exit.
+fn gdiplus_ready() -> bool {
+    static READY: OnceLock<bool> = OnceLock::new();
+    *READY.get_or_init(|| unsafe {
+        let input = GdiplusStartupInput {
+            GdiplusVersion: 1,
+            ..Default::default()
+        };
+        let mut token = 0usize;
+        GdiplusStartup(&mut token, &input, std::ptr::null_mut()) == Status(0)
+    })
+}
+
+/// Renders `glyph` at `px` device pixels. Menu bitmaps are never DPI-scaled, so the
+/// caller derives `px` from the monitor the popup opens on.
+unsafe fn glyph_bitmap(glyph: MenuGlyph, px: i32) -> Option<HBITMAP> {
+    unsafe {
+        if !gdiplus_ready() {
+            return None;
+        }
+        let mut bitmap: *mut GpBitmap = std::ptr::null_mut();
+        if GdipCreateBitmapFromScan0(px, px, 0, PIXEL_FORMAT_32BPP_ARGB, None, &mut bitmap)
+            != Status(0)
+        {
+            return None;
+        }
+        let mut graphics: *mut GpGraphics = std::ptr::null_mut();
+        if GdipGetImageGraphicsContext(bitmap.cast::<GpImage>(), &mut graphics) != Status(0) {
+            let _ = GdipDisposeImage(bitmap.cast::<GpImage>());
+            return None;
+        }
+        let mut pen: *mut GpPen = std::ptr::null_mut();
+        let scale = px as f32 / 16.0;
+        if GdipCreatePen1(GLYPH_COLOR, 1.4 * scale, UnitPixel, &mut pen) == Status(0) {
+            let _ = GdipSetSmoothingMode(graphics, SmoothingModeAntiAlias);
+            // Coordinates come from the 16 px toolbar marks, scaled to the target size.
+            let at = |v: i32| (v as f32 * scale).round() as i32;
+            match glyph {
+                MenuGlyph::Compare => {
+                    let _ = GdipDrawRectangleI(graphics, pen, at(2), at(3), at(5), at(10));
+                    let _ = GdipDrawRectangleI(graphics, pen, at(9), at(3), at(5), at(10));
+                }
+                MenuGlyph::Duplicates => {
+                    let _ = GdipDrawRectangleI(graphics, pen, at(2), at(2), at(7), at(7));
+                    let _ = GdipDrawRectangleI(graphics, pen, at(7), at(7), at(7), at(7));
+                }
+            }
+            let _ = GdipDeletePen(pen);
+        }
+        let _ = GdipDeleteGraphics(graphics);
+        let mut hbmp = HBITMAP::default();
+        let status = GdipCreateHBITMAPFromBitmap(bitmap, &mut hbmp, 0);
+        let _ = GdipDisposeImage(bitmap.cast::<GpImage>());
+        (status == Status(0) && !hbmp.0.is_null()).then_some(hbmp)
+    }
+}
+
+/// Small icon metrics for the monitor under the popup, in physical pixels.
+unsafe fn glyph_size(x: i32, y: i32) -> i32 {
+    unsafe {
+        let monitor = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
+        let mut dpi = 96u32;
+        let mut ignored = 96u32;
+        let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi, &mut ignored);
+        GetSystemMetricsForDpi(SM_CXSMICON, dpi).max(16)
+    }
+}
+
+/// `AppendMenuW` cannot attach a bitmap to a text item, so extras are inserted with a
+/// `MENUITEMINFO`; the plain append stays as the fallback.
+unsafe fn insert_extra(menu: HMENU, extra: &Extra<'_>, bitmap: Option<HBITMAP>) {
+    unsafe {
+        let wide = HSTRING::from(extra.label);
+        let mut info = MENUITEMINFOW {
+            cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+            fMask: MIIM_ID | MIIM_STRING,
+            fType: MFT_STRING,
+            wID: extra.id,
+            dwTypeData: PWSTR(wide.as_ptr() as *mut u16),
+            cch: wide.len() as u32,
+            ..Default::default()
+        };
+        if let Some(bitmap) = bitmap {
+            info.fMask |= MIIM_BITMAP;
+            info.hbmpItem = bitmap;
+        }
+        let index = GetMenuItemCount(Some(menu)).max(0) as u32;
+        if InsertMenuItemW(menu, index, true, &info).is_err() {
+            let _ = AppendMenuW(menu, MF_STRING, extra.id as usize, &wide);
+        }
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -238,6 +371,7 @@ unsafe fn build_items(
                 id: ID_CUSTOM_HASH,
                 label,
                 action: "hash",
+                glyph: None,
             })
             .into_iter()
             .collect();
@@ -305,16 +439,19 @@ unsafe fn build_background(
                 id: ID_CUSTOM_FIND_DUPLICATES,
                 label: dup_label,
                 action: "findDuplicates",
+                glyph: Some(MenuGlyph::Duplicates),
             },
             Extra {
                 id: ID_CUSTOM_TOGGLE_HIDDEN,
                 label: toggle_label,
                 action: "toggleHidden",
+                glyph: None,
             },
             Extra {
                 id: ID_CUSTOM_COMPARE,
                 label: compare_label,
                 action: "compare",
+                glyph: Some(MenuGlyph::Compare),
             },
         ];
         let outcome = track(hwnd, &context, x, y, flags, &extras);
@@ -354,11 +491,16 @@ unsafe fn track(
             return Err(ApiError::new("SHELL_MENU", query.message()));
         }
 
+        let mut bitmaps = GlyphBitmaps(Vec::new());
         if !extras.is_empty() {
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            let size = glyph_size(x, y);
             for extra in extras {
-                let wide = HSTRING::from(extra.label);
-                let _ = AppendMenuW(menu, MF_STRING, extra.id as usize, &wide);
+                let bitmap = extra.glyph.and_then(|glyph| glyph_bitmap(glyph, size));
+                if let Some(bitmap) = bitmap {
+                    bitmaps.0.push(bitmap);
+                }
+                insert_extra(menu, extra, bitmap);
             }
         }
 
