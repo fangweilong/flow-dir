@@ -12,6 +12,8 @@ pub enum Format {
     Zip,
     SevenZ,
     Cab,
+    Rar,
+    Iso,
     Tar,
     TarGz,
     TarBz2,
@@ -33,7 +35,7 @@ impl Format {
 }
 
 /// Suffixes in longest-first order so `.tar.gz` is tested before `.gz`.
-const SUFFIXES: [(&str, Format); 17] = [
+const SUFFIXES: [(&str, Format); 20] = [
     (".tar.bz2", Format::TarBz2),
     (".tar.zst", Format::TarZst),
     (".tar.gz", Format::TarGz),
@@ -46,6 +48,9 @@ const SUFFIXES: [(&str, Format); 17] = [
     (".zip", Format::Zip),
     (".7z", Format::SevenZ),
     (".cab", Format::Cab),
+    (".rar", Format::Rar),
+    (".r00", Format::Rar),
+    (".iso", Format::Iso),
     (".bz2", Format::Bz2),
     (".zst", Format::Zst),
     (".gz", Format::Gz),
@@ -85,7 +90,8 @@ pub fn detect(path: &str) -> Option<Format> {
     if let Some(format) = from_name(name) {
         return Some(format);
     }
-    let mut head = [0u8; 512];
+    // ISO's volume descriptor sits at sector 16; the rest of the sniffers need 512 bytes.
+    let mut head = [0u8; 0x8800];
     let read = std::fs::File::open(path).ok()?.read(&mut head).ok()?;
     let bytes = &head[..read];
     if bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06") {
@@ -96,6 +102,12 @@ pub fn detect(path: &str) -> Option<Format> {
     }
     if bytes.starts_with(b"MSCF") {
         return Some(Format::Cab);
+    }
+    if bytes.starts_with(b"Rar!\x1a\x07") {
+        return Some(Format::Rar);
+    }
+    if bytes.len() > 0x8006 && &bytes[0x8001..0x8006] == b"CD001" {
+        return Some(Format::Iso);
     }
     if bytes.starts_with(b"\x1f\x8b") {
         return Some(Format::Gz);
@@ -128,7 +140,8 @@ mod tests {
         assert_eq!(from_name("a.zst"), Some(Format::Zst));
         assert_eq!(from_name("a.7z"), Some(Format::SevenZ));
         assert_eq!(from_name("a.CAB"), Some(Format::Cab));
-        assert_eq!(from_name("a.rar"), None);
+        assert_eq!(from_name("a.rar"), Some(Format::Rar));
+        assert_eq!(from_name("a.ISO"), Some(Format::Iso));
         assert_eq!(from_name("a.txt"), None);
     }
 

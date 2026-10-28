@@ -8,10 +8,13 @@ type Props = {
   lang: Lang
   onConfirm: (value: string) => void
   onClose: () => void
+  /** Masks input and skips the filename selection range; used for archive passwords. */
+  password?: boolean
+  hint?: string
 }
 
 /** Small modal used for rename / new-folder name entry. */
-export function PromptDialog({ title, initial, lang, onConfirm, onClose }: Props) {
+export function PromptDialog({ title, initial, lang, onConfirm, onClose, password, hint }: Props) {
   const t = makeT(lang)
   const [value, setValue] = useState(initial)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -20,6 +23,7 @@ export function PromptDialog({ title, initial, lang, onConfirm, onClose }: Props
     const input = inputRef.current
     if (!input) return
     input.focus()
+    if (password) return
     const dot = initial.lastIndexOf('.')
     input.setSelectionRange(0, dot > 0 ? dot : initial.length)
   }, [initial])
@@ -43,9 +47,11 @@ export function PromptDialog({ title, initial, lang, onConfirm, onClose }: Props
     >
       <div className="w-[23.75rem] rounded-lg border border-line bg-surface p-3 shadow-2xl">
         <div className="pb-2 text-[0.75rem] font-semibold text-fg-strong">{title}</div>
+        {hint && <div className="pb-1.5 text-[0.6875rem] text-muted">{hint}</div>}
         <input
           data-prompt-input
           ref={inputRef}
+          type={password ? 'password' : 'text'}
           value={value}
           onChange={(ev) => setValue(ev.target.value)}
           onKeyDown={(ev) => {

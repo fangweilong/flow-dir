@@ -73,6 +73,63 @@ impl Progress {
     }
 }
 
+/// Counting writer shared by [`Sink::write_with`]: every byte still passes the cancel
+/// token, the free-space budget and the declared-size check, even when a backend decodes
+/// straight into the destination.
+pub(crate) struct Guarded<'a> {
+    file: File,
+    written: u64,
+    declared: u64,
+    budget_left: u64,
+    cancel: &'a AtomicBool,
+    cancelled: bool,
+    over_budget: bool,
+    over_size: bool,
+}
+
+struct GuardedOutcome {
+    written: u64,
+    cancelled: bool,
+    over_budget: bool,
+    over_size: bool,
+}
+
+impl Guarded<'_> {
+    fn finish(self) -> GuardedOutcome {
+        GuardedOutcome {
+            written: self.written,
+            cancelled: self.cancelled,
+            over_budget: self.over_budget,
+            over_size: self.over_size,
+        }
+    }
+}
+
+impl Write for Guarded<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.cancel.load(Ordering::Relaxed) {
+            self.cancelled = true;
+            return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "canceled"));
+        }
+        let next = self.written + buf.len() as u64;
+        if next > self.budget_left {
+            self.over_budget = true;
+            return Err(std::io::Error::other("no space"));
+        }
+        if self.declared > 0 && next > self.declared {
+            self.over_size = true;
+            return Err(std::io::Error::other("declared size exceeded"));
+        }
+        let written = self.file.write(buf)?;
+        self.written += written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
 pub struct Sink {
     temp: PathBuf,
     dest: PathBuf,
@@ -265,6 +322,68 @@ impl Sink {
             ));
             return Ok(());
         }
+        Ok(())
+    }
+
+    /// Streams one file entry pushed by a backend that hands over a writer instead of a
+    /// reader (rar and iso decode straight into the destination). Limits, cancellation
+    /// and the size checks still run through [`Guarded`], so they cannot be skipped.
+    pub fn write_with<F>(&mut self, path: &Path, declared: u64, produce: F) -> Result<(), ApiError>
+    where
+        F: FnOnce(&mut Guarded<'_>) -> Result<(), ApiError>,
+    {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| self.abort_io(path, &e))?;
+        }
+        let file = match File::create(path) {
+            Ok(file) => file,
+            Err(err) => {
+                self.skip_current(&ApiError::from_io(&display(path), &err));
+                return Ok(());
+            }
+        };
+        let budget_left = self.budget.saturating_sub(self.progress.bytes);
+        let mut guard = Guarded {
+            file,
+            written: 0,
+            declared,
+            budget_left,
+            cancel: &self.cancel,
+            cancelled: false,
+            over_budget: false,
+            over_size: false,
+        };
+        let result = produce(&mut guard);
+        let outcome = guard.finish();
+        self.progress.bytes += outcome.written;
+        if outcome.cancelled {
+            let _ = fs::remove_file(path);
+            return Err(ApiError::new("CANCELED", "extraction canceled"));
+        }
+        if outcome.over_budget {
+            let _ = fs::remove_file(path);
+            return Err(ApiError::new("NOT_ENOUGH_SPACE", "destination drive is full"));
+        }
+        if outcome.over_size {
+            let _ = fs::remove_file(path);
+            return Err(ApiError::new(
+                "TOO_LARGE",
+                format!("{} exceeds its declared size", self.current.as_deref().unwrap_or("entry")),
+            ));
+        }
+        if let Err(err) = result {
+            let _ = fs::remove_file(path);
+            return Err(err);
+        }
+        if declared > 0 && outcome.written != declared {
+            let _ = fs::remove_file(path);
+            self.skip_current(&ApiError::new(
+                "CORRUPT",
+                format!("expected {declared} bytes, decoded {}", outcome.written),
+            ));
+            return Ok(());
+        }
+        self.progress.tick(self.current.clone());
         Ok(())
     }
 

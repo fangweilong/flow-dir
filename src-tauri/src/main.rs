@@ -543,9 +543,10 @@ fn archive_extract(
     job_id: String,
     archive: String,
     dest: String,
+    password: Option<String>,
     on_progress: Channel<ops::OpProgress>,
 ) -> Result<(), ApiError> {
-    archive::start(&state, job_id, archive, dest, on_progress)
+    archive::start(&state, job_id, archive, dest, password, on_progress)
 }
 
 /// Starts a checksum job; progress arrives on the channel and `tool_cancel` stops it.

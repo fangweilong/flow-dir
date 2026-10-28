@@ -219,6 +219,12 @@ export default function App() {
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null)
   /** Archive waiting for a destination from the in-app folder picker. */
   const [extractTarget, setExtractTarget] = useState<{ archive: string; initial: string } | null>(null)
+  /** Archive whose password the backend asked for, with the destination to retry. */
+  const [passwordPrompt, setPasswordPrompt] = useState<{
+    archive: string
+    dest: string
+    wrong: boolean
+  } | null>(null)
   const [prompt, setPrompt] = useState<{
     paneId: string
     title: string
@@ -2129,7 +2135,7 @@ export default function App() {
    * job lives in the backend's op state, so the existing cancel button stops it.
    */
   const extractArchive = useCallback(
-    (archive: string, dest: string) => {
+    (archive: string, dest: string, password?: string) => {
       const opId = `extract-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
       setOps((prev) => ({
         ...prev,
@@ -2156,11 +2162,17 @@ export default function App() {
             return next
           })
         }, delay)
-      archiveExtract(opId, archive, dest, (progress) => {
+      archiveExtract(opId, archive, dest, password ?? null, (progress) => {
         setOps((prev) => (prev[opId] ? { ...prev, [opId]: progress } : prev))
         if (!progress.done) return
         if (progress.error) {
-          showToast(t('op.failed', { code: progress.error.code }))
+          const code = progress.error.code
+          if (code === 'PASSWORD_REQUIRED' || code === 'WRONG_PASSWORD') {
+            setPasswordPrompt({ archive, dest, wrong: code === 'WRONG_PASSWORD' })
+            drop(3000)
+            return
+          }
+          showToast(t('op.failed', { code }))
           drop(5000)
           return
         }
@@ -3950,6 +3962,26 @@ export default function App() {
       )}
 
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
+
+      {passwordPrompt && (
+        <PromptDialog
+          title={t('archive.passwordTitle')}
+          initial=""
+          password
+          hint={
+            passwordPrompt.wrong
+              ? t('archive.passwordWrong')
+              : t('archive.passwordHint', { name: baseName(passwordPrompt.archive) })
+          }
+          lang={lang}
+          onConfirm={(value) => {
+            const pending = passwordPrompt
+            setPasswordPrompt(null)
+            extractArchive(pending.archive, pending.dest, value)
+          }}
+          onClose={() => setPasswordPrompt(null)}
+        />
+      )}
 
       {extractTarget && (
         <FolderPickerDialog

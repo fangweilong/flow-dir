@@ -38,6 +38,15 @@ const RESERVED: [&str; 24] = [
 /// is tried (what WinRAR/7-Zip do for names produced on a localized Windows) and CP437 is
 /// the last resort the zip specification itself names.
 pub fn decode(raw: &[u8], utf8_flag: bool) -> Result<String, ApiError> {
+    decode_with(raw, utf8_flag, false)
+}
+
+/// RAR stores path separators as `\`; every other backend in this crate uses `/`.
+pub fn decode_rar(raw: &[u8], utf8_flag: bool) -> Result<String, ApiError> {
+    decode_with(raw, utf8_flag, true)
+}
+
+fn decode_with(raw: &[u8], utf8_flag: bool, backslash: bool) -> Result<String, ApiError> {
     if raw.starts_with(b"/") || raw.starts_with(b"\\") {
         return Err(ApiError::new("UNSAFE_PATH", "absolute entry name"));
     }
@@ -45,7 +54,8 @@ pub fn decode(raw: &[u8], utf8_flag: bool) -> Result<String, ApiError> {
         return Err(ApiError::new("UNSAFE_PATH", "NUL in entry name"));
     }
     let mut segments = Vec::new();
-    for part in raw.split(|byte| *byte == b'/') {
+    let is_separator = |byte: &u8| *byte == b'/' || (backslash && *byte == b'\\');
+    for part in raw.split(is_separator) {
         if part.is_empty() {
             // `a//b` and a trailing `/` (directory marker) are harmless.
             continue;

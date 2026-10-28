@@ -42,6 +42,7 @@ pub fn start(
     job_id: String,
     archive: String,
     dest: String,
+    password: Option<String>,
     channel: Channel<OpProgress>,
 ) -> Result<(), ApiError> {
     if !Path::new(&archive).is_file() {
@@ -57,7 +58,7 @@ pub fn start(
     std::thread::Builder::new()
         .name(format!("flowdir-extract-{job_id}"))
         .spawn(move || {
-            run(job_id.clone(), archive, dest, token, channel);
+            run(job_id.clone(), archive, dest, password, token, channel);
             state.finish_external(&job_id);
         })
         .map(|_| ())
@@ -69,6 +70,7 @@ fn run(
     job_id: String,
     archive: String,
     dest: String,
+    password: Option<String>,
     cancel: Arc<AtomicBool>,
     channel: Channel<OpProgress>,
 ) -> OpProgress {
@@ -96,7 +98,8 @@ fn run(
         }
     };
 
-    let result = backends::extract(&archive, &mut sink).and_then(|_| sink.merge());
+    let result =
+        backends::extract(&archive, &mut sink, password.as_deref()).and_then(|_| sink.merge());
     let aborted = matches!(&result, Err(err) if err.code == "CANCELED");
     let error = match result {
         Ok(()) if sink.failed_total() > 0 => {
@@ -158,10 +161,15 @@ mod tests {
     }
 
     fn extract(archive: &Path, dest: &Path) -> OpProgress {
+        extract_with(archive, dest, None)
+    }
+
+    fn extract_with(archive: &Path, dest: &Path, password: Option<&str>) -> OpProgress {
         run(
             "test-job".into(),
             archive.to_string_lossy().into_owned(),
             dest.to_string_lossy().into_owned(),
+            password.map(str::to_string),
             Arc::new(AtomicBool::new(false)),
             Channel::new(|_| Ok(())),
         )
@@ -272,6 +280,73 @@ mod tests {
     }
 
     #[test]
+    fn rar_extracts_and_asks_for_a_password() {
+        let dir = temp_dir("rar");
+        let plain = dir.join("plain.rar");
+        std::fs::write(&plain, include_bytes!("../../tests/data/rar4.rar")).unwrap();
+        let dest = dir.join("out");
+        let progress = extract(&plain, &dest);
+        assert!(progress.error.is_none(), "{:?}", progress.error);
+        assert_eq!(std::fs::read(dest.join("test.txt")).unwrap().len(), 20);
+        assert_eq!(std::fs::read(dest.join("testdir\\test.txt")).unwrap().len(), 20);
+        assert!(dest.join("testemptydir").is_dir());
+        // `testlink` is a symlink member and must be reported, not materialised.
+        assert_eq!(progress.failed_count, 1);
+
+        let encrypted = dir.join("enc.rar");
+        std::fs::write(&encrypted, include_bytes!("../../tests/data/rar_enc.rar")).unwrap();
+        let locked = dir.join("locked");
+        let progress = extract(&encrypted, &locked);
+        let error = progress.error.expect("password must be requested");
+        assert_eq!(error.code, "PASSWORD_REQUIRED");
+        let left = std::fs::read_dir(&locked).map(|mut it| it.next().is_none()).unwrap_or(true);
+        assert!(left, "nothing may be written before the password is known");
+
+        let dest = dir.join("unlocked");
+        let progress = extract_with(&encrypted, &dest, Some("12345678"));
+        assert!(progress.error.is_none(), "{:?}", progress.error);
+        assert_eq!(std::fs::read(dest.join("foo.txt")).unwrap().len(), 16);
+        assert_eq!(std::fs::read(dest.join("bar.txt")).unwrap().len(), 16);
+
+        let wrong = extract_with(&encrypted, dir.join("wrong").as_path(), Some("bad"));
+        let wrong_error = wrong.error.expect("wrong password");
+        assert_eq!(wrong_error.code, "WRONG_PASSWORD", "{wrong_error:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn encrypted_zip_needs_the_right_password() {
+        let dir = temp_dir("enc-zip");
+        let archive = dir.join("secret.zip");
+        let file = std::fs::File::create(&archive).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .with_aes_encryption(zip::AesMode::Aes256, "hunter2");
+        writer.start_file("secret.txt", options).unwrap();
+        writer.write_all(b"top secret").unwrap();
+        writer.finish().unwrap();
+
+        let locked = dir.join("locked");
+        assert_eq!(
+            extract(&archive, &locked).error.expect("password").code,
+            "PASSWORD_REQUIRED"
+        );
+        let dest = dir.join("out");
+        let progress = extract_with(&archive, &dest, Some("hunter2"));
+        assert!(progress.error.is_none(), "{:?}", progress.error);
+        assert_eq!(std::fs::read(dest.join("secret.txt")).unwrap(), b"top secret");
+        assert_eq!(
+            extract_with(&archive, dir.join("bad").as_path(), Some("nope"))
+                .error
+                .expect("wrong password")
+                .code,
+            "WRONG_PASSWORD"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn start_extracts_on_a_background_thread() {
         let dir = temp_dir("start");
         let archive = dir.join("job.zip");
@@ -290,6 +365,7 @@ mod tests {
             "start-job".into(),
             archive.to_string_lossy().into_owned(),
             dest.to_string_lossy().into_owned(),
+            None,
             Channel::new(|_| Ok(())),
         )
         .unwrap();

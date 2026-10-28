@@ -102,11 +102,12 @@ export function archiveExtract(
   jobId: string,
   archive: string,
   dest: string,
+  password: string | null,
   onProgress: (progress: OpProgress) => void,
 ) {
   const channel = new Channel<OpProgress>()
   channel.onmessage = onProgress
-  return invoke<void>('archive_extract', { jobId, archive, dest, onProgress: channel })
+  return invoke<void>('archive_extract', { jobId, archive, dest, password, onProgress: channel })
 }
 
 /** Streaming SHA-256/SHA-1/MD5 over the given paths; results arrive with the final message. */
