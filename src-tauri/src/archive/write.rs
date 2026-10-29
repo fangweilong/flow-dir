@@ -346,6 +346,16 @@ fn pump(
     Ok(())
 }
 
+/// Backends report their own error type, so a cancel only shows up as a generic failure;
+/// the token tells the two apart before the job is reported to the user.
+fn stopped(err: impl std::fmt::Display, cancel: &AtomicBool) -> ApiError {
+    if cancel.load(Ordering::Relaxed) {
+        ApiError::new("CANCELED", err.to_string())
+    } else {
+        ApiError::new("ARCHIVE", err.to_string())
+    }
+}
+
 fn write_archive(
     format: Format,
     tmp: &Path,
@@ -396,7 +406,7 @@ fn write_zip(
         progress.current = Some(source.name.clone());
         if source.dir {
             zip.add_directory(format!("{}/", source.name), options(CompressionMethod::Stored, false))
-                .map_err(|err| ApiError::new("ARCHIVE", err.to_string()))?;
+                .map_err(|err| stopped(err, cancel))?;
             progress.entries += 1;
             progress.tick();
             continue;
@@ -409,15 +419,13 @@ fn write_zip(
             CompressionMethod::Deflated
         };
         zip.start_file(&source.name, options(method, large))
-            .map_err(|err| ApiError::new("ARCHIVE", err.to_string()))?;
+            .map_err(|err| stopped(err, cancel))?;
         let mut file = File::open(&source.disk)
             .map_err(|err| ApiError::from_io(&source.disk.display().to_string(), &err))?;
         pump(&mut file, &mut zip, source.size, progress, cancel, &source.name)?;
         progress.entries += 1;
     }
-    let mut file = zip
-        .finish()
-        .map_err(|err| ApiError::new("ARCHIVE", err.to_string()))?;
+    let mut file = zip.finish().map_err(|err| stopped(err, cancel))?;
     file.flush().map_err(|err| ApiError::new("WRITE", err.to_string()))?;
     Ok(())
 }
@@ -453,14 +461,14 @@ fn write_sevenz(
         if source.dir {
             writer
                 .push_archive_entry::<io::Empty>(entry, None)
-                .map_err(|err| ApiError::new("ARCHIVE", err.to_string()))?;
+                .map_err(|err| stopped(err, cancel))?;
         } else {
             let file = File::open(&source.disk)
                 .map_err(|err| ApiError::from_io(&source.disk.display().to_string(), &err))?;
             let mut limited = Counted::new(file, source.size, cancel, progress)?;
             writer
                 .push_archive_entry(entry, Some(&mut limited))
-                .map_err(|err| ApiError::new("ARCHIVE", err.to_string()))?;
+                .map_err(|err| stopped(err, cancel))?;
             limited.finish(&source.name)?;
         }
         progress.entries += 1;
@@ -513,7 +521,7 @@ fn write_tar(
             header.set_mode(0o755);
             builder
                 .append_data(&mut header, format!("{}/", source.name), io::empty())
-                .map_err(|err| ApiError::new("ARCHIVE", err.to_string()))?;
+                .map_err(|err| stopped(err, cancel))?;
             progress.entries += 1;
             progress.tick();
             continue;
@@ -528,7 +536,7 @@ fn write_tar(
         let mut limited = Counted::new(file, source.size, cancel, progress)?;
         builder
             .append_data(&mut header, &source.name, &mut limited)
-            .map_err(|err| ApiError::new("ARCHIVE", err.to_string()))?;
+            .map_err(|err| stopped(err, cancel))?;
         limited.finish(&source.name)?;
         progress.entries += 1;
     }
@@ -854,6 +862,15 @@ mod tests {
             "entries were counted: {last}"
         );
         let _ = fs::remove_dir_all(&src);
+    }
+
+    #[test]
+    fn a_cancel_is_not_reported_as_a_corrupt_archive() {
+        let token = AtomicBool::new(false);
+        assert_eq!(stopped("boom", &token).code, "ARCHIVE");
+        // 7z and tar report a cancel as a decode error; the token is what distinguishes it.
+        token.store(true, Ordering::Relaxed);
+        assert_eq!(stopped("boom", &token).code, "CANCELED");
     }
 
     #[test]
