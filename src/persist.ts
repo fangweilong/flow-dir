@@ -53,6 +53,11 @@ export type Settings = {
   listColType: boolean
   /** File-list "modified" column visibility. */
   listColTime: boolean
+  /**
+   * File-list name column width in px at the default font size; `0` fills the pane.
+   * A frozen width leaves the rest of the row blank for folder-menu clicks.
+   */
+  listNameWidth: number
   /** File-list "size" column width in px at the default font size; drag-resizable. */
   listSizeWidth: number
   /** File-list "type" column width in px at the default font size; drag-resizable. */
@@ -125,6 +130,7 @@ export const DEFAULT_SETTINGS: Settings = {
   listColSize: true,
   listColType: true,
   listColTime: true,
+  listNameWidth: 0,
   listSizeWidth: 96,
   listTypeWidth: 88,
   listTimeWidth: 142,

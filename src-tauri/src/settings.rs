@@ -105,6 +105,9 @@ pub struct Settings {
     pub nav_font_family: String,
     /// Navigation-bar font size in px; drives its controls.
     pub nav_font_size: u32,
+    /// File-list name column width in px at the default font size; `0` fills the pane and
+    /// leaves no gutter, any other value leaves the rest of the row blank.
+    pub list_name_width: u32,
     /// File-list size column width in px at the default font size; drag-resizable.
     pub list_size_width: u32,
     /// File-list modified column width in px at the default font size; drag-resizable.
@@ -183,6 +186,11 @@ fn default_nav_font_size() -> u32 {
     12
 }
 
+/// `0` means "fill the pane"; the list then has no blank gutter on the right.
+fn default_list_name_width() -> u32 {
+    0
+}
+
 fn default_list_size_width() -> u32 {
     96
 }
@@ -216,6 +224,8 @@ const LIST_TIME_MIN: u32 = 84;
 const DRIVE_CAPACITY_MIN: u32 = 120;
 const DRIVE_FREE_MIN: u32 = 56;
 const LIST_COL_MAX: u32 = 480;
+/// The name column may be dragged narrower than a file name is long, but not past this.
+const NAME_COL_MIN: u32 = 140;
 
 /// A font family, not a stack: quotes, commas and separators would change the generated
 /// CSS or let a hand-edited file break out of the property.
@@ -260,6 +270,16 @@ fn sanitize_region_font_size(value: u32, fallback: u32) -> u32 {
         value
     } else {
         fallback
+    }
+}
+
+/// `0` keeps the fill-the-pane behaviour; a dragged width is clamped so the header label
+/// and a few characters of the name stay readable.
+fn sanitize_name_col(value: u32) -> u32 {
+    if value == 0 {
+        0
+    } else {
+        value.clamp(NAME_COL_MIN, LIST_COL_MAX)
     }
 }
 
@@ -317,6 +337,7 @@ impl Default for Settings {
             list_font_size: default_list_font_size(),
             nav_font_family: String::new(),
             nav_font_size: default_nav_font_size(),
+            list_name_width: default_list_name_width(),
             list_size_width: default_list_size_width(),
             list_time_width: default_list_time_width(),
             drive_capacity_width: default_drive_capacity_width(),
@@ -384,6 +405,7 @@ impl Settings {
         self.list_font_size = sanitize_region_font_size(self.list_font_size, default_list_font_size());
         self.nav_font_family = sanitize_region_font_family(&self.nav_font_family);
         self.nav_font_size = sanitize_region_font_size(self.nav_font_size, default_nav_font_size());
+        self.list_name_width = sanitize_name_col(self.list_name_width);
         self.list_size_width = sanitize_list_col(
             self.list_size_width,
             LIST_COL_MIN,
@@ -470,6 +492,9 @@ preview_width = 320
 list_col_size = true
 list_col_type = true
 list_col_time = true
+# 名称列宽（像素，0 = 铺满可用宽度；拖表头右端分隔线调整）
+# name column width in px; 0 fills the pane, drag the divider at the row's right edge
+list_name_width = 0
 list_size_width = 96
 list_type_width = 88
 list_time_width = 142
@@ -589,6 +614,7 @@ struct FileSettings {
     list_font_size: u32,
     nav_font_family: String,
     nav_font_size: u32,
+    list_name_width: u32,
     list_size_width: u32,
     list_time_width: u32,
     drive_capacity_width: u32,
@@ -643,6 +669,7 @@ impl Default for FileSettings {
             list_font_size: base.list_font_size,
             nav_font_family: base.nav_font_family,
             nav_font_size: base.nav_font_size,
+            list_name_width: base.list_name_width,
             list_size_width: base.list_size_width,
             list_time_width: base.list_time_width,
             drive_capacity_width: base.drive_capacity_width,
@@ -698,6 +725,7 @@ impl From<FileSettings> for Settings {
             list_font_size: file.list_font_size,
             nav_font_family: file.nav_font_family,
             nav_font_size: file.nav_font_size,
+            list_name_width: file.list_name_width,
             list_size_width: file.list_size_width,
             list_time_width: file.list_time_width,
             drive_capacity_width: file.drive_capacity_width,
@@ -1136,6 +1164,24 @@ mod tests {
             }
             .normalize();
             assert_eq!(parsed.list_time_width, 142, "{bad}");
+        }
+    }
+
+    #[test]
+    fn name_column_width_fills_by_default_and_clamps() {
+        assert_eq!(Settings::default().list_name_width, 0);
+        let legacy: FileSettings = toml_edit::de::from_str("language = \"en\"").unwrap();
+        assert_eq!(legacy.list_name_width, 0);
+        let parsed: FileSettings = toml_edit::de::from_str("list_name_width = 260").unwrap();
+        assert_eq!(Settings::from(parsed).normalize().list_name_width, 260);
+        for (bad, want) in [(1u32, 140u32), (139, 140), (481, 480), (u32::MAX, 480)] {
+            let got = Settings {
+                list_name_width: bad,
+                ..Settings::default()
+            }
+            .normalize()
+            .list_name_width;
+            assert_eq!(got, want, "{bad}");
         }
     }
 

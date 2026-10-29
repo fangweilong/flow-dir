@@ -98,6 +98,10 @@ type Props = {
   showColType: boolean
   /** File-list "modified" column switch. */
   showColTime: boolean
+  /** Stored name column width in px at the base font size; `0` fills the pane. */
+  listNameWidth: number
+  /** Persists the name column width after a drag; `0` restores the fill-the-pane layout. */
+  onListNameWidth: (px: number) => void
   /** Stored "size" column width in px at the base font size; shared by every pane. */
   colSize: number
   /** Stored "type" column width in px at the base font size; shared by every pane. */
@@ -176,6 +180,8 @@ export function PaneView({
   showColSize,
   showColType,
   showColTime,
+  listNameWidth,
+  onListNameWidth,
   colSize,
   colType,
   colTime,
@@ -240,6 +246,8 @@ export function PaneView({
     capacity: number
     free: number
   } | null>(null)
+  /** Live name-column width while the row's right edge is dragged. */
+  const [nameDraft, setNameDraft] = useState<number | null>(null)
   /** Full-path editor: the draft text, whether the last Enter missed, and its request token. */
   const [addressDraft, setAddressDraft] = useState<string | null>(null)
   const [addressBad, setAddressBad] = useState(false)
@@ -336,9 +344,22 @@ export function PaneView({
   const timeCol = Math.max(minTimeCol, wantTime)
   // Rows carry `pr-1.5` that the header repeats, so the scroll range covers both without
   // clipping the last column; `0.375rem` is that padding at the root font size.
-  const listWidth =
-    nameMin + (showSize ? sizeCol : 0) + (showType ? typeCol : 0) + (showTime ? timeCol : 0)
+  const columnsWidth = (showSize ? sizeCol : 0) + (showType ? typeCol : 0) + (showTime ? timeCol : 0)
+  /**
+   * A dragged name width freezes the row at that many pixels: the rest of the pane stays
+   * blank, so right-clicking it reaches the folder menu instead of a row. `0` keeps the
+   * name flexible and lets the rows fill the pane.
+   */
+  const nameWidth =
+    nameDraft !== null
+      ? Math.max(nameMin, Math.round(nameDraft))
+      : listNameWidth > 0
+        ? Math.max(nameMin, Math.round(listNameWidth * listScale))
+        : 0
+  const listWidth = (nameWidth || nameMin) + columnsWidth
   const listMinWidth = `calc(${listWidth}px + 0.375rem)`
+  /** Row and header width; the blank gutter only exists when the name width is frozen. */
+  const listSpan = nameWidth > 0 ? listMinWidth : undefined
   const showFilter = width === 0 || width >= Math.round(MIN_WIDTH_FILTER * listScale)
   // The overview drops the label column first, then the capacity pair, the same way the
   // file list drops size and modified time on a narrow pane.
@@ -369,7 +390,7 @@ export function PaneView({
     ...(showDriveCapacity ? [`${capacityCol}px`, `${freeCol}px`] : []),
   ].join(' ')
   const grid = [
-    `minmax(${nameMin}px, 1fr)`,
+    nameWidth > 0 ? `${nameWidth}px` : `minmax(${nameMin}px, 1fr)`,
     showSize && `${sizeCol}px`,
     showType && `${typeCol}px`,
     showTime && `${timeCol}px`,
@@ -579,6 +600,45 @@ export function PaneView({
     }
     const widths = { ...stored, [key]: defaults[key] }
     onColWidths(widths.size, widths.type, widths.time, widths.capacity, widths.free)
+  }
+
+  /**
+   * Drags the row's right edge. Only the name column moves, so the fixed columns keep their
+   * widths and the freed pixels become the blank gutter. Snapping to the pane's edge writes
+   * `0` back, which returns to the fill-the-pane layout.
+   */
+  const startNameDrag = (ev: React.PointerEvent<HTMLSpanElement>) => {
+    ev.preventDefault()
+    ev.stopPropagation()
+    onFocusPane()
+    const startX = ev.clientX
+    const head = headerRef.current?.firstElementChild as HTMLElement | null
+    const startName = nameWidth || Math.max(nameMin, Math.round(head?.getBoundingClientRect().width ?? nameMin))
+    const paneWidth = scrollRef.current?.clientWidth ?? width
+    // The furthest the name can grow is the pane's inner width; a wider stored value keeps
+    // scrolling horizontally, exactly like the other columns.
+    const maxName = Math.max(startName, paneWidth - columnsWidth - 6)
+    let next = startName
+    let moved = false
+    const move = (e: PointerEvent) => {
+      // The handle governs the column to its left: dragging left narrows the name column
+      // and leaves the freed pixels as the blank gutter.
+      next = Math.min(maxName, Math.max(nameMin, startName + (e.clientX - startX)))
+      if (Math.abs(e.clientX - startX) > 1) moved = true
+      setNameDraft(next)
+    }
+    const end = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', end)
+      window.removeEventListener('pointercancel', end)
+      setNameDraft(null)
+      if (!moved) return
+      const filled = next >= maxName - 1
+      onListNameWidth(filled ? 0 : Math.round(next / listScale))
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', end)
+    window.addEventListener('pointercancel', end)
   }
 
   /** Opens the full-path editor; Ctrl+L uses it even at the drive overview. */
@@ -1209,11 +1269,14 @@ export function PaneView({
       </div>
 
       {!root && (
-        <div className="shrink-0 overflow-hidden" style={{ height: headerHeight, marginRight: gutter }}>
+        <div
+          className="relative shrink-0 overflow-hidden"
+          style={{ height: headerHeight, marginRight: gutter }}
+        >
           <div
             ref={headerRef}
-            className="typo-list grid h-full items-center border-b border-line bg-surface-2 pr-1.5 text-muted"
-            style={{ gridTemplateColumns: grid, minWidth: listMinWidth }}
+            className="typo-list relative grid h-full items-center border-b border-line bg-surface-2 pr-1.5 text-muted"
+            style={{ gridTemplateColumns: grid, minWidth: listMinWidth, width: listSpan }}
           >
             <HeaderCell label={t('list.name')} k="name" sort={pane.sort} onSort={changeSort} align="left" />
             {showSize && (
@@ -1247,6 +1310,19 @@ export function PaneView({
               </div>
             )}
           </div>
+          {/* Pinned to the row's right edge, or to the visible edge while the list scrolls
+              horizontally, so the handle is always reachable. */}
+          <span
+            role="separator"
+            aria-orientation="vertical"
+            aria-label={t('list.nameWidth')}
+            title={t('list.nameWidthHint')}
+            data-gutter-handle
+            onPointerDown={startNameDrag}
+            onDoubleClick={() => onListNameWidth(0)}
+            style={{ left: nameWidth > 0 ? `min(${listMinWidth}, 100%)` : '100%' }}
+            className="absolute inset-y-0 z-10 w-1.5 -translate-x-full cursor-col-resize touch-none select-none hover:bg-blue-400/60 active:bg-blue-500"
+          />
         </div>
       )}
 
@@ -1325,6 +1401,9 @@ export function PaneView({
         }}
         data-drop-dir={tab?.path || undefined}
         className="typo-list relative min-h-0 flex-1 overflow-auto outline-none"
+        // Blank strip under the last row: the container is the click target there, so a
+        // right-click reaches the folder menu even when the list fills the pane.
+        style={{ paddingBottom: rowHeight * 2 }}
       >
         <input
           ref={typeAheadRef}
@@ -1424,7 +1503,8 @@ export function PaneView({
           </div>
         )}
 
-        {!root && <div style={{ height: virtualizer.getTotalSize(), position: 'relative', minWidth: listMinWidth }}>
+        {!root && (
+        <div style={{ height: virtualizer.getTotalSize(), position: 'relative', minWidth: listMinWidth, width: listSpan }}>
           {virtualizer.getVirtualItems().map((vi) => {
             const entry = view[vi.index]
             if (!entry) return null
@@ -1490,7 +1570,8 @@ export function PaneView({
               </div>
             )
           })}
-        </div>}
+        </div>
+        )}
 
         {!root && !list.error && !view.length && (
           <div className="grid h-full place-items-center text-center text-muted-2">

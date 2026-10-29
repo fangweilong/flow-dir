@@ -322,6 +322,7 @@ fn redacted_settings(settings: &Settings) -> serde_json::Value {
         "tabFontSize": settings.tab_font_size,
         "listFontSize": settings.list_font_size,
         "navFontSize": settings.nav_font_size,
+        "listNameWidth": settings.list_name_width,
         "listSizeWidth": settings.list_size_width,
         "listTimeWidth": settings.list_time_width,
         "logLevel": settings.log_level,

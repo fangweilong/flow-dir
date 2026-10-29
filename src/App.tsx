@@ -1121,6 +1121,12 @@ export default function App() {
     [updateSettings],
   )
 
+  /** Name-column width; `0` returns to the fill-the-pane layout. */
+  const setNameWidth = useCallback(
+    (listNameWidth: number) => updateSettings({ ...settingsRef.current, listNameWidth }),
+    [updateSettings],
+  )
+
   /** Ctrl+B and the caption button share this so a collapsed drag reopens at a usable width. */
   const toggleSidebar = useCallback(() => {
     const current = settingsRef.current
@@ -3638,6 +3644,8 @@ export default function App() {
               showColSize={settings.listColSize}
               showColType={settings.listColType}
               showColTime={settings.listColTime}
+              listNameWidth={settings.listNameWidth}
+              onListNameWidth={setNameWidth}
               colSize={settings.listSizeWidth}
               colType={settings.listTypeWidth}
               colTime={settings.listTimeWidth}
