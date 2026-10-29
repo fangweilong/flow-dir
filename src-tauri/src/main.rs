@@ -549,6 +549,33 @@ fn archive_extract(
     archive::start(&state, job_id, archive, dest, password, on_progress)
 }
 
+/// Creates an archive from the selection; progress arrives on the channel and `op_cancel`
+/// stops it, because compression registers itself in the shared op state.
+#[tauri::command(rename_all = "camelCase")]
+fn archive_compress(
+    state: tauri::State<'_, ops::OpState>,
+    job_id: String,
+    paths: Vec<String>,
+    dest: String,
+    format: String,
+    level: u32,
+    password: Option<String>,
+    on_progress: Channel<ops::OpProgress>,
+) -> Result<(), ApiError> {
+    archive::write::start(
+        &state,
+        archive::write::Request {
+            job_id,
+            paths,
+            dest,
+            format,
+            level,
+            password,
+        },
+        on_progress,
+    )
+}
+
 /// Starts a checksum job; progress arrives on the channel and `tool_cancel` stops it.
 #[tauri::command(rename_all = "camelCase")]
 fn hash_start(
@@ -703,13 +730,14 @@ async fn shell_menu_show(
     extract_title: Option<String>,
     extract_here: Option<String>,
     extract_to: Option<String>,
+    compress: Option<shell_menu::CompressLabels>,
 ) -> Result<shell_menu::Outcome, ApiError> {
     let extract = match (extract_title, extract_here, extract_to) {
         (Some(title), Some(here), Some(to)) => Some(shell_menu::ExtractLabels { title, here, to }),
         _ => None,
     };
     tauri::async_runtime::spawn_blocking(move || {
-        shell_menu::show(paths, x, y, extended, hash_label, extract)
+        shell_menu::show(paths, x, y, extended, hash_label, extract, compress)
     })
     .await
     .map_err(|e| ApiError::new("THREAD", e.to_string()))?
@@ -1346,6 +1374,7 @@ fn main() {
             op_cancel,
             op_retry_elevated,
             archive_extract,
+            archive_compress,
             hash_start,
             dup_start,
             compare_level,

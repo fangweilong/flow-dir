@@ -11,7 +11,7 @@ use std::sync::mpsc;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use windows::core::{w, Interface, HSTRING, PCSTR, PCWSTR, PSTR, PWSTR};
 use windows::Win32::Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -58,6 +58,9 @@ const ID_CUSTOM_HASH: u32 = 0xC002;
 const ID_CUSTOM_COMPARE: u32 = 0xC003;
 const ID_CUSTOM_EXTRACT_HERE: u32 = 0xC010;
 const ID_CUSTOM_EXTRACT_TO: u32 = 0xC011;
+const ID_CUSTOM_COMPRESS_FIRST: u32 = 0xC020;
+/// Formats the writer accepts; anything else in the label set is dropped.
+const WRITABLE: [&str; 5] = ["zip", "7z", "tar.gz", "tar.xz", "tar.zst"];
 
 /// GDI+'s `PixelFormat32bppARGB`; the crate exposes no constant for it.
 const PIXEL_FORMAT_32BPP_ARGB: i32 = 0x0026_200A;
@@ -87,6 +90,20 @@ pub struct ExtractLabels {
     pub title: String,
     pub here: String,
     pub to: String,
+}
+
+/// Localized labels for the compression submenu; `id` is the format the backend writes.
+#[derive(Deserialize)]
+pub struct CompressLabels {
+    pub title: String,
+    pub formats: Vec<CompressLabel>,
+}
+
+#[derive(Deserialize)]
+pub struct CompressLabel {
+    /// `zip` | `7z` | `tar.gz` | `tar.xz` | `tar.zst`.
+    pub id: String,
+    pub label: String,
 }
 
 /// Only a single archive file gets the submenu: folders, multi-selections and formats
@@ -205,6 +222,48 @@ unsafe fn insert_extra(menu: HMENU, extra: &Extra<'_>, bitmap: Option<HBITMAP>) 
     }
 }
 
+/// Appends the compression leaves; returns (command id, format) so the caller can map the
+/// reported command back to a format.
+unsafe fn insert_compress_submenu(menu: HMENU, labels: &CompressLabels) -> Vec<(u32, String)> {
+    unsafe {
+        let Ok(submenu) = CreatePopupMenu() else {
+            return Vec::new();
+        };
+        let mut mapped = Vec::new();
+        for format in &labels.formats {
+            if !WRITABLE.contains(&format.id.as_str()) || mapped.len() >= 8 {
+                continue;
+            }
+            let id = ID_CUSTOM_COMPRESS_FIRST + mapped.len() as u32;
+            let wide = HSTRING::from(format.label.as_str());
+            if AppendMenuW(submenu, MF_STRING, id as usize, &wide).is_err() {
+                continue;
+            }
+            mapped.push((id, format.id.clone()));
+        }
+        if mapped.is_empty() {
+            let _ = DestroyMenu(submenu);
+            return Vec::new();
+        }
+        let wide = HSTRING::from(labels.title.as_str());
+        let info = MENUITEMINFOW {
+            cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+            fMask: MIIM_STRING | MIIM_SUBMENU,
+            fType: MFT_STRING,
+            dwTypeData: PWSTR(wide.as_ptr() as *mut u16),
+            cch: wide.len() as u32,
+            hSubMenu: submenu,
+            ..Default::default()
+        };
+        let index = GetMenuItemCount(Some(menu)).max(0) as u32;
+        if InsertMenuItemW(menu, index, true, &info).is_err() {
+            let _ = DestroyMenu(submenu);
+            return Vec::new();
+        }
+        mapped
+    }
+}
+
 /// Appends FlowDir's extraction submenu; the two leaves return their own command ids,
 /// which nested popups do report from `TrackPopupMenuEx`.
 unsafe fn insert_submenu(menu: HMENU, labels: &ExtractLabels) {
@@ -242,6 +301,9 @@ pub struct Outcome {
     pub id: u32,
     /// Set when FlowDir's own appended entry was picked; shell commands leave it `None`.
     pub action: Option<String>,
+    /// Archive format of a `compress` action.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
 }
 
 thread_local! {
@@ -296,12 +358,21 @@ pub fn show(
     extended: bool,
     hash_label: Option<String>,
     extract: Option<ExtractLabels>,
+    compress: Option<CompressLabels>,
 ) -> Result<Outcome, ApiError> {
     if paths.is_empty() {
         return Err(ApiError::new("EMPTY", "no paths"));
     }
     run_on_menu_thread(move || unsafe {
-        run_items(&paths, x, y, extended, hash_label.as_deref(), extract.as_ref())
+        run_items(
+            &paths,
+            x,
+            y,
+            extended,
+            hash_label.as_deref(),
+            extract.as_ref(),
+            compress.as_ref(),
+        )
     })
 }
 
@@ -357,13 +428,14 @@ unsafe fn run_items(
     extended: bool,
     hash_label: Option<&str>,
     extract: Option<&ExtractLabels>,
+    compress: Option<&CompressLabels>,
 ) -> Result<Outcome, ApiError> {
     unsafe {
         let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         CoInitializeEx(None, COINIT_APARTMENTTHREADED)
             .ok()
             .map_err(|e| ApiError::new("COM", e.to_string()))?;
-        let result = build_items(paths, x, y, extended, hash_label, extract);
+        let result = build_items(paths, x, y, extended, hash_label, extract, compress);
         CoUninitialize();
         result
     }
@@ -396,6 +468,7 @@ unsafe fn build_items(
     extended: bool,
     hash_label: Option<&str>,
     extract: Option<&ExtractLabels>,
+    compress: Option<&CompressLabels>,
 ) -> Result<Outcome, ApiError> {
     unsafe {
         let mut pidls: Vec<*const windows::Win32::UI::Shell::Common::ITEMIDLIST> =
@@ -431,7 +504,7 @@ unsafe fn build_items(
             .into_iter()
             .collect();
         let extract = extract.filter(|_| extract_applies(paths));
-        let outcome = track(hwnd, &context, x, y, flags, &extras, extract);
+        let outcome = track(hwnd, &context, x, y, flags, &extras, extract, compress);
         drop(context);
         drop(array);
         drop(cleanup);
@@ -510,7 +583,7 @@ unsafe fn build_background(
                 glyph: Some(MenuGlyph::Compare),
             },
         ];
-        let outcome = track(hwnd, &context, x, y, flags, &extras, None);
+        let outcome = track(hwnd, &context, x, y, flags, &extras, None, None);
         drop(context);
         drop(cleanup);
         outcome
@@ -526,6 +599,7 @@ unsafe fn track(
     flags: u32,
     extras: &[Extra<'_>],
     extract: Option<&ExtractLabels>,
+    compress: Option<&CompressLabels>,
 ) -> Result<Outcome, ApiError> {
     unsafe {
         let menu2: Option<IContextMenu2> = context.cast().ok();
@@ -549,12 +623,13 @@ unsafe fn track(
         }
 
         let mut bitmaps = GlyphBitmaps(Vec::new());
-        if extract.is_some() || !extras.is_empty() {
+        if extract.is_some() || compress.is_some() || !extras.is_empty() {
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         }
         if let Some(labels) = extract {
             insert_submenu(menu, labels);
         }
+        let compress = compress.map(|labels| insert_compress_submenu(menu, labels)).unwrap_or_default();
         if !extras.is_empty() {
             let size = glyph_size(x, y);
             for extra in extras {
@@ -582,8 +657,12 @@ unsafe fn track(
             invoked: false,
             id: command,
             action: None,
+            format: None,
         };
-        if command == ID_CUSTOM_EXTRACT_HERE {
+        if let Some((_, format)) = compress.iter().find(|(id, _)| *id == command) {
+            outcome.action = Some("compress".into());
+            outcome.format = Some(format.clone());
+        } else if command == ID_CUSTOM_EXTRACT_HERE {
             outcome.action = Some("extractHere".into());
         } else if command == ID_CUSTOM_EXTRACT_TO {
             outcome.action = Some("extractTo".into());

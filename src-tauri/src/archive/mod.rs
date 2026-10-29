@@ -10,6 +10,7 @@ pub mod format;
 mod backends;
 mod entry;
 mod sink;
+pub mod write;
 
 use std::path::Path;
 use std::sync::atomic::AtomicBool;

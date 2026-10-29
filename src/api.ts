@@ -110,6 +110,21 @@ export function archiveExtract(
   return invoke<void>('archive_extract', { jobId, archive, dest, password, onProgress: channel })
 }
 
+/** Compresses `paths` into `dest`; cancel it through {@link opCancel}. */
+export function archiveCompress(
+  jobId: string,
+  paths: string[],
+  dest: string,
+  format: CompressFormat,
+  level: number,
+  password: string | null,
+  onProgress: (progress: OpProgress) => void,
+) {
+  const channel = new Channel<OpProgress>()
+  channel.onmessage = onProgress
+  return invoke<void>('archive_compress', { jobId, paths, dest, format, level, password, onProgress: channel })
+}
+
 /** Streaming SHA-256/SHA-1/MD5 over the given paths; results arrive with the final message. */
 export function hashStart(
   jobId: string,
@@ -200,7 +215,21 @@ export const logDirPath = () => invoke<string | null>('log_dir_path')
 export const diagnosticsExport = (dir: string) => invoke<string>('diagnostics_export', { dir })
 
 export type ExtractMenuLabels = { title: string; here: string; to: string }
-/** `extract` adds FlowDir's extraction submenu; the backend hides it for non-archives. */
+export type CompressMenuLabels = { title: string; formats: { id: CompressFormat; label: string }[] }
+/** Formats the Rust writer can produce; ids are the contract with the backend. */
+export type CompressFormat = 'zip' | '7z' | 'tar.gz' | 'tar.xz' | 'tar.zst'
+export const COMPRESS_FORMATS: CompressFormat[] = ['zip', '7z', 'tar.gz', 'tar.xz', 'tar.zst']
+export const COMPRESS_EXTENSIONS: Record<CompressFormat, string> = {
+  zip: '.zip',
+  '7z': '.7z',
+  'tar.gz': '.tar.gz',
+  'tar.xz': '.tar.xz',
+  'tar.zst': '.tar.zst',
+}
+/**
+ * `extract` adds FlowDir's extraction submenu (archives only), `compress` its compression
+ * submenu (any selection).
+ */
 export const shellMenuShow = (
   paths: string[],
   x: number,
@@ -208,6 +237,7 @@ export const shellMenuShow = (
   extended: boolean,
   hashLabel?: string,
   extract?: ExtractMenuLabels,
+  compress?: CompressMenuLabels,
 ) =>
   invoke<MenuOutcome>('shell_menu_show', {
     paths,
@@ -218,6 +248,7 @@ export const shellMenuShow = (
     extractTitle: extract?.title ?? null,
     extractHere: extract?.here ?? null,
     extractTo: extract?.to ?? null,
+    compress: compress ?? null,
   })
 export const shellMenuBackgroundShow = (
   path: string,

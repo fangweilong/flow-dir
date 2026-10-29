@@ -15,6 +15,8 @@ import { HistoryPanel } from './HistoryPanel'
 import { PromptDialog } from './PromptDialog'
 import { BatchRenameDialog } from './BatchRenameDialog'
 import { ConfirmDialog } from './ConfirmDialog'
+import { CompressDialog } from './CompressDialog'
+import type { CompressValues } from './CompressDialog'
 import { FileToolsPanel } from './FileToolsPanel'
 import { PreviewPanel } from './PreviewPanel'
 import { SearchOverlay } from './SearchOverlay'
@@ -24,8 +26,11 @@ import { themeIsDark } from './themes'
 import { SettingsModal } from './SettingsModal'
 import { SidebarTree } from './SidebarTree'
 import {
+  archiveCompress,
   archiveExtract,
   cancelDir,
+  COMPRESS_EXTENSIONS,
+  COMPRESS_FORMATS,
   clipboardCopy,
   clipboardPaste,
   configWarnings,
@@ -60,12 +65,13 @@ import {
   taskbarProgress,
   titlebarMenu,
   treeDirs,
+  uniquePaths,
   updateCheck,
   gitStatus,
   watchClear,
   watchSet,
 } from './api'
-import type { OpRequest, SortItem } from './api'
+import type { CompressFormat, OpRequest, SortItem } from './api'
 import { EMPTY_GIT, EMPTY_LIST, emptyList, filterMatches } from './types'
 import type {
   Drive,
@@ -219,6 +225,13 @@ export default function App() {
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null)
   /** Archive waiting for a destination from the in-app folder picker. */
   const [extractTarget, setExtractTarget] = useState<{ archive: string; initial: string } | null>(null)
+  /** Selection waiting for format/level/password from the compression dialog. */
+  const [compressTarget, setCompressTarget] = useState<{
+    paths: string[]
+    dir: string
+    format: CompressFormat
+    name: string
+  } | null>(null)
   /** Archive whose password the backend asked for, with the destination to retry. */
   const [passwordPrompt, setPasswordPrompt] = useState<{
     archive: string
@@ -2205,6 +2218,77 @@ export default function App() {
     [refreshPanes, showToast, t],
   )
 
+  /** Starts a compression job and mirrors its progress into the ops stack. */
+  const runCompress = useCallback(
+    (paths: string[], dest: string, format: CompressFormat, level: number, password: string | null) => {
+      const opId = `compress-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      setOps((prev) => ({
+        ...prev,
+        [opId]: {
+          opId,
+          phase: 'compress',
+          current: 0,
+          total: 0,
+          name: null,
+          work: 0,
+          workTotal: 0,
+          failedCount: 0,
+          failed: [],
+          done: false,
+          aborted: false,
+          error: null,
+        },
+      }))
+      const drop = (delay: number) =>
+        window.setTimeout(() => {
+          setOps((prev) => {
+            const next = { ...prev }
+            delete next[opId]
+            return next
+          })
+        }, delay)
+      archiveCompress(opId, paths, dest, format, level, password, (progress) => {
+        setOps((prev) => (prev[opId] ? { ...prev, [opId]: progress } : prev))
+        if (!progress.done) return
+        if (progress.error) {
+          showToast(t('op.failed', { code: progress.error.code }))
+          drop(5000)
+          return
+        }
+        if (progress.aborted) {
+          showToast(t('op.canceled'))
+          drop(2500)
+          return
+        }
+        refreshPanes()
+        showToast(t('op.done'))
+        drop(800)
+      }).catch((e: unknown) => {
+        showToast(t('op.failed', { code: errorCode(e) }))
+        drop(4000)
+      })
+    },
+    [refreshPanes, showToast, t],
+  )
+
+  /**
+   * `auto` skips the dialog: the shell menu's format leaves start immediately with the
+   * default level. The name is uniquified first so an existing archive is never replaced.
+   */
+  const requestCompress = useCallback(
+    (paths: string[], dir: string, format: CompressFormat, auto: boolean) => {
+      const base = paths.length === 1 ? baseName(paths[0]) : baseName(dir) || 'archive'
+      const extension = COMPRESS_EXTENSIONS[format]
+      void uniquePaths([joinPath(dir, `${base}${extension}`)])
+        .then(([dest]) => {
+          if (auto) runCompress(paths, dest, format, 6, null)
+          else setCompressTarget({ paths, dir, format, name: baseName(dest) })
+        })
+        .catch((e: unknown) => showToast(t('op.failed', { code: errorCode(e) })))
+    },
+    [runCompress, showToast, t],
+  )
+
   /** Runs one reverse/replay step and resolves with the shell outcome. */
   const runStep = useCallback(
     (kind: OpKind, sources: string[], options: Parameters<typeof runOp>[2] = {}) =>
@@ -2843,6 +2927,16 @@ export default function App() {
             },
           ]
         : []
+      const compressMenu: MenuItem[] =
+        tabPath !== undefined
+          ? [
+              {
+                kind: 'item',
+                label: t('menu.compressTo'),
+                onSelect: () => requestCompress(paths, tabPath, 'zip', false),
+              },
+            ]
+          : []
       return [
         {
           kind: 'item',
@@ -2904,6 +2998,7 @@ export default function App() {
           onSelect: () => deleteEntries(paneId, [entry.name], true),
         },
         ...archiveMenu,
+        ...compressMenu,
         { kind: 'sep' },
         { kind: 'item', label: t('menu.hash'), onSelect: () => setFileTools({ mode: 'hash', paths }) },
         { kind: 'item', label: t('menu.copyPath'), onSelect: () => copyPaths(paths) },
@@ -2917,6 +3012,7 @@ export default function App() {
       openInNewPane,
       openTarget,
       pasteInto,
+      requestCompress,
       showToast,
       startRename,
       startRenameMany,
@@ -2942,19 +3038,28 @@ export default function App() {
         point.shiftKey,
         t('menu.hash'),
         { title: t('menu.extract'), here: t('menu.extractHere'), to: t('menu.extractTo') },
+        {
+          title: t('menu.compress'),
+          formats: COMPRESS_FORMATS.map((format) => ({
+            id: format,
+            label: format.toUpperCase(),
+          })),
+        },
       )
         .then((outcome) => {
           if (outcome.action === 'hash') setFileTools({ mode: 'hash', paths })
           else if (outcome.action === 'extractHere') extractArchive(paths[0], tab.path)
           else if (outcome.action === 'extractTo') {
             setExtractTarget({ archive: paths[0], initial: tab.path })
+          } else if (outcome.action === 'compress' && outcome.format) {
+            requestCompress(paths, tab.path, outcome.format as CompressFormat, true)
           } else if (outcome.invoked) refreshPanes()
         })
         .catch(() => {
           setMenu({ x: point.clientX, y: point.clientY, items: rowFallback(paneId, entry, paths) })
         })
     },
-    [listData, refreshPanes, rowFallback, t],
+    [extractArchive, listData, refreshPanes, requestCompress, rowFallback, t],
   )
 
   // Self-drawn fallback: used when the native folder menu cannot be shown, and for the drive
@@ -4013,6 +4118,32 @@ export default function App() {
             const pending = prompt
             setPrompt(null)
             if (pending) focusList(pending.paneId)
+          }}
+        />
+      )}
+
+      {compressTarget && (
+        <CompressDialog
+          title={t('compress.title')}
+          dir={compressTarget.dir}
+          name={compressTarget.name}
+          format={compressTarget.format}
+          lang={lang}
+          onClose={() => setCompressTarget(null)}
+          onSubmit={(values: CompressValues) => {
+            const pending = compressTarget
+            setCompressTarget(null)
+            // The dialog keeps the extension in sync with the format, but a hand-edited
+            // name may drop it; the archive must not be written without one.
+            const extension = COMPRESS_EXTENSIONS[values.format]
+            const name = values.name.toLowerCase().endsWith(extension)
+              ? values.name
+              : `${values.name}${extension}`
+            void uniquePaths([joinPath(pending.dir, name)])
+              .then(([dest]) =>
+                runCompress(pending.paths, dest, values.format, values.level, values.password),
+              )
+              .catch((e: unknown) => showToast(t('op.failed', { code: errorCode(e) })))
           }}
         />
       )}

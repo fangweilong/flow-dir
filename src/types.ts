@@ -40,7 +40,13 @@ export type Dependency = { name: string; version: string; license: string; kind:
 export type Clip = { paths: string[]; cut: boolean }
 export type EverythingStatus = { usable: boolean; version: string | null; reason: string | null }
 /** `action` is FlowDir's own appended entry (e.g. the hidden-items toggle), not a shell verb. */
-export type MenuOutcome = { invoked: boolean; id: number; action: string | null }
+export type MenuOutcome = {
+  invoked: boolean
+  id: number
+  action: string | null
+  /** Archive format of a `compress` action. */
+  format?: string | null
+}
 export type OpKind = 'copy' | 'move' | 'delete' | 'rename' | 'newdir'
 /** One item the shell rejected; `code` is the mapped app error code. */
 export type OpFailure = { path: string; code: string; detail: string }
