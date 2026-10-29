@@ -182,6 +182,9 @@ pub struct Settings {
     /// Navigation-bar font size in px; drives its controls.
     #[serde(default, deserialize_with = "deserialize_lenient_u32")]
     pub nav_font_size: u32,
+    /// File and drive list icon size in px (14–32).
+    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
+    pub icon_size: u32,
     /// File-list name column width in px at the default font size; `0` fills the pane and
     /// leaves no gutter, any other value leaves the rest of the row blank.
     #[serde(default, deserialize_with = "deserialize_lenient_u32")]
@@ -276,6 +279,10 @@ fn default_nav_font_size() -> u32 {
     12
 }
 
+fn default_icon_size() -> u32 {
+    20
+}
+
 /// `0` means "fill the pane"; the list then has no blank gutter on the right.
 fn default_list_name_width() -> u32 {
     0
@@ -305,6 +312,8 @@ const FONT_SIZE_MIN: u32 = 12;
 const FONT_SIZE_MAX: u32 = 20;
 /// Region sizes may go below the global floor: compact tab strips stay usable.
 const REGION_FONT_SIZE_MIN: u32 = 10;
+const ICON_SIZE_MIN: u32 = 14;
+const ICON_SIZE_MAX: u32 = 32;
 
 /// Column widths are stored unscaled; the frontend multiplies them by the font scale.
 /// The lower bounds keep the header labels and the longest "[123,456 items]" readable.
@@ -360,6 +369,14 @@ fn sanitize_region_font_size(value: u32, fallback: u32) -> u32 {
         value
     } else {
         fallback
+    }
+}
+
+fn sanitize_icon_size(value: u32) -> u32 {
+    if (ICON_SIZE_MIN..=ICON_SIZE_MAX).contains(&value) {
+        value
+    } else {
+        default_icon_size()
     }
 }
 
@@ -428,6 +445,7 @@ impl Default for Settings {
             list_font_size: default_list_font_size(),
             nav_font_family: String::new(),
             nav_font_size: default_nav_font_size(),
+            icon_size: default_icon_size(),
             list_name_width: default_list_name_width(),
             list_size_width: default_list_size_width(),
             list_time_width: default_list_time_width(),
@@ -496,6 +514,7 @@ impl Settings {
         self.list_font_size = sanitize_region_font_size(self.list_font_size, default_list_font_size());
         self.nav_font_family = sanitize_region_font_family(&self.nav_font_family);
         self.nav_font_size = sanitize_region_font_size(self.nav_font_size, default_nav_font_size());
+        self.icon_size = sanitize_icon_size(self.icon_size);
         self.list_name_width = sanitize_name_col(self.list_name_width);
         self.list_size_width = sanitize_list_col(
             self.list_size_width,
@@ -561,6 +580,9 @@ list_font_family = ""
 list_font_size = 13
 nav_font_family = ""
 nav_font_size = 12
+
+# 图标大小（像素，14–32）/ icon size in px
+icon_size = 20
 
 # 启动时展开预览面板 / show the preview panel on launch
 preview_open = true
@@ -710,6 +732,7 @@ struct FileSettings {
     list_font_size: u32,
     nav_font_family: String,
     nav_font_size: u32,
+    icon_size: u32,
     list_name_width: u32,
     list_size_width: u32,
     list_time_width: u32,
@@ -766,6 +789,7 @@ impl Default for FileSettings {
             list_font_size: base.list_font_size,
             nav_font_family: base.nav_font_family,
             nav_font_size: base.nav_font_size,
+            icon_size: base.icon_size,
             list_name_width: base.list_name_width,
             list_size_width: base.list_size_width,
             list_time_width: base.list_time_width,
@@ -823,6 +847,7 @@ impl From<FileSettings> for Settings {
             list_font_size: file.list_font_size,
             nav_font_family: file.nav_font_family,
             nav_font_size: file.nav_font_size,
+            icon_size: file.icon_size,
             list_name_width: file.list_name_width,
             list_size_width: file.list_size_width,
             list_time_width: file.list_time_width,
@@ -947,6 +972,7 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), A
     set_value(&mut doc, "list_font_size", Value::from(settings.list_font_size as i64));
     set_value(&mut doc, "nav_font_family", Value::from(settings.nav_font_family.as_str()));
     set_value(&mut doc, "nav_font_size", Value::from(settings.nav_font_size as i64));
+    set_value(&mut doc, "icon_size", Value::from(settings.icon_size as i64));
     set_value(
         &mut doc,
         "list_size_width",
@@ -1296,13 +1322,14 @@ mod tests {
         assert_eq!(seed.tab_font_size, 12);
         assert_eq!(seed.list_font_size, 13);
         assert_eq!(seed.nav_font_size, 12);
+        assert_eq!(seed.icon_size, 20);
         let legacy: FileSettings = toml_edit::de::from_str("language = \"en\"").unwrap();
         assert_eq!(legacy.list_size_width, 96);
         assert_eq!(legacy.list_time_width, 142);
         assert_eq!(legacy.tab_font_size, 12);
         assert_eq!(legacy.list_font_size, 13);
         assert_eq!(legacy.nav_font_size, 12);
-
+        assert_eq!(legacy.icon_size, 20);
         let text = r#"external_preview = [{ ext = "docx", command = '"C:\Tools\WINWORD.EXE" "{path}"' }]"#;
         let parsed: FileSettings = toml_edit::de::from_str(text).unwrap();
         assert_eq!(parsed.external_preview.len(), 1);

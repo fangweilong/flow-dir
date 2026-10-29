@@ -3653,6 +3653,7 @@ export default function App() {
               git={gitByDir[pathKey(ws.tabs[pane.activeTabId]?.path ?? '')] ?? null}
               active={ws.activePaneId === pane.id}
               lang={lang}
+              iconSize={settings.iconSize}
               tabFontSize={settings.tabFontSize}
               listFontSize={settings.listFontSize}
               navFontSize={settings.navFontSize}
@@ -4021,6 +4022,7 @@ export default function App() {
           openTabs={openTabsForSearch}
           lang={lang}
           fontSize={settings.fontSize}
+          iconSize={settings.iconSize}
           preferEverything={settings.useEverything}
           showHidden={settings.showHidden}
           onClose={() => {
@@ -4220,6 +4222,7 @@ export default function App() {
           openFolders={openFolders}
           includeHidden={activePane?.hidden ?? settings.showHidden}
           fontSize={settings.fontSize}
+          iconSize={settings.iconSize}
           hashRateBytes={settings.dupMaxMbPerSec * 1024 * 1024}
           onClose={() => setCompareOpen(false)}
           onToast={showToast}

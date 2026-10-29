@@ -9,7 +9,9 @@ export const DEFAULT_FONT_FAMILY = 'Segoe UI Variable Text'
 export const DEFAULT_TAB_FONT_SIZE = 12
 export const DEFAULT_LIST_FONT_SIZE = 13
 export const DEFAULT_NAV_FONT_SIZE = 12
-
+export const DEFAULT_ICON_SIZE = 20
+export const ICON_SIZE_MIN = 14
+export const ICON_SIZE_MAX = 32
 /** Common Windows families; any other installed family can be typed in. */
 export const FONT_FAMILIES = [
   DEFAULT_FONT_FAMILY,
@@ -34,6 +36,10 @@ export function clampRegionFontSize(size: number, fallback: number): number {
   return Math.min(FONT_SIZE_MAX, Math.max(REGION_FONT_SIZE_MIN, Math.round(size)))
 }
 
+export function clampIconSize(size: number): number {
+  if (!Number.isFinite(size)) return DEFAULT_ICON_SIZE
+  return Math.min(ICON_SIZE_MAX, Math.max(ICON_SIZE_MIN, Math.round(size)))
+}
 /**
  * Builds the CSS stack for one family. A stored family is a single name, so anything
  * that could terminate the property (quotes, separators, braces) falls back instead

@@ -4,9 +4,8 @@ import type { ContentOptions, SearchFilter } from './api'
 import { makeT } from './i18n'
 import { formatSize, parentPath, volumeRoot } from './paths'
 import { FileIcon } from './icons'
-import { BASE_FONT_SIZE, clampFontSize } from './fonts'
-import type { ApiError, Lang } from './types'
-import type { SearchItem } from './types'
+import { BASE_FONT_SIZE, clampFontSize, clampIconSize } from './fonts'
+import type { ApiError, Lang, SearchItem } from './types'
 
 export type OpenTab = { id: string; title: string; path: string }
 type SearchScope = 'folder' | 'drive' | 'all-tabs' | `tab:${string}`
@@ -135,6 +134,7 @@ type Props = {
   openTabs?: OpenTab[]
   lang: Lang
   fontSize: number
+  iconSize?: number
   preferEverything: boolean
   /** Built-in scan follows the pane's show-hidden setting. */
   showHidden: boolean
@@ -152,6 +152,7 @@ export function SearchOverlay({
   openTabs,
   lang,
   fontSize,
+  iconSize,
   preferEverything,
   showHidden,
   onClose,
@@ -161,6 +162,7 @@ export function SearchOverlay({
 }: Props) {
   const t = makeT(lang)
   const iconScale = clampFontSize(fontSize) / BASE_FONT_SIZE
+  const iconPx = iconSize ? clampIconSize(iconSize) : undefined
   const [query, setQuery] = useState('')
   const [items, setItems] = useState<SearchItem[]>([])
   const [provider, setProvider] = useState('')
@@ -735,7 +737,7 @@ export function SearchOverlay({
                   }}
                   className="flex min-w-0 flex-1 items-center gap-2 text-left"
                 >
-                  <FileIcon name={item.name} dir={item.isDir} path={item.path} scale={iconScale} />
+                  <FileIcon name={item.name} dir={item.isDir} path={item.path} scale={iconScale} size={iconPx} />
                   <span className="flex min-w-0 flex-1 flex-col">
                     <span className="truncate text-[0.75rem] text-fg-strong">{item.name}</span>
                     {item.snippet && (

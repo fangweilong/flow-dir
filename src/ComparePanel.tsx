@@ -4,7 +4,7 @@ import type { CompareOptions } from './api'
 import { makeT } from './i18n'
 import { formatSize, joinPath } from './paths'
 import { FileIcon } from './icons'
-import { BASE_FONT_SIZE, clampFontSize } from './fonts'
+import { BASE_FONT_SIZE, clampFontSize, clampIconSize } from './fonts'
 import type {
   CompareCount,
   CompareEntry,
@@ -57,6 +57,7 @@ type Props = {
   /** Seeds the hidden-items switch; the panel's own switch is what the compare uses. */
   includeHidden: boolean
   fontSize: number
+  iconSize?: number
   /** Byte rate for hash verification, from the duplicate scanner setting. */
   hashRateBytes: number
   onClose: () => void
@@ -72,6 +73,7 @@ export function ComparePanel({
   openFolders,
   includeHidden,
   fontSize,
+  iconSize,
   hashRateBytes,
   onClose,
   onToast,
@@ -79,6 +81,7 @@ export function ComparePanel({
 }: Props) {
   const t = makeT(lang)
   const iconScale = clampFontSize(fontSize) / BASE_FONT_SIZE
+  const iconPx = iconSize ? clampIconSize(iconSize) : undefined
   const [leftRoot, setLeftRoot] = useState(initialLeft)
   const [rightRoot, setRightRoot] = useState(initialRight)
   const [session, setSession] = useState<Session | null>(null)
@@ -521,6 +524,7 @@ export function ComparePanel({
           dir={meta.isDir}
           path={joinPath(root, entry.rel)}
           scale={iconScale}
+          size={iconPx}
         />
         <span
           className={`truncate ${entry.status === 'same' ? 'text-muted' : 'text-fg-strong'}`}

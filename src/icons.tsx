@@ -87,33 +87,38 @@ export function FileIcon({
   dir,
   path,
   scale = 1,
+  size,
 }: {
   name: string
   dir: boolean
   path?: string
   /** Base-text multiplier used only for the requested raster size; CSS keeps the icon at 1.25em. */
   scale?: number
+  /** Explicit pixel size for the icon, overriding the default 1.25em. */
+  size?: number
 }) {
   const [failed, setFailed] = useState(false)
   const revision = useSyncExternalStore(subscribeIconRevision, iconRevisionSnapshot)
+  const dim = size ? `${size}px` : '1.25em'
+  const style = { width: dim, height: dim }
   if (path && !failed) {
-    const px = Math.max(16, Math.round(20 * scale * (window.devicePixelRatio || 1)))
+    const px = Math.max(16, Math.round((size ?? 20 * scale) * (window.devicePixelRatio || 1)))
     return (
       <img
         src={`http://fd.localhost/icon?path=${encodeURIComponent(path)}&s=${px}&v=${revision}`}
-        width={16}
-        height={16}
+        width={size ?? 16}
+        height={size ?? 16}
         alt=""
         draggable={false}
         className="shrink-0"
-        style={{ width: '1.25em', height: '1.25em' }}
+        style={style}
         onError={() => setFailed(true)}
       />
     )
   }
   if (dir) {
     return (
-      <svg viewBox="0 0 16 16" className={`h-[1.25em] w-[1.25em] shrink-0 ${COLOR.folder}`} aria-hidden>
+      <svg viewBox="0 0 16 16" className={`shrink-0 ${COLOR.folder}`} style={style} aria-hidden>
         <path
           fill="currentColor"
           d="M1.5 3.6c0-.6.5-1.1 1.1-1.1h3.2c.4 0 .7.15.95.42l.85.93h6.3c.6 0 1.1.5 1.1 1.1v7.4c0 .6-.5 1.1-1.1 1.1H2.6c-.6 0-1.1-.5-1.1-1.1V3.6Z"
@@ -123,7 +128,7 @@ export function FileIcon({
   }
   const group = EXT_GROUP[extOf(name)] ?? 'file'
   return (
-    <svg viewBox="0 0 16 16" className={`h-[1.25em] w-[1.25em] shrink-0 ${COLOR[group] ?? COLOR.file}`} aria-hidden>
+    <svg viewBox="0 0 16 16" className={`shrink-0 ${COLOR[group] ?? COLOR.file}`} style={style} aria-hidden>
       <path
         fill="currentColor"
         d="M3.2 1.5h6.05L13 5.25v9.25c0 .55-.45 1-1 1h-8.8c-.55 0-1-.45-1-1v-12c0-.55.45-1 1-1Z"

@@ -8,6 +8,8 @@ export type GitBadges = {
   dirtyDirs: Set<string>
   /** Tracked child folders with no change; they get the same check as a clean repository. */
   cleanDirs: Set<string>
+  /** Tracked child files with no change. */
+  cleanFiles: Set<string>
   /** Child repository summaries, shown as a badge on each repository folder icon. */
   repos: Map<string, GitRepo>
 }
@@ -15,6 +17,7 @@ export type GitBadges = {
 const NO_CHANGES = new Map<string, string>()
 const NO_DIRS = new Set<string>()
 const NO_CLEAN = new Set<string>()
+const NO_CLEAN_FILES = new Set<string>()
 const NO_REPOS = new Map<string, GitRepo>()
 
 /**
@@ -23,9 +26,9 @@ const NO_REPOS = new Map<string, GitRepo>()
  * Repository rows come from their own probe and remain valid outside a work tree.
  */
 export function buildGitBadges(status: GitStatus | null): GitBadges {
-  if (!status) return { changed: NO_CHANGES, dirtyDirs: NO_DIRS, cleanDirs: NO_CLEAN, repos: NO_REPOS }
+  if (!status) return { changed: NO_CHANGES, dirtyDirs: NO_DIRS, cleanDirs: NO_CLEAN, cleanFiles: NO_CLEAN_FILES, repos: NO_REPOS }
   const repos = new Map(status.repos.map((repo) => [repo.name.toLowerCase(), repo]))
-  if (!status.root) return { changed: NO_CHANGES, dirtyDirs: NO_DIRS, cleanDirs: NO_CLEAN, repos }
+  if (!status.root) return { changed: NO_CHANGES, dirtyDirs: NO_DIRS, cleanDirs: NO_CLEAN, cleanFiles: NO_CLEAN_FILES, repos }
   const changed = new Map<string, string>()
   for (const file of status.files) changed.set(file.path.toLowerCase(), file.code)
   const dirtyDirs = new Set<string>()
@@ -36,5 +39,10 @@ export function buildGitBadges(status: GitStatus | null): GitBadges {
     // A dirty marker always wins: the two lists must never disagree.
     if (!dirtyDirs.has(key)) cleanDirs.add(key)
   }
-  return { changed, dirtyDirs, cleanDirs, repos }
+  const cleanFiles = new Set<string>()
+  for (const file of status.cleanFiles ?? []) {
+    const key = file.toLowerCase()
+    if (!changed.has(key)) cleanFiles.add(key)
+  }
+  return { changed, dirtyDirs, cleanDirs, cleanFiles, repos }
 }

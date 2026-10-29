@@ -48,6 +48,8 @@ export type Settings = {
   navFontFamily: string
   /** Navigation-bar text size in px (10–20); drives its controls. */
   navFontSize: number
+  /** File and drive list icon size in px (14–32). */
+  iconSize: number
   /** File-list "size" column visibility. */
   listColSize: boolean
   /** File-list "type" column visibility. */
@@ -129,6 +131,7 @@ export const DEFAULT_SETTINGS: Settings = {
   listFontSize: 13,
   navFontFamily: '',
   navFontSize: 12,
+  iconSize: 20,
   listColSize: true,
   listColType: true,
   listColTime: true,

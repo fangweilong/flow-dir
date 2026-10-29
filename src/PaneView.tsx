@@ -17,6 +17,7 @@ import {
   DEFAULT_LIST_FONT_SIZE,
   DEFAULT_NAV_FONT_SIZE,
   DEFAULT_TAB_FONT_SIZE,
+  clampIconSize,
   clampRegionFontSize,
 } from './fonts'
 import type { Translate } from './i18n'
@@ -27,16 +28,6 @@ const driveRoot = (path: string | undefined): string => {
   const match = path ? /^([A-Za-z]:)/.exec(path) : null
   return match ? match[1].toUpperCase() : '⋯'
 }
-
-/** Badge colour per porcelain letter; conflicts and deletions read as problems. */
-const gitTone = (code: string) =>
-  code === 'D' || code === '!'
-    ? 'text-red-500'
-    : code === 'A' || code === 'U'
-      ? 'text-emerald-500'
-      : code === 'R' || code === 'C'
-        ? 'text-sky-500'
-        : 'text-amber-500'
 
 /** Metrics at the default 13 px text size; every pane scales them by the settings font size. */
 const ROW_H = 26
@@ -86,6 +77,8 @@ type Props = {
   git: GitStatus | null
   active: boolean
   lang: Lang
+  /** File and drive list icon size in px (14–32). */
+  iconSize: number
   /** Tab-strip text size in px; drives strip height and tab icons. */
   tabFontSize: number
   /** File-list text size in px; drives rows, columns and icons. */
@@ -174,6 +167,7 @@ export function PaneView({
   git,
   active,
   lang,
+  iconSize,
   tabFontSize,
   listFontSize,
   navFontSize,
@@ -314,11 +308,12 @@ export function PaneView({
   const navFont = clampRegionFontSize(navFontSize, DEFAULT_NAV_FONT_SIZE)
   const tabScale = tabFont / BASE_FONT_SIZE
   const listScale = listFont / BASE_FONT_SIZE
+  const iconPx = clampIconSize(iconSize)
   const tabBarHeight = Math.round(tabFont * 1.75) + 3
   const tabItemHeight = tabBarHeight - 3
   const navBarHeight = Math.round(navFont * 2)
   const navControlHeight = navBarHeight - 4
-  const rowHeight = Math.round(ROW_H * listScale)
+  const rowHeight = Math.max(Math.round(ROW_H * listScale), iconPx + 8)
   const headerHeight = Math.round(HEADER_H * listScale)
   const nameMin = Math.round(MIN_COL_NAME * listScale)
   const minSizeCol = Math.round(MIN_COL_SIZE * listScale)
@@ -1476,7 +1471,7 @@ export function PaneView({
                   }`}
                 >
                   <div className="flex min-w-0 items-center gap-1.5">
-                    <FileIcon name={drive.name} dir path={drive.root} scale={listScale} />
+                    <FileIcon name={drive.name} dir path={drive.root} scale={listScale} size={iconPx} />
                     <span className={`truncate font-medium ${drive.available ? 'text-fg-strong' : 'text-muted'}`}>
                       {drive.name}
                     </span>
@@ -1558,11 +1553,10 @@ export function PaneView({
               >
                 <div className="flex min-w-0 items-center gap-1.5 pl-1.5">
                   <span className="relative shrink-0">
-                    <FileIcon name={entry.name} dir={dir} path={joinPath(tab.path, entry.name)} scale={listScale} />
-                    <GitRepoBadge name={entry.name} dir={dir} badges={gitBadges} t={t} />
+                    <FileIcon name={entry.name} dir={dir} path={joinPath(tab.path, entry.name)} scale={listScale} size={iconPx} />
+                    <GitItemBadge name={entry.name} dir={dir} badges={gitBadges} iconSize={iconPx} t={t} />
                   </span>
                   <span className={`truncate ${dir ? 'font-medium text-fg-strong' : ''}`}>{entry.name}</span>
-                  <GitBadge name={entry.name} dir={dir} badges={gitBadges} t={t} />
                 </div>
                 {showSize && (
                   <div className="tabular whitespace-nowrap pr-1.5 text-right text-[0.88em] text-muted">
@@ -1689,71 +1683,248 @@ function GitChip({ git, t }: { git: GitStatus; t: Translate }) {
   )
 }
 
-/** Corner badge on a repository folder icon: conflict, pending, unpushed, or clean. */
-function GitRepoBadge({
+/**
+ * Corner badge on a file or folder icon in a git work tree or child repository:
+ * conflict, modified, added, untracked, deleted, renamed, ahead/behind, or clean.
+ */
+function GitItemBadge({
   name,
   dir,
   badges,
+  iconSize = 20,
   t,
 }: {
   name: string
   dir: boolean
   badges: GitBadges
+  iconSize?: number
   t: Translate
 }) {
-  if (!dir) return null
-  const repo = badges.repos.get(name.toLowerCase())
-  if (!repo) return null
-  if (!repo.checked) {
-    return <GitBranchIcon className="absolute -bottom-0.5 -right-1 h-3 w-3 text-blue-500 drop-shadow" />
+  const key = name.toLowerCase()
+
+  // 1. Child repository folder
+  if (dir && badges.repos.has(key)) {
+    const repo = badges.repos.get(key)!
+    if (!repo.checked) {
+      return <GitBranchIcon className="absolute -bottom-0.5 -right-1 h-3 w-3 text-blue-500 drop-shadow" />
+    }
+    const title = [
+      repo.conflict ? t('git.conflict') : repo.dirty ? t('git.dirty') : t('git.clean'),
+      repo.upstream ? '' : t('git.upstreamMissing'),
+      repo.ahead > 0 ? t('git.ahead', { count: repo.ahead }) : '',
+      repo.behind > 0 ? t('git.behind', { count: repo.behind }) : '',
+    ]
+      .filter(Boolean)
+      .join(' · ')
+    const tone = repo.conflict
+      ? 'bg-red-500'
+      : repo.dirty
+        ? 'bg-amber-500'
+        : repo.ahead > 0
+          ? 'bg-blue-500'
+          : repo.behind > 0
+            ? 'bg-violet-500'
+            : 'bg-emerald-500'
+    return (
+      <BadgeWrap title={title} tone={tone} iconSize={iconSize}>
+        {repo.conflict ? (
+          <span className="font-bold leading-none">!</span>
+        ) : repo.dirty ? (
+          <PencilGlyph />
+        ) : repo.ahead > 0 ? (
+          <ArrowGlyph up />
+        ) : repo.behind > 0 ? (
+          <ArrowGlyph />
+        ) : (
+          <CheckGlyph />
+        )}
+      </BadgeWrap>
+    )
   }
-  const title = [
-    repo.conflict ? t('git.conflict') : repo.dirty ? t('git.dirty') : t('git.clean'),
-    repo.upstream ? '' : t('git.upstreamMissing'),
-    repo.ahead > 0 ? t('git.ahead', { count: repo.ahead }) : '',
-    repo.behind > 0 ? t('git.behind', { count: repo.behind }) : '',
-  ]
-    .filter(Boolean)
-    .join(' · ')
-  const tone = repo.conflict
-    ? 'bg-red-500'
-    : repo.dirty
-      ? 'bg-amber-500'
-      : repo.ahead > 0
-        ? 'bg-blue-500'
-        : repo.behind > 0
-          ? 'bg-violet-500'
-          : 'bg-emerald-500'
+
+  // 2. Directory inside work tree
+  if (dir) {
+    if (badges.dirtyDirs.has(key)) {
+      return (
+        <BadgeWrap title={t('git.dirty')} tone="bg-amber-500" iconSize={iconSize}>
+          <PencilGlyph />
+        </BadgeWrap>
+      )
+    }
+    if (badges.cleanDirs.has(key)) {
+      return (
+        <BadgeWrap title={t('git.cleanCommitted')} tone="bg-emerald-500" iconSize={iconSize}>
+          <CheckGlyph />
+        </BadgeWrap>
+      )
+    }
+    return null
+  }
+
+  // 3. File inside work tree
+  const code = badges.changed.get(key)
+  if (code) {
+    if (code === '!' || code === 'UU' || code === 'AA') {
+      return (
+        <BadgeWrap title={`${t('git.conflict')} (${code})`} tone="bg-red-500" iconSize={iconSize}>
+          <span className="font-bold leading-none">!</span>
+        </BadgeWrap>
+      )
+    }
+    if (code === 'M') {
+      return (
+        <BadgeWrap title={`${t('git.modified')} (${code})`} tone="bg-amber-500" iconSize={iconSize}>
+          <PencilGlyph />
+        </BadgeWrap>
+      )
+    }
+    if (code === 'A') {
+      return (
+        <BadgeWrap title={`${t('git.added')} (${code})`} tone="bg-emerald-500" iconSize={iconSize}>
+          <PlusGlyph />
+        </BadgeWrap>
+      )
+    }
+    if (code === 'D') {
+      return (
+        <BadgeWrap title={`${t('git.deleted')} (${code})`} tone="bg-rose-500" iconSize={iconSize}>
+          <MinusGlyph />
+        </BadgeWrap>
+      )
+    }
+    if (code === 'R' || code === 'C') {
+      return (
+        <BadgeWrap title={`${t('git.renamed')} (${code})`} tone="bg-sky-500" iconSize={iconSize}>
+          <ArrowRightGlyph />
+        </BadgeWrap>
+      )
+    }
+    if (code === '?' || code === 'U') {
+      return (
+        <BadgeWrap title={`${t('git.untracked')} (${code})`} tone="bg-sky-500" iconSize={iconSize}>
+          <span className="font-bold leading-none">?</span>
+        </BadgeWrap>
+      )
+    }
+    return (
+      <BadgeWrap title={code} tone="bg-amber-500" iconSize={iconSize}>
+        <PencilGlyph />
+      </BadgeWrap>
+    )
+  }
+
+  // Tracked file with no uncommitted change
+  if (badges.cleanFiles.has(key)) {
+    return (
+      <BadgeWrap title={t('git.cleanCommitted')} tone="bg-emerald-500" iconSize={iconSize}>
+        <CheckGlyph />
+      </BadgeWrap>
+    )
+  }
+
+  return null
+}
+
+function BadgeWrap({
+  title,
+  tone,
+  iconSize,
+  children,
+}: {
+  title: string
+  tone: string
+  iconSize: number
+  children: React.ReactNode
+}) {
+  const isSmall = iconSize <= 18
+  const isLarge = iconSize > 24
+  const sizeClass = isSmall
+    ? 'h-3 w-3 -bottom-0.5 -right-0.5 text-[0.5rem]'
+    : isLarge
+      ? 'h-4 w-4 -bottom-1 -right-1 text-[0.625rem]'
+      : 'h-3.5 w-3.5 -bottom-0.5 -right-1 text-[0.5625rem]'
+
   return (
     <span
       title={title}
-      className={`absolute -bottom-0.5 -right-1 grid h-3 w-3 place-items-center rounded-full text-white ring-1 ring-surface ${tone}`}
+      className={`absolute grid place-items-center rounded-full text-white ring-1 ring-surface shadow-xs ${sizeClass} ${tone}`}
     >
-      {repo.conflict ? (
-        <span className="text-[0.5625rem] font-bold leading-none">!</span>
-      ) : repo.dirty ? (
-        <svg viewBox="0 0 16 16" className="h-2 w-2" fill="currentColor" aria-hidden>
-          <path d="M4 12.4l.9-3.3 5.9-5.9a1.3 1.3 0 0 1 1.8 0l.2.2a1.3 1.3 0 0 1 0 1.8L6.9 11.1 2.9 12.4Z" />
-        </svg>
-      ) : repo.ahead > 0 ? (
-        <ArrowGlyph up />
-      ) : repo.behind > 0 ? (
-        <ArrowGlyph />
-      ) : (
-        <svg
-          viewBox="0 0 16 16"
-          className="h-2 w-2"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2.4"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          aria-hidden
-        >
-          <path d="M3.4 8.6 6.4 11.6 12.6 4.8" />
-        </svg>
-      )}
+      {children}
     </span>
+  )
+}
+
+function CheckGlyph() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      className="h-[65%] w-[65%]"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M3.4 8.6 6.4 11.6 12.6 4.8" />
+    </svg>
+  )
+}
+
+function PencilGlyph() {
+  return (
+    <svg viewBox="0 0 16 16" className="h-[65%] w-[65%]" fill="currentColor" aria-hidden>
+      <path d="M4 12.4l.9-3.3 5.9-5.9a1.3 1.3 0 0 1 1.8 0l.2.2a1.3 1.3 0 0 1 0 1.8L6.9 11.1 2.9 12.4Z" />
+    </svg>
+  )
+}
+
+function PlusGlyph() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      className="h-[65%] w-[65%]"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.4"
+      strokeLinecap="round"
+      aria-hidden
+    >
+      <path d="M8 3v10M3 8h10" />
+    </svg>
+  )
+}
+
+function MinusGlyph() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      className="h-[65%] w-[65%]"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.4"
+      strokeLinecap="round"
+      aria-hidden
+    >
+      <path d="M3 8h10" />
+    </svg>
+  )
+}
+
+function ArrowRightGlyph() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      className="h-[65%] w-[65%]"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M3 8h9M8.5 4.5 12 8l-3.5 3.5" />
+    </svg>
   )
 }
 
@@ -1761,10 +1932,10 @@ function ArrowGlyph({ up = false }: { up?: boolean }) {
   return (
     <svg
       viewBox="0 0 16 16"
-      className="h-2 w-2"
+      className="h-[65%] w-[65%]"
       fill="none"
       stroke="currentColor"
-      strokeWidth="2.2"
+      strokeWidth="2.4"
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden
@@ -1772,62 +1943,6 @@ function ArrowGlyph({ up = false }: { up?: boolean }) {
       <path d={up ? 'M8 12.5V4M4.6 7.4 8 4l3.4 3.4' : 'M8 3.5V12M4.6 8.6 8 12l3.4-3.4'} />
     </svg>
   )
-}
-
-/**
- * Porcelain letter for a changed file, and a dot when a folder holds changes below it.
- * Repository folders carry their state on the icon badge instead.
- */
-function GitBadge({
-  name,
-  dir,
-  badges,
-  t,
-}: {
-  name: string
-  dir: boolean
-  badges: GitBadges
-  t: Translate
-}) {
-  const key = name.toLowerCase()
-  if (dir && badges.repos.has(key)) return null
-  const code = badges.changed.get(key)
-  if (code) {
-    return (
-      <span title={code} className={`shrink-0 text-[0.625rem] font-semibold ${gitTone(code)}`}>
-        {code}
-      </span>
-    )
-  }
-  if (dir && badges.dirtyDirs.has(key)) {
-    return (
-      <span
-        title={t('git.dirty')}
-        aria-label={t('git.dirty')}
-        className="h-1.5 w-1.5 shrink-0 rounded-full bg-blue-500/70"
-      />
-    )
-  }
-  // Tracked and unchanged: the same check a clean child repository gets, so a repository
-  // root no longer looks like the only committed folder.
-  if (dir && badges.cleanDirs.has(key)) {
-    return (
-      <svg
-        viewBox="0 0 16 16"
-        className="h-2.5 w-2.5 shrink-0 text-emerald-500"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2.4"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        aria-hidden
-      >
-        <title>{t('git.cleanCommitted')}</title>
-        <path d="M3.4 8.6 6.4 11.6 12.6 4.8" />
-      </svg>
-    )
-  }
-  return null
 }
 
 function HeaderCell({

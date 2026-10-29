@@ -60,6 +60,8 @@ pub struct GitStatus {
     pub dirs: Vec<String>,
     /// Tracked direct child folders with no change anywhere below them.
     pub clean_dirs: Vec<String>,
+    /// Tracked direct child files with no uncommitted change.
+    pub clean_files: Vec<String>,
     /// Checked-out branch; empty when HEAD is detached.
     pub branch: String,
     /// Commits the branch is ahead of and behind its upstream; both zero without one.
@@ -133,12 +135,14 @@ pub fn status(path: &str) -> GitStatus {
     // Nested paths collapse to one marker per child folder: a work tree with 50k changes
     // below the listed folder must not push 50k strings through the IPC bridge.
     let (files, dirs) = split_direct(parse(&data.output, prefix.as_deref()));
-    let clean_dirs = clean_dirs(&data.tracked, prefix.as_deref(), &dirs);
+    let (clean_dirs, clean_files) =
+        clean_entries(&data.tracked, prefix.as_deref(), &dirs, &files);
     GitStatus {
         root,
         files,
         dirs,
         clean_dirs,
+        clean_files,
         branch,
         ahead,
         behind,
@@ -213,13 +217,22 @@ fn tracked_paths(git: &Path, root: &str) -> Vec<String> {
         .collect()
 }
 
-/// Direct child folders that hold at least one tracked file, minus the dirty ones.
-/// Only tracked directories get the check; a folder full of ignored files stays plain.
-fn clean_dirs(tracked: &[String], prefix: Option<&str>, dirty: &[String]) -> Vec<String> {
-    let dirty: std::collections::HashSet<String> =
-        dirty.iter().map(|dir| dir.to_lowercase()).collect();
+/// Direct child folders and files that hold tracked content, minus those with changes.
+/// Only tracked items get the check; items full of ignored files or untracked files stay plain.
+fn clean_entries(
+    tracked: &[String],
+    prefix: Option<&str>,
+    dirty_dirs: &[String],
+    changed_files: &[GitFile],
+) -> (Vec<String>, Vec<String>) {
+    let dirty_dirs_set: std::collections::HashSet<String> =
+        dirty_dirs.iter().map(|dir| dir.to_lowercase()).collect();
+    let changed_files_set: std::collections::HashSet<String> =
+        changed_files.iter().map(|f| f.path.to_lowercase()).collect();
     let mut dirs: Vec<String> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut files: Vec<String> = Vec::new();
+    let mut seen_dirs = std::collections::HashSet::new();
+    let mut seen_files = std::collections::HashSet::new();
     for path in tracked {
         let relative = match prefix {
             None => path.as_str(),
@@ -233,18 +246,32 @@ fn clean_dirs(tracked: &[String], prefix: Option<&str>, dirty: &[String]) -> Vec
                 _ => continue,
             },
         };
-        let Some((dir, rest)) = relative.split_once('\\') else {
-            continue;
-        };
-        if rest.is_empty() || dirty.contains(&dir.to_lowercase()) {
+        if relative.is_empty() {
             continue;
         }
-        if seen.insert(dir.to_lowercase()) {
-            dirs.push(dir.to_string());
+        match relative.split_once('\\') {
+            Some((dir, rest)) => {
+                if rest.is_empty() || dirty_dirs_set.contains(&dir.to_lowercase()) {
+                    continue;
+                }
+                if seen_dirs.insert(dir.to_lowercase()) {
+                    dirs.push(dir.to_string());
+                }
+            }
+            None => {
+                let lower = relative.to_lowercase();
+                if changed_files_set.contains(&lower) {
+                    continue;
+                }
+                if seen_files.insert(lower) {
+                    files.push(relative.to_string());
+                }
+            }
         }
     }
     dirs.sort_by_key(|dir| dir.to_lowercase());
-    dirs
+    files.sort_by_key(|file| file.to_lowercase());
+    (dirs, files)
 }
 
 /// `git` is normally on PATH; GUI launches sometimes miss the user's shims, so the two
@@ -713,20 +740,26 @@ mod tests {
     }
 
     #[test]
-    fn clean_dirs_lists_tracked_folders_without_changes() {
+    fn clean_entries_lists_tracked_folders_and_files_without_changes() {
         let tracked = vec![
             "src\\App.tsx".to_string(),
             "src\\deep\\x.rs".to_string(),
             "docs\\readme.md".to_string(),
             "README.md".to_string(),
             "dirty\\a.txt".to_string(),
+            "modified.txt".to_string(),
         ];
-        assert_eq!(clean_dirs(&tracked, None, &["dirty".to_string()]), ["docs", "src"]);
+        let changed = vec![GitFile {
+            path: "modified.txt".to_string(),
+            code: "M".to_string(),
+        }];
+        let (dirs, files) = clean_entries(&tracked, None, &["dirty".to_string()], &changed);
+        assert_eq!(dirs, ["docs", "src"]);
+        assert_eq!(files, ["README.md"]);
         // Inside a subfolder only that subtree counts, with the prefix stripped.
-        assert_eq!(
-            clean_dirs(&tracked, Some("src"), &[]),
-            ["deep"]
-        );
+        let (src_dirs, src_files) = clean_entries(&tracked, Some("src"), &[], &[]);
+        assert_eq!(src_dirs, ["deep"]);
+        assert_eq!(src_files, ["App.tsx"]);
     }
 
     /// The regression this module was fixed for: opening a folder git had collapsed to

@@ -16,8 +16,11 @@ import {
   FONT_FAMILIES,
   FONT_SIZE_MAX,
   FONT_SIZE_MIN,
+  ICON_SIZE_MAX,
+  ICON_SIZE_MIN,
   REGION_FONT_SIZE_MIN,
   clampFontSize,
+  clampIconSize,
   clampRegionFontSize,
 } from './fonts'
 
@@ -289,7 +292,7 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
   const tabFontSize = clampRegionFontSize(settings.tabFontSize, DEFAULT_TAB_FONT_SIZE)
   const listFontSize = clampRegionFontSize(settings.listFontSize, DEFAULT_LIST_FONT_SIZE)
   const navFontSize = clampRegionFontSize(settings.navFontSize, DEFAULT_NAV_FONT_SIZE)
-
+  const iconSize = clampIconSize(settings.iconSize)
   const keys = useMemo(() => resolveShortcuts(settings.shortcuts), [settings.shortcuts])
   const needle = query.trim().toLowerCase()
 
@@ -307,6 +310,7 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
       t('settings.font'),
       t('settings.fontSize'),
       t('settings.fontCustom'),
+      t('settings.iconSize'),
       t('settings.fontRegionsHint'),
       t('settings.fontTab'),
       t('settings.fontList'),
@@ -730,6 +734,25 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
                     className="h-4 w-[7rem] cursor-pointer accent-blue-600"
                   />
                   <span className="tabular w-9 text-right text-[0.71875rem] text-muted">{fontSize} px</span>
+                </div>
+              </div>
+              <div className="flex items-center justify-between gap-3 rounded-lg border border-line px-3 py-2">
+                <div className="min-w-0">
+                  <div className="text-[0.75rem] text-fg">{t('settings.iconSize')}</div>
+                  <div className="text-[0.65625rem] text-muted-2">{t('settings.iconSizeHint')}</div>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <input
+                    type="range"
+                    min={ICON_SIZE_MIN}
+                    max={ICON_SIZE_MAX}
+                    step={1}
+                    value={iconSize}
+                    onChange={(ev) => onChange({ ...settings, iconSize: Number(ev.target.value) })}
+                    aria-label={t('settings.iconSize')}
+                    className="h-4 w-[7rem] cursor-pointer accent-blue-600"
+                  />
+                  <span className="tabular w-9 text-right text-[0.71875rem] text-muted">{iconSize} px</span>
                 </div>
               </div>
               <div className="space-y-1.5 rounded-lg border border-line px-3 py-2">
