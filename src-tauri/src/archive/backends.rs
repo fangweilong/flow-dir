@@ -5,6 +5,8 @@
 
 use std::fs::File;
 use std::io::{BufReader, Read};
+use std::path::{Path as FsPath, PathBuf};
+
 use crate::error::ApiError;
 
 use super::entry;
@@ -154,15 +156,142 @@ fn sevenz_error(err: sevenz_rust2::Error, had_password: bool) -> ApiError {
     }
 }
 
-fn extract_rar(path: &str, sink: &mut Sink, password: Option<&str>) -> Result<(), ApiError> {
+/// Opens a local RAR with every sibling volume of its set registered, so a member that
+/// starts in one file and ends in another decodes as one stream.
+fn open_rar(path: &str, password: Option<&str>) -> Result<unrar_rs::RarArchive, ApiError> {
     use unrar_rs::RarArchive;
 
-    let file = File::open(path).map_err(|err| ApiError::from_io(path, &err))?;
+    // Only the first volume starts with a RAR signature; picking any other part of the
+    // set still has to open from there and then add the rest.
+    let set = rar_volume_set(FsPath::new(path)).unwrap_or_default();
+    let root = set.first().map_or(FsPath::new(path), PathBuf::as_path);
+
+    let file = File::open(root)
+        .map_err(|err| ApiError::from_io(root.to_string_lossy().as_ref(), &err))?;
     let opened = match password {
         Some(password) => RarArchive::open_with_password(file, password),
         None => RarArchive::open(file),
     };
     let mut archive = opened.map_err(|err| rar_error(err, password.is_some()))?;
+
+    for (index, volume) in set.iter().enumerate() {
+        if volume == root {
+            continue;
+        }
+        let Ok(reader) = File::open(volume) else {
+            // A gap means the later files cannot be addressed either; the volumes that
+            // did load still decode every member they cover.
+            break;
+        };
+        if archive.add_volume(index, Box::new(reader)).is_err() {
+            break;
+        }
+    }
+    Ok(archive)
+}
+
+/// Which naming scheme a RAR volume set follows; derived from any one of its files.
+enum VolumeFamily {
+    /// `name.part1.rar`, `name.part2.rar`, … (`-vn` in WinRAR/RAR).
+    Part(String),
+    /// `name.rar` followed by `name.r00`, `name.r01`, … or `name.001`, `name.002`, …
+    Sequence { base: String, width: usize },
+}
+
+impl VolumeFamily {
+    fn of(name: &str) -> Option<Self> {
+        let (stem, ext) = name.rsplit_once('.')?;
+        let ext = ext.to_ascii_lowercase();
+        if ext == "rar" {
+            let lower = stem.to_ascii_lowercase();
+            if let Some(cut) = lower.rfind(".part") {
+                let digits = &stem[cut + 5..];
+                if digits.bytes().all(|b| b.is_ascii_digit()) && !digits.is_empty() {
+                    return Some(Self::Part(stem[..cut].to_string()));
+                }
+            }
+            return Some(Self::Sequence {
+                base: stem.to_string(),
+                width: 0,
+            });
+        }
+        if ext.len() > 1 && ext.starts_with('r') && ext[1..].bytes().all(|b| b.is_ascii_digit()) {
+            return Some(Self::Sequence {
+                base: stem.to_string(),
+                width: 0,
+            });
+        }
+        if ext.bytes().all(|b| b.is_ascii_digit()) {
+            return Some(Self::Sequence {
+                base: stem.to_string(),
+                width: ext.len(),
+            });
+        }
+        None
+    }
+
+    /// Sort position of `name` inside the set, or `None` when it belongs elsewhere.
+    fn key(&self, name: &str) -> Option<u64> {
+        let (stem, ext) = name.rsplit_once('.')?;
+        let ext = ext.to_ascii_lowercase();
+        match self {
+            Self::Part(prefix) => {
+                if ext != "rar" || stem.len() < prefix.len() {
+                    return None;
+                }
+                let rest = stem[prefix.len()..].to_ascii_lowercase();
+                let digits = rest.strip_prefix(".part")?;
+                if !rest.starts_with(".part") || digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                    return None;
+                }
+                digits.parse().ok()
+            }
+            Self::Sequence { base, width } => {
+                let same_stem = stem.eq_ignore_ascii_case(base);
+                if ext == "rar" && same_stem {
+                    return Some(0);
+                }
+                if *width == 0 {
+                    // `name.r00` sorts right after `name.rar`.
+                    let digits = ext.strip_prefix('r')?;
+                    if !same_stem || digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                        return None;
+                    }
+                    return digits.parse::<u64>().ok().map(|n| n + 1);
+                }
+                if !same_stem || ext.len() != *width || !ext.bytes().all(|b| b.is_ascii_digit()) {
+                    return None;
+                }
+                ext.parse().ok()
+            }
+        }
+    }
+}
+
+/// Local volumes of the set `first` belongs to, first volume first. `None` for a plain
+/// single-volume archive, so extraction never touches unrelated files.
+fn rar_volume_set(first: &FsPath) -> Option<Vec<PathBuf>> {
+    let name = first.file_name()?.to_str()?;
+    let family = VolumeFamily::of(name)?;
+    let mut volumes: Vec<(u64, PathBuf)> = std::fs::read_dir(first.parent()?)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let key = family.key(path.file_name()?.to_str()?)?;
+            Some((key, path))
+        })
+        .collect();
+    if volumes.len() < 2 {
+        return None;
+    }
+    volumes.sort_by_key(|(key, _)| *key);
+    volumes.dedup_by_key(|(key, _)| *key);
+    Some(volumes.into_iter().map(|(_, path)| path).collect())
+}
+
+fn extract_rar(path: &str, sink: &mut Sink, password: Option<&str>) -> Result<(), ApiError> {
+    let mut archive = open_rar(path, password)?;
 
     // Headers cost nothing to read, so the password prompt and the totals both come from
     // a preflight pass instead of failing halfway through the member list.
@@ -545,9 +674,7 @@ pub fn list(path: &str, limit: usize) -> Result<Vec<ArchiveEntry>, ApiError> {
         return Ok(entries);
     }
     if format == Format::Rar {
-        use unrar_rs::RarArchive;
-        let archive = RarArchive::open(File::open(path).map_err(|err| ApiError::from_io(path, &err))?)
-            .map_err(|err| rar_error(err, false))?;
+        let archive = open_rar(path, None)?;
         let mut entries = Vec::new();
         for member in archive.entries() {
             if entries.len() >= limit {
@@ -625,4 +752,33 @@ fn push_iso_entries(node: &isomage::TreeNode, prefix: &str, limit: usize, out: &
 
 fn name_of(path: &str) -> &str {
     path.rsplit(['\\', '/']).next().unwrap_or(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VolumeFamily;
+
+    #[test]
+    fn volume_families_group_only_their_own_set() {
+        let part = VolumeFamily::of("拍 摄 集.part1.rar").unwrap();
+        assert_eq!(part.key("拍 摄 集.part1.rar"), Some(1));
+        assert_eq!(part.key("拍 摄 集.part02.RAR"), Some(2));
+        assert_eq!(part.key("拍 摄 集.part10.rar"), Some(10));
+        assert_eq!(part.key("拍 摄 集.zip"), None);
+        assert_eq!(part.key("别的.part2.rar"), None);
+
+        let legacy = VolumeFamily::of("数据.r00").unwrap();
+        assert_eq!(legacy.key("数据.rar"), Some(0));
+        assert_eq!(legacy.key("数据.r00"), Some(1));
+        assert_eq!(legacy.key("数据.R12"), Some(13));
+        assert_eq!(legacy.key("数据.txt"), None);
+
+        let numbered = VolumeFamily::of("视频.001").unwrap();
+        assert_eq!(numbered.key("视频.001"), Some(1));
+        assert_eq!(numbered.key("视频.007"), Some(7));
+        assert_eq!(numbered.key("视频.001.001"), None);
+
+        assert!(VolumeFamily::of("单卷.rar").is_some());
+        assert!(VolumeFamily::of("模糊文件").is_none());
+    }
 }

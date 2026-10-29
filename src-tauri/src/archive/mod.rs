@@ -280,6 +280,43 @@ mod tests {
     }
 
     #[test]
+    fn rar_volumes_are_joined() {
+        let solo_dir = temp_dir("rar5vol-solo");
+        let solo = solo_dir.join("rar5_multi.part1.rar");
+        std::fs::write(&solo, include_bytes!("../../tests/data/rar5_multi.part1.rar")).unwrap();
+        let alone = extract(&solo, &solo_dir.join("out"));
+        assert!(
+            alone.error.is_some(),
+            "one volume cannot decode members that continue in the others"
+        );
+
+        let dir = temp_dir("rar5vol");
+        for (part, bytes) in [
+            (1, &include_bytes!("../../tests/data/rar5_multi.part1.rar")[..]),
+            (2, &include_bytes!("../../tests/data/rar5_multi.part2.rar")[..]),
+            (3, &include_bytes!("../../tests/data/rar5_multi.part3.rar")[..]),
+            (4, &include_bytes!("../../tests/data/rar5_multi.part4.rar")[..]),
+        ] {
+            std::fs::write(dir.join(format!("rar5_multi.part{part}.rar")), bytes).unwrap();
+        }
+        let first = dir.join("rar5_multi.part1.rar");
+        let dest = dir.join("out");
+        let progress = extract(&first, &dest);
+        assert!(progress.error.is_none(), "{:?}", progress.error);
+        assert_eq!(progress.failed_count, 0);
+        assert_eq!(std::fs::read(dest.join("cebula.txt")).unwrap().len(), 814);
+        assert_eq!(std::fs::read(dest.join("elf-Linux-ARMv7-ls")).unwrap().len(), 90808);
+        assert_eq!(preview_entries(first.to_str().unwrap(), 100).unwrap().len(), 9);
+
+        // Starting from a middle volume still resolves the set from its siblings.
+        let late = dir.join("late");
+        let progress = extract(&dir.join("rar5_multi.part3.rar"), &late);
+        assert!(progress.error.is_none(), "{:?}", progress.error);
+        assert_eq!(std::fs::read(late.join("test6.bin")).unwrap().len(), 4096);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn rar_extracts_and_asks_for_a_password() {
         let dir = temp_dir("rar");
         let plain = dir.join("plain.rar");
