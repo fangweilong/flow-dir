@@ -89,9 +89,7 @@ fn natural_key(name: &str) -> Vec<u8> {
             }
             let digits = lower[start..i].trim_start_matches('0');
             let digits = if digits.is_empty() { "0" } else { digits };
-            for _ in 0..12usize.saturating_sub(digits.len()) {
-                out.push(b'0');
-            }
+            out.resize(out.len() + 12usize.saturating_sub(digits.len()), b'0');
             out.extend_from_slice(digits.as_bytes());
         } else {
             out.push(bytes[i]);
@@ -281,7 +279,7 @@ fn scan_fallback(
         let name = entry.file_name().to_string_lossy().into_owned();
         entries.push(Entry::new(name, size, mtime, attrs, 0));
         seen += 1;
-        if seen % 200 == 0 {
+        if seen.is_multiple_of(200) {
             progress(entries.len());
         }
         // One extra match proves there is more to read; truncating here keeps the
@@ -333,6 +331,7 @@ fn logical_wide(a: &[u16], b: &[u16]) -> std::cmp::Ordering {
 /// re-enumerate the folder.
 pub struct SortItem {
     pub name: String,
+    pub path: Option<String>,
     pub size: u64,
     pub mtime: u64,
     pub is_dir: bool,
@@ -345,6 +344,17 @@ pub fn sort_order(items: &[SortItem], key: &str, dir: &str) -> Vec<u32> {
     let wide: Vec<Vec<u16>> = items
         .iter()
         .map(|item| item.name.encode_utf16().chain(std::iter::once(0)).collect())
+        .collect();
+    let paths: Vec<Vec<u16>> = items
+        .iter()
+        .map(|item| {
+            item.path
+                .as_deref()
+                .unwrap_or("")
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect()
+        })
         .collect();
     let ext: Vec<Vec<u8>> = items
         .iter()
@@ -369,6 +379,7 @@ pub fn sort_order(items: &[SortItem], key: &str, dir: &str) -> Vec<u32> {
             "size" => x.size.cmp(&y.size),
             "mtime" => x.mtime.cmp(&y.mtime),
             "type" => ext[a as usize].cmp(&ext[b as usize]),
+            "path" => logical_wide(&paths[a as usize], &paths[b as usize]),
             _ => logical_wide(&wide[a as usize], &wide[b as usize]),
         };
         let primary = if desc { primary.reverse() } else { primary };
@@ -639,7 +650,7 @@ fn network_locations() -> Vec<Drive> {
             available: false,
         });
     }
-    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out.sort_by_key(|a| a.name.to_lowercase());
     out
 }
 
@@ -791,10 +802,10 @@ mod tests {
     #[test]
     fn sort_order_matches_the_scanner() {
         let items = vec![
-            SortItem { name: "file10.txt".into(), size: 10, mtime: 3, is_dir: false },
-            SortItem { name: "file2.txt".into(), size: 20, mtime: 2, is_dir: false },
-            SortItem { name: "Docs".into(), size: 0, mtime: 1, is_dir: true },
-            SortItem { name: "中文.txt".into(), size: 30, mtime: 4, is_dir: false },
+            SortItem { name: "file10.txt".into(), path: Some(r"C:\b\file10.txt".into()), size: 10, mtime: 3, is_dir: false },
+            SortItem { name: "file2.txt".into(), path: Some(r"C:\a\file2.txt".into()), size: 20, mtime: 2, is_dir: false },
+            SortItem { name: "Docs".into(), path: Some(r"C:\c\Docs".into()), size: 0, mtime: 1, is_dir: true },
+            SortItem { name: "中文.txt".into(), path: Some(r"C:\a\中文.txt".into()), size: 30, mtime: 4, is_dir: false },
         ];
         let names = |order: Vec<u32>| {
             order
@@ -811,11 +822,14 @@ mod tests {
         assert_eq!(by_size[0], "Docs");
         assert_eq!(&by_size[1..], ["file10.txt", "file2.txt", "中文.txt"]);
 
+        let by_path = names(sort_order(&items, "path", "asc"));
+        assert_eq!(by_path[0], "Docs");
+        assert_eq!(&by_path[1..3], ["file2.txt", "中文.txt"]);
+
         // A descending sort flips the key but keeps folders on top, like Explorer.
         let desc = names(sort_order(&items, "name", "desc"));
         assert_eq!(desc[0], "Docs");
     }
-
     /// The overview must show real capacity for a system drive and mark dead devices as
     /// unavailable rather than as 0-byte volumes.
     #[test]

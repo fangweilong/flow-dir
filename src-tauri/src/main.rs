@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![allow(clippy::too_many_arguments)]
 
 mod archive;
 mod clipboard;
@@ -127,7 +128,7 @@ fn list_dir(
         token: cancel.clone(),
     };
 
-    let _ = tauri::async_runtime::spawn_blocking(move || {
+    drop(tauri::async_runtime::spawn_blocking(move || {
         let _guard = guard;
         let started = std::time::Instant::now();
         log::info!(
@@ -229,7 +230,7 @@ fn list_dir(
             items: batch,
             error: None,
         });
-    });
+    }));
     Ok(())
 }
 
@@ -371,6 +372,7 @@ async fn unique_paths(paths: Vec<String>) -> Vec<String> {
 #[serde(rename_all = "camelCase")]
 struct SortItemIn {
     name: String,
+    path: Option<String>,
     size: u64,
     mtime: u64,
     is_dir: bool,
@@ -387,6 +389,7 @@ async fn sort_order(items: Vec<SortItemIn>, key: String, dir: String) -> Vec<u32
             .into_iter()
             .map(|item| fs::SortItem {
                 name: item.name,
+                path: item.path,
                 size: item.size,
                 mtime: item.mtime,
                 is_dir: item.is_dir,
@@ -828,6 +831,7 @@ fn preview_external(
 fn search_start(
     state: tauri::State<'_, search::SearchState>,
     root: String,
+    roots: Option<Vec<String>>,
     query: String,
     gen: u64,
     limit: u32,
@@ -839,12 +843,20 @@ fn search_start(
 ) -> Result<(), ApiError> {
     let cancel = state.begin();
     let started = std::time::Instant::now();
-    let log_root = root.clone();
+    let search_roots = match roots {
+        Some(list) if !list.is_empty() => list,
+        _ => vec![root],
+    };
+    let log_root = if search_roots.len() == 1 {
+        search_roots[0].clone()
+    } else {
+        format!("{} roots", search_roots.len())
+    };
     log::info!(target: "flowdir::search", "search_start gen={gen} limit={limit}");
-    log::debug!(target: "flowdir::search", "search root={root}");
-    let _ = tauri::async_runtime::spawn_blocking(move || {
+    log::debug!(target: "flowdir::search", "search roots={log_root}");
+    drop(tauri::async_runtime::spawn_blocking(move || {
         search::run(
-            root,
+            search_roots,
             query,
             gen,
             limit,
@@ -860,8 +872,8 @@ fn search_start(
             "search done gen={gen} in {}ms",
             started.elapsed().as_millis()
         );
-        log::debug!(target: "flowdir::search", "search root={log_root}");
-    });
+        log::debug!(target: "flowdir::search", "search roots={log_root}");
+    }));
     Ok(())
 }
 

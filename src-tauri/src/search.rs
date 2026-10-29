@@ -102,7 +102,7 @@ impl SearchFilter {
             }
             let ext = name.rsplit_once('.').map(|(_, ext)| ext.to_lowercase());
             match ext {
-                Some(ext) if self.extensions.iter().any(|want| *want == ext) => {}
+                Some(ext) if self.extensions.contains(&ext) => {}
                 _ => return false,
             }
         }
@@ -181,7 +181,7 @@ pub struct SearchBatch {
 }
 
 pub fn run(
-    root: String,
+    roots: Vec<String>,
     query: String,
     gen: u64,
     limit: u32,
@@ -196,7 +196,12 @@ pub fn run(
     // literal filter needs, so this clamp also bounds that request.
     let limit = limit.clamp(1, 5000) as usize;
     let needle = query.trim().to_lowercase();
-    if needle.is_empty() {
+    let roots: Vec<String> = roots
+        .into_iter()
+        .map(|r| r.trim().to_string())
+        .filter(|r| !r.is_empty())
+        .collect();
+    if needle.is_empty() || roots.is_empty() {
         let _ = on_batch.send(SearchBatch {
             gen,
             provider: "none".into(),
@@ -236,7 +241,7 @@ pub fn run(
     // Everything cannot express size/time/attribute filters or read file contents; the
     // built-in scanner is slower but is the only provider that can honour those requests.
     if prefer_everything && filter.is_empty() && content_re.is_none() {
-        if let Ok(items) = everything_search(&root, &needle, limit, hidden, &cancel) {
+        if let Ok(items) = everything_search(&roots, &needle, limit, hidden, &cancel) {
             let _ = on_batch.send(SearchBatch {
                 gen,
                 provider: "everything".into(),
@@ -247,39 +252,48 @@ pub fn run(
             return;
         }
     }
-    let root_path = PathBuf::from(&root);
-    // jwalk's own `skip_hidden` only understands dot-prefixed names; Windows hides files
-    // through file attributes, so the filter lives in `process_read_dir` and also prunes
-    // hidden directories before they are entered.
-    let walker = jwalk::WalkDir::new(&root_path)
-        .skip_hidden(false)
-        .follow_links(false)
-        .process_read_dir(move |_depth, _path, _state, children| {
-            if hidden {
-                return;
-            }
-            children.retain(|child| {
-                child
-                    .as_ref()
-                    .map(|entry| {
-                        entry
-                            .metadata()
-                            .map(|meta| meta.file_attributes() & (ATTR_HIDDEN | ATTR_SYSTEM) == 0)
-                            .unwrap_or(true)
-                    })
-                    .unwrap_or(true)
-            });
-        });
 
     let mut batch: Vec<SearchItem> = Vec::with_capacity(BATCH);
     let mut total = 0usize;
-    for entry in walker {
-        if cancel.load(Ordering::Relaxed) {
-            return;
-        }
-        let Ok(entry) = entry else {
-            continue;
-        };
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    'outer: for root in &roots {
+        let root_path = PathBuf::from(root);
+        // jwalk's own `skip_hidden` only understands dot-prefixed names; Windows hides files
+        // through file attributes, so the filter lives in `process_read_dir` and also prunes
+        // hidden directories before they are entered.
+        let walker = jwalk::WalkDir::new(&root_path)
+            .skip_hidden(false)
+            .follow_links(false)
+            .process_read_dir(move |_depth, _path, _state, children| {
+                if hidden {
+                    return;
+                }
+                children.retain(|child| {
+                    child
+                        .as_ref()
+                        .map(|entry| {
+                            entry
+                                .metadata()
+                                .map(|meta| meta.file_attributes() & (ATTR_HIDDEN | ATTR_SYSTEM) == 0)
+                                .unwrap_or(true)
+                        })
+                        .unwrap_or(true)
+                });
+            });
+
+        for entry in walker {
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let item_path = entry.path().to_string_lossy().into_owned();
+            let key = item_path.to_lowercase();
+            if !seen.insert(key) {
+                continue;
+            }
         // Folders are search hits too: Everything returns them, so the built-in provider
         // must as well or the same query gives different results per provider.
         let is_dir = entry.file_type().is_dir();
@@ -317,35 +331,17 @@ pub fn run(
                 None => continue,
             }
         };
-        batch.push(SearchItem {
-            path: entry.path().to_string_lossy().into_owned(),
-            name,
-            is_dir,
-            size,
-            mtime,
-            snippet,
-        });
-        total += 1;
+            batch.push(SearchItem {
+                path: item_path,
+                name,
+                is_dir,
+                size,
+                mtime,
+                snippet,
+            });
+            total += 1;
 
-        if batch.len() >= BATCH {
-            let items = std::mem::take(&mut batch);
-            if on_batch
-                .send(SearchBatch {
-                    gen,
-                    provider: "jwalk".into(),
-                    items,
-                    done: false,
-                    error: None,
-                })
-                .is_err()
-            {
-                return;
-            }
-        }
-        // Checked after the flush above: the batch containing the limit-th match is sent
-        // first, but never with more items than the caller asked for.
-        if total >= limit {
-            if !batch.is_empty() {
+            if batch.len() >= BATCH {
                 let items = std::mem::take(&mut batch);
                 if on_batch
                     .send(SearchBatch {
@@ -360,10 +356,23 @@ pub fn run(
                     return;
                 }
             }
-            break;
+            // Checked after the flush above: the batch containing the limit-th match is sent
+            // first, but never with more items than the caller asked for.
+            if total >= limit {
+                if !batch.is_empty() {
+                    let items = std::mem::take(&mut batch);
+                    let _ = on_batch.send(SearchBatch {
+                        gen,
+                        provider: "jwalk".into(),
+                        items,
+                        done: false,
+                        error: None,
+                    });
+                }
+                break 'outer;
+            }
         }
     }
-
     let _ = on_batch.send(SearchBatch {
         gen,
         provider: "jwalk".into(),
@@ -419,16 +428,32 @@ pub fn everything_status() -> EverythingStatus {
 /// Builds the Everything query for a literal filename substring. Everything's own
 /// operators cannot be escaped reliably, so needles containing them fall back to the
 /// built-in scanner; this keeps both providers returning the same hits.
-fn everything_query(root: &str, needle: &str) -> Option<String> {
+fn everything_query(roots: &[String], needle: &str) -> Option<String> {
     const OPERATORS: &[char] = &['"', '|', '!', '(', ')', '<', '>', '*', '?', '\\', '/'];
-    if root.is_empty() || needle.chars().any(|ch| OPERATORS.contains(&ch)) {
+    if roots.is_empty() || needle.chars().any(|ch| OPERATORS.contains(&ch)) {
         return None;
     }
-    Some(format!(
-        "path:\"{}\" \"{}\"",
-        root.trim_end_matches('\\'),
-        needle
-    ))
+    if roots.iter().any(|r| r.is_empty()) {
+        return None;
+    }
+    if roots.len() == 1 {
+        Some(format!(
+            "path:\"{}\" \"{}\"",
+            roots[0].trim_end_matches('\\'),
+            needle
+        ))
+    } else {
+        let paths = roots
+            .iter()
+            .map(|r| format!("path:\"{}\"", r.trim_end_matches('\\')))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        Some(format!("<{}> \"{}\"", paths, needle))
+    }
+}
+
+fn under_roots(path: &str, roots: &[String]) -> bool {
+    roots.iter().any(|r| under_root(path, r))
 }
 
 /// Everything's `path:` is a substring filter; `C:\foo` must not match `C:\foobar`.
@@ -448,11 +473,14 @@ fn under_root(path: &str, root: &str) -> bool {
 /// folder must still be filtered out when hidden entries are off.
 fn has_hidden_ancestor(
     path: &str,
-    root: &str,
+    roots: &[String],
     cache: &mut std::collections::HashMap<String, bool>,
 ) -> bool {
     use std::os::windows::fs::MetadataExt;
-    let root_key = root.trim_end_matches(['\\', '/']).to_lowercase();
+    let root_keys: Vec<String> = roots
+        .iter()
+        .map(|r| r.trim_end_matches(['\\', '/']).to_lowercase())
+        .collect();
     let mut current = std::path::Path::new(path).parent();
     while let Some(dir) = current {
         let key = dir.to_string_lossy().to_lowercase();
@@ -469,7 +497,7 @@ fn has_hidden_ancestor(
                 return true;
             }
         }
-        if key == root_key {
+        if root_keys.iter().any(|rk| &key == rk) {
             break;
         }
         current = dir.parent();
@@ -478,7 +506,7 @@ fn has_hidden_ancestor(
 }
 
 fn everything_search(
-    root: &str,
+    roots: &[String],
     needle: &str,
     limit: usize,
     hidden: bool,
@@ -492,7 +520,7 @@ fn everything_search(
             "disabled by FLOWDIR_DISABLE_EVERYTHING",
         ));
     }
-    let Some(search) = everything_query(root, needle) else {
+    let Some(search) = everything_query(roots, needle) else {
         return Err(ApiError::new(
             "EVERYTHING",
             "query contains syntax characters; using the literal scanner",
@@ -536,14 +564,14 @@ fn everything_search(
         };
         let dir = dir.display().to_string();
         let path = format!("{}\\{}", dir.trim_end_matches('\\'), name);
-        if !under_root(&path, root) {
+        if !under_roots(&path, roots) {
             continue;
         }
         let attrs = item.get_u32(RequestFlags::Attributes).unwrap_or(0);
         if !hidden && attrs & (ATTR_HIDDEN | ATTR_SYSTEM) != 0 {
             continue;
         }
-        if !hidden && has_hidden_ancestor(&path, root, &mut ancestor_cache) {
+        if !hidden && has_hidden_ancestor(&path, roots, &mut ancestor_cache) {
             continue;
         }
         let is_dir = attrs & 0x10 != 0;
@@ -610,7 +638,7 @@ mod tests {
             Ok(())
         });
         run(
-            root.to_string(),
+            vec![root.to_string()],
             query.to_string(),
             1,
             limit,
@@ -671,21 +699,68 @@ mod tests {
     #[test]
     fn everything_query_stays_literal_and_scoped() {
         assert_eq!(
-            everything_query(r"C:\Work", "annual report").as_deref(),
+            everything_query(&[r"C:\Work".into()], "annual report").as_deref(),
             Some(r#"path:"C:\Work" "annual report""#)
         );
         assert_eq!(
-            everything_query(r"C:\", "notes").as_deref(),
+            everything_query(&[r"C:\".into()], "notes").as_deref(),
             Some(r#"path:"C:" "notes""#)
         );
-        assert!(everything_query(r"C:\Work", "a|b").is_none());
-        assert!(everything_query(r"C:\Work", "*.txt").is_none());
-        assert!(everything_query("", "notes").is_none());
+        assert_eq!(
+            everything_query(&[r"C:\Work".into(), r"D:\Docs".into()], "notes").as_deref(),
+            Some(r#"<path:"C:\Work" | path:"D:\Docs"> "notes""#)
+        );
+        assert!(everything_query(&[r"C:\Work".into()], "a|b").is_none());
+        assert!(everything_query(&[r"C:\Work".into()], "*.txt").is_none());
+        assert!(everything_query(&[], "notes").is_none());
+        assert!(everything_query(&["".into()], "notes").is_none());
 
         assert!(under_root(r"c:\work\a.txt", r"C:\Work"));
         assert!(under_root(r"c:\work", r"C:\Work\"));
         assert!(under_root(r"\\server\share\a.txt", r"\\server\share"));
         assert!(!under_root(r"c:\workshop\a.txt", r"C:\Work"));
+    }
+
+    #[test]
+    fn builtin_scan_searches_multiple_roots() {
+        let base = std::env::temp_dir().join(format!("flowdir-search-multi-{}", std::process::id()));
+        let dir_a = base.join("dir_a");
+        let dir_b = base.join("dir_b");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+        std::fs::write(dir_a.join("target_a.txt"), "hello").unwrap();
+        std::fs::write(dir_b.join("target_b.txt"), "world").unwrap();
+        std::fs::write(dir_b.join("other.txt"), "world").unwrap();
+
+        let batches: Arc<Mutex<Vec<SearchBatch>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = batches.clone();
+        let channel = Channel::new(move |body| {
+            if let tauri::ipc::InvokeResponseBody::Json(text) = body {
+                if let Ok(batch) = serde_json::from_str::<SearchBatch>(&text) {
+                    sink.lock().unwrap().push(batch);
+                }
+            }
+            Ok(())
+        });
+        run(
+            vec![dir_a.to_string_lossy().to_string(), dir_b.to_string_lossy().to_string()],
+            "target".into(),
+            1,
+            50,
+            false,
+            false,
+            SearchFilter::default(),
+            ContentOptions::default(),
+            Arc::new(AtomicBool::new(false)),
+            channel,
+        );
+        let items: Vec<SearchItem> = batches.lock().unwrap().iter().flat_map(|b| b.items.clone()).collect();
+        assert_eq!(items.len(), 2);
+        let names: Vec<String> = items.into_iter().map(|it| it.name).collect();
+        assert!(names.contains(&"target_a.txt".to_string()));
+        assert!(names.contains(&"target_b.txt".to_string()));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// A partial final batch must be cut to the remaining quota instead of being sent whole.

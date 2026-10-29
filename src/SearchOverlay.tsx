@@ -8,9 +8,9 @@ import { BASE_FONT_SIZE, clampFontSize } from './fonts'
 import type { ApiError, Lang } from './types'
 import type { SearchItem } from './types'
 
-type SearchScope = 'folder' | 'drive'
-type SearchSort = { key: 'name' | 'size' | 'mtime'; dir: 'asc' | 'desc' }
-
+export type OpenTab = { id: string; title: string; path: string }
+type SearchScope = 'folder' | 'drive' | 'all-tabs' | `tab:${string}`
+type SearchSort = { key: 'name' | 'size' | 'mtime' | 'path' | 'type'; dir: 'asc' | 'desc' }
 /** Filter values live in localStorage so a restart keeps the last search setup. */
 type UiFilter = {
   minMb: string
@@ -55,7 +55,14 @@ function sortResults(items: SearchItem[], sort: SearchSort, collator: Intl.Colla
         ? a.size - b.size
         : sort.key === 'mtime'
           ? a.mtime - b.mtime
-          : collator.compare(a.name, b.name)
+          : sort.key === 'path'
+            ? collator.compare(a.path, b.path)
+            : sort.key === 'type'
+              ? collator.compare(
+                  a.name.lastIndexOf('.') > 0 ? a.name.slice(a.name.lastIndexOf('.') + 1).toLowerCase() : '',
+                  b.name.lastIndexOf('.') > 0 ? b.name.slice(b.name.lastIndexOf('.') + 1).toLowerCase() : '',
+                )
+              : collator.compare(a.name, b.name)
     if (primary !== 0) return primary * factor
     return collator.compare(a.name, b.name)
   })
@@ -125,8 +132,8 @@ function Highlight({ text, needle }: { text: string; needle: string }) {
 
 type Props = {
   root: string
+  openTabs?: OpenTab[]
   lang: Lang
-  /** Base UI text size; icons request their raster at the same scale. */
   fontSize: number
   preferEverything: boolean
   /** Built-in scan follows the pane's show-hidden setting. */
@@ -142,6 +149,7 @@ type Props = {
 
 export function SearchOverlay({
   root,
+  openTabs,
   lang,
   fontSize,
   preferEverything,
@@ -185,7 +193,22 @@ export function SearchOverlay({
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const driveRoot = volumeRoot(root)
-  const searchRoot = scope === 'drive' && driveRoot ? driveRoot : root
+  const otherTabs = useMemo(
+    () => openTabs?.filter((tab) => tab.path && tab.path.toLowerCase() !== root.toLowerCase()) ?? [],
+    [openTabs, root],
+  )
+  const searchRoots = useMemo(() => {
+    if (scope === 'drive' && driveRoot) return [driveRoot]
+    if (scope === 'all-tabs' && openTabs?.length) {
+      return Array.from(new Set(openTabs.map((tab) => tab.path).filter(Boolean)))
+    }
+    if (scope.startsWith('tab:')) {
+      const tabPath = scope.slice(4)
+      if (tabPath) return [tabPath]
+    }
+    return [root]
+  }, [scope, driveRoot, openTabs, root])
+  const searchRoot = searchRoots[0] || root
   const collator = useMemo(
     () => new Intl.Collator(lang === 'zh-CN' ? 'zh-CN' : 'en', { numeric: true, sensitivity: 'base' }),
     [lang],
@@ -209,7 +232,7 @@ export function SearchOverlay({
     let stale = false
     const timer = window.setTimeout(() => {
       void sortOrder(
-        items.map((item) => ({ name: item.name, size: item.size, mtime: item.mtime, isDir: item.isDir })),
+        items.map((item) => ({ name: item.name, path: item.path, size: item.size, mtime: item.mtime, isDir: item.isDir })),
         sort.key,
         sort.dir,
       )
@@ -284,20 +307,31 @@ export function SearchOverlay({
     void searchCancel().catch(() => undefined)
     const timer = window.setTimeout(() => {
       const acc: SearchItem[] = []
-      searchStart(searchRoot, value, id, limit, preferEverything, showHidden, filter, content, (batch) => {
-        if (batch.gen !== gen.current) return
-        if (batch.error) {
-          setError(batch.error)
-          setLoading(false)
-          return
-        }
-        if (batch.items.length) {
-          acc.push(...batch.items)
-          setItems(acc.slice())
-        }
-        setProvider(batch.provider)
-        if (batch.done) setLoading(false)
-      }).catch((e: unknown) => {
+      searchStart(
+        searchRoot,
+        value,
+        id,
+        limit,
+        preferEverything,
+        showHidden,
+        filter,
+        content,
+        (batch) => {
+          if (batch.gen !== gen.current) return
+          if (batch.error) {
+            setError(batch.error)
+            setLoading(false)
+            return
+          }
+          if (batch.items.length) {
+            acc.push(...batch.items)
+            setItems(acc.slice())
+          }
+          setProvider(batch.provider)
+          if (batch.done) setLoading(false)
+        },
+        searchRoots,
+      ).catch((e: unknown) => {
         if (gen.current !== id) return
         setError({ code: 'SEARCH', detail: String(e) })
         setLoading(false)
@@ -305,7 +339,7 @@ export function SearchOverlay({
     }, 200)
 
     return () => window.clearTimeout(timer)
-  }, [query, searchRoot, scope, preferEverything, showHidden, filter, content, limit])
+  }, [query, searchRoot, searchRoots, scope, preferEverything, showHidden, filter, content, limit])
 
   useEffect(() => {
     return () => {
@@ -603,6 +637,14 @@ export function SearchOverlay({
                 {t('search.scopeDrive', { name: driveRoot.replace(/\\$/, '') })}
               </option>
             )}
+            {openTabs && openTabs.length > 1 && (
+              <option value="all-tabs">{t('search.scopeAllTabs')}</option>
+            )}
+            {otherTabs.map((tab) => (
+              <option key={tab.id} value={`tab:${tab.path}`}>
+                {t('search.scopeTab', { name: tab.title })}
+              </option>
+            ))}
           </select>
           <span className="ml-2">{t('search.sort')}</span>
           <select
@@ -614,6 +656,8 @@ export function SearchOverlay({
             <option value="name">{t('search.sortName')}</option>
             <option value="size">{t('search.sortSize')}</option>
             <option value="mtime">{t('search.sortTime')}</option>
+            <option value="path">{t('search.sortPath')}</option>
+            <option value="type">{t('search.sortType')}</option>
           </select>
           <button
             type="button"

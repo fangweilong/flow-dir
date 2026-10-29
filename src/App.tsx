@@ -3235,6 +3235,20 @@ export default function App() {
     return paths
   }, [ws])
 
+  /** Open tabs available for cross-tab search scoping. */
+  const openTabsForSearch = useMemo(() => {
+    if (!ws) return []
+    const list: { id: string; title: string; path: string }[] = []
+    const seen = new Set<string>()
+    for (const tab of Object.values(ws.tabs)) {
+      if (tab.path && isFsPath(tab.path) && !seen.has(tab.path.toLowerCase())) {
+        seen.add(tab.path.toLowerCase())
+        list.push({ id: tab.id, title: baseName(tab.path) || tab.path, path: tab.path })
+      }
+    }
+    return list
+  }, [ws])
+
   /**
    * Keeps the active folder centred in the sidebar instead of parking it on the bottom
    * edge the way `scrollIntoView({block:'nearest'})` does. Rows that are already fully
@@ -4004,6 +4018,7 @@ export default function App() {
       {searchOpen && activeTab && (
         <SearchOverlay
           root={activeTab.path || homeRef.current}
+          openTabs={openTabsForSearch}
           lang={lang}
           fontSize={settings.fontSize}
           preferEverything={settings.useEverything}

@@ -36,7 +36,7 @@ export const pathsExist = (paths: string[]) => invoke<boolean[]>('paths_exist', 
 export const uniquePaths = (paths: string[]) => invoke<string[]>('unique_paths', { paths })
 
 /** Row shape for {@link sortOrder}; mirrors the fields a listing already carries. */
-export type SortItem = { name: string; size: number; mtime: number; isDir: boolean }
+export type SortItem = { name: string; path?: string; size: number; mtime: number; isDir: boolean }
 /**
  * Display order for rows already on screen. Uses the backend's Explorer-compatible
  * comparator, so changing the sort column never re-enumerates the folder.
@@ -303,11 +303,13 @@ export function searchStart(
   filter: SearchFilter,
   content: ContentOptions,
   onBatch: (batch: SearchBatch) => void,
+  roots?: string[],
 ) {
   const channel = new Channel<SearchBatch>()
   channel.onmessage = onBatch
   return invoke<void>('search_start', {
     root,
+    roots: roots?.length ? roots : undefined,
     query,
     gen,
     limit,
