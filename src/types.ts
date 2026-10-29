@@ -127,6 +127,14 @@ export type UpdateStatus = {
   error: ApiError | null
 }
 
+export type UpdateProgress = {
+  phase: 'connecting' | 'downloading' | 'verifying' | 'ready'
+  downloaded: number
+  total: number
+  percent: number
+  bytesPerSec: number
+}
+
 export type Entry = { name: string; size: number; mtime: number; attrs: number; id: number }
 
 export type SortKey = 'name' | 'size' | 'mtime' | 'type'

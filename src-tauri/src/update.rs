@@ -68,6 +68,18 @@ pub struct UpdateStatus {
     pub error: Option<ApiError>,
 }
 
+/// Progress report emitted during an update download/install.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateProgress {
+    /// "connecting" | "downloading" | "verifying" | "ready"
+    pub phase: String,
+    pub downloaded: u64,
+    pub total: u64,
+    pub percent: u8,
+    pub bytes_per_sec: u64,
+}
+
 #[derive(Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct State {
@@ -235,7 +247,7 @@ fn install_inner<R: Runtime>(app: &AppHandle<R>) -> Result<(), ApiError> {
     let dir = std::env::temp_dir().join(format!("FlowDir-update-{}", random_hex()));
     fs::create_dir_all(&dir).map_err(|e| ApiError::new("UPDATE_IO", e.to_string()))?;
     let downloaded = dir.join(&asset.name);
-    download(&slug, asset, &downloaded)?;
+    download(app, &slug, asset, &downloaded)?;
 
     let exe = std::env::current_exe().map_err(|e| ApiError::new("UPDATE_IO", e.to_string()))?;
     let body = match flavor {
@@ -346,30 +358,238 @@ fn validate_asset(asset: &Asset) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn download(slug: &str, asset: &Asset, dest: &PathBuf) -> Result<(), ApiError> {
+fn download<R: Runtime>(
+    app: &AppHandle<R>,
+    slug: &str,
+    asset: &Asset,
+    dest: &PathBuf,
+) -> Result<(), ApiError> {
     validate_asset(asset)?;
+    let emit = |p: UpdateProgress| {
+        let _ = app.emit("flowdir:update-progress", p);
+    };
+
     let path = format!("/{slug}/releases/latest/download/{}", asset.name);
-    let bytes = http_get("github.com", &path)?;
-    if bytes.len() as u64 != asset.size {
-        return Err(ApiError::new(
-            "UPDATE_SIZE",
-            format!("{} != {}", bytes.len(), asset.size),
+    let mut last_err = None;
+    for attempt in 1..=3 {
+        emit(UpdateProgress {
+            phase: if attempt == 1 {
+                "connecting".into()
+            } else {
+                format!("retrying ({attempt}/3)")
+            },
+            downloaded: 0,
+            total: asset.size,
+            percent: 0,
+            bytes_per_sec: 0,
+        });
+
+        let res = http_download_file("github.com", &path, dest, asset.size, |downloaded, speed| {
+            let percent = if asset.size > 0 {
+                ((downloaded as f64 / asset.size as f64) * 100.0).min(100.0) as u8
+            } else {
+                0
+            };
+            emit(UpdateProgress {
+                phase: "downloading".into(),
+                downloaded,
+                total: asset.size,
+                percent,
+                bytes_per_sec: speed,
+            });
+        });
+
+        match res {
+            Ok(()) => {
+                emit(UpdateProgress {
+                    phase: "verifying".into(),
+                    downloaded: asset.size,
+                    total: asset.size,
+                    percent: 100,
+                    bytes_per_sec: 0,
+                });
+                match verify_file(dest, asset) {
+                    Ok(()) => {
+                        last_err = None;
+                        break;
+                    }
+                    Err(e) => {
+                        let _ = fs::remove_file(dest);
+                        last_err = Some(e);
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = fs::remove_file(dest);
+                last_err = Some(e);
+            }
+        }
+        if attempt < 3 {
+            std::thread::sleep(Duration::from_millis(1500));
+        }
+    }
+
+    if let Some(err) = last_err {
+        return Err(err);
+    }
+
+    emit(UpdateProgress {
+        phase: "ready".into(),
+        downloaded: asset.size,
+        total: asset.size,
+        percent: 100,
+        bytes_per_sec: 0,
+    });
+
+    Ok(())
+}
+
+fn http_download_file<F>(
+    host: &str,
+    path: &str,
+    dest: &Path,
+    total_size: u64,
+    mut on_progress: F,
+) -> Result<(), ApiError>
+where
+    F: FnMut(u64, u64),
+{
+    use std::io::Write;
+    let mut file = std::fs::File::create(dest).map_err(|e| ApiError::new("UPDATE_IO", e.to_string()))?;
+
+    unsafe {
+        let agent = wide(AGENT);
+        let session = WinHttpOpen(
+            PCWSTR(agent.as_ptr()),
+            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+            PCWSTR::null(),
+            PCWSTR::null(),
+            0,
+        );
+        if session.is_null() {
+            return Err(ApiError::new("UPDATE_NET", "WinHttpOpen failed"));
+        }
+        let session = Handle(session);
+        let _ = WinHttpSetTimeouts(session.0, 10_000, 15_000, 15_000, 30_000);
+
+        let host_wide = wide(host);
+        let connect = WinHttpConnect(
+            session.0,
+            PCWSTR(host_wide.as_ptr()),
+            INTERNET_DEFAULT_HTTPS_PORT,
+            0,
+        );
+        if connect.is_null() {
+            return Err(ApiError::new(
+                "UPDATE_NET",
+                format!("cannot connect to {host}"),
+            ));
+        }
+        let connect = Handle(connect);
+
+        let verb = wide("GET");
+        let target = wide(path);
+        let request = WinHttpOpenRequest(
+            connect.0,
+            PCWSTR(verb.as_ptr()),
+            PCWSTR(target.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            std::ptr::null(),
+            WINHTTP_FLAG_SECURE,
+        );
+        if request.is_null() {
+            return Err(ApiError::new("UPDATE_NET", "WinHttpOpenRequest failed"));
+        }
+        let request = Handle(request);
+
+        let policy: u32 = WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;
+        let policy_bytes =
+            std::slice::from_raw_parts(&policy as *const u32 as *const u8, size_of::<u32>());
+        let _ = WinHttpSetOption(
+            Some(request.0 as *const _),
+            WINHTTP_OPTION_REDIRECT_POLICY,
+            Some(policy_bytes),
+        );
+
+        let headers = wide(&format!(
+            "User-Agent: {AGENT}\r\nAccept: application/octet-stream\r\nCache-Control: no-cache"
         ));
+        WinHttpSendRequest(
+            request.0,
+            Some(&headers[..headers.len() - 1]),
+            None,
+            0,
+            0,
+            0,
+        )
+        .map_err(|e| ApiError::new("UPDATE_NET", e.to_string()))?;
+        WinHttpReceiveResponse(request.0, std::ptr::null_mut())
+            .map_err(|e| ApiError::new("UPDATE_NET", e.to_string()))?;
+
+        let mut status = 0u32;
+        let mut len = size_of::<u32>() as u32;
+        WinHttpQueryHeaders(
+            request.0,
+            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            PCWSTR::null(),
+            Some(&mut status as *mut u32 as *mut std::ffi::c_void),
+            &mut len,
+            std::ptr::null_mut(),
+        )
+        .map_err(|e| ApiError::new("UPDATE_NET", e.to_string()))?;
+        if status != 200 {
+            return Err(ApiError::new(
+                "UPDATE_HTTP",
+                format!("status {status} for {path}"),
+            ));
+        }
+        let final_url = query_url(request.0).unwrap_or_default();
+        validate_download_url(&final_url)?;
+
+        let mut downloaded = 0u64;
+        let mut buffer = vec![0u8; 64 * 1024];
+        let mut last_emit = std::time::Instant::now();
+        let mut last_bytes = 0u64;
+
+        loop {
+            let mut read = 0u32;
+            WinHttpReadData(
+                request.0,
+                buffer.as_mut_ptr() as *mut _,
+                buffer.len() as u32,
+                &mut read,
+            )
+            .map_err(|e| ApiError::new("UPDATE_NET", e.to_string()))?;
+            if read == 0 {
+                break;
+            }
+            file.write_all(&buffer[..read as usize])
+                .map_err(|e| ApiError::new("UPDATE_IO", e.to_string()))?;
+            downloaded += read as u64;
+
+            let now = std::time::Instant::now();
+            let elapsed = now.duration_since(last_emit);
+            if elapsed.as_millis() >= 150 || downloaded == total_size {
+                let speed = if elapsed.as_secs_f64() > 0.0 {
+                    ((downloaded.saturating_sub(last_bytes)) as f64 / elapsed.as_secs_f64()) as u64
+                } else {
+                    0
+                };
+                last_emit = now;
+                last_bytes = downloaded;
+                on_progress(downloaded, speed);
+            }
+        }
+        file.flush().map_err(|e| ApiError::new("UPDATE_IO", e.to_string()))?;
+        if downloaded != total_size {
+            return Err(ApiError::new(
+                "UPDATE_SIZE",
+                format!("{downloaded} != {total_size}"),
+            ));
+        }
+        Ok(())
     }
-    if !bytes.starts_with(b"MZ") {
-        return Err(ApiError::new("UPDATE_ASSET", "not a PE image"));
-    }
-    let actual = sha256_hex(&bytes);
-    if !actual.eq_ignore_ascii_case(&asset.sha256) {
-        return Err(ApiError::new(
-            "UPDATE_HASH",
-            format!("{actual} != {}", asset.sha256),
-        ));
-    }
-    fs::write(dest, &bytes).map_err(|e| ApiError::new("UPDATE_IO", e.to_string()))?;
-    // Re-read what actually landed on disk; the in-memory bytes are not evidence that the
-    // file was not touched between write and launch.
-    verify_file(dest, asset)
 }
 
 fn verify_file(path: &Path, asset: &Asset) -> Result<(), ApiError> {
@@ -379,6 +599,9 @@ fn verify_file(path: &Path, asset: &Asset) -> Result<(), ApiError> {
             "UPDATE_SIZE",
             format!("{} != {}", bytes.len(), asset.size),
         ));
+    }
+    if !bytes.starts_with(b"MZ") {
+        return Err(ApiError::new("UPDATE_ASSET", "not a PE image"));
     }
     let actual = sha256_hex(&bytes);
     if !actual.eq_ignore_ascii_case(&asset.sha256) {

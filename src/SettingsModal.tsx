@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { appInfo, configPath, diagnosticsExport, everythingStatus, logDirPath, pickFolder, restartApp, settingsSave, updateCheck, updateInstall } from './api'
+import { listen } from '@tauri-apps/api/event'
+import { appInfo, configPath, diagnosticsExport, everythingStatus, logDirPath, pickFolder, restartApp, settingsSave, taskbarProgress, updateCheck, updateInstall } from './api'
 import { makeT } from './i18n'
 import type { Key } from './i18n'
 import { DEFAULT_BINDINGS, SHORTCUTS, bindingFromEvent, fixedBindingName, formatBinding, resolveShortcuts, sameBinding } from './shortcuts'
 import type { ShortcutId } from './shortcuts'
-import type { AppInfo, EverythingStatus, Lang, Theme, UpdateStatus } from './types'
+import type { AppInfo, EverythingStatus, Lang, Theme, UpdateProgress, UpdateStatus } from './types'
 import { THEMES, themeIsDark } from './themes'
 import type { LogLevel, Settings } from './persist'
 import {
@@ -55,6 +56,18 @@ const SECTIONS: { id: SectionId; label: Key }[] = [
   { id: 'diagnostics', label: 'settings.diagnostics' },
   { id: 'about', label: 'settings.about' },
 ]
+
+const formatBytes = (bytes: number) => {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let value = bytes
+  let unitIndex = 0
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex += 1
+  }
+  return `${value >= 100 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`
+}
 
 const UPDATE_INTERVALS = [0, 6, 12, 24, 72]
 const LOG_LEVELS: LogLevel[] = ['error', 'warn', 'info', 'debug']
@@ -263,6 +276,7 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
   const [checking, setChecking] = useState(false)
   const [installing, setInstalling] = useState(false)
   const [updateError, setUpdateError] = useState<string | null>(null)
+  const [updateProgress, setUpdateProgress] = useState<UpdateProgress | null>(null)
   const [exporting, setExporting] = useState(false)
   const [exportNote, setExportNote] = useState('')
   // The select only holds the listed families; arbitrary installed families keep the
@@ -340,6 +354,24 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
     // Interval-guarded: usually returns the cached release without touching the network.
     void updateCheck(false).then(setUpdate).catch(() => undefined)
   }, [])
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+    void listen<UpdateProgress>('flowdir:update-progress', (event) => {
+      const p = event.payload
+      setUpdateProgress(p)
+      if (p.phase === 'downloading' && p.total > 0) {
+        void taskbarProgress('normal', p.downloaded, p.total).catch(() => undefined)
+      } else if (p.phase === 'ready' || p.phase === 'verifying') {
+        void taskbarProgress('normal', p.total, p.total).catch(() => undefined)
+      }
+    }).then((fn) => {
+      unlisten = fn
+    })
+    return () => {
+      unlisten?.()
+    }
+  }, [])
+
 
   const runUpdateCheck = () => {
     setChecking(true)
@@ -353,9 +385,17 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
   const runUpdateInstall = () => {
     setInstalling(true)
     setUpdateError(null)
-    // A successful install exits the app, so only failures need to clear the flag.
+    setUpdateProgress({
+      phase: 'connecting',
+      downloaded: 0,
+      total: 0,
+      percent: 0,
+      bytesPerSec: 0,
+    })
     void updateInstall().catch((err: unknown) => {
       setInstalling(false)
+      setUpdateProgress(null)
+      void taskbarProgress('error', 0, 0).catch(() => undefined)
       setUpdateError(ipcErrorText(err))
     })
   }
@@ -1368,15 +1408,58 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
                 </button>
               </div>
               {update?.available && (
-                <button
-                  type="button"
-                  onClick={runUpdateInstall}
-                  disabled={installing}
-                  data-update-install
-                  className="w-full rounded-md bg-blue-600 px-2 py-1 text-[0.71875rem] text-white hover:bg-blue-500 disabled:opacity-50"
-                >
-                  {installing ? t('settings.updateInstalling') : t('settings.updateInstall')}
-                </button>
+                <div className="space-y-1.5">
+                  <button
+                    type="button"
+                    onClick={runUpdateInstall}
+                    disabled={installing}
+                    data-update-install
+                    className="w-full rounded-md bg-blue-600 px-2 py-1.5 text-[0.71875rem] font-medium text-white hover:bg-blue-500 disabled:opacity-60"
+                  >
+                    {installing
+                      ? (updateProgress?.phase === 'connecting'
+                          ? t('settings.updateConnecting')
+                          : updateProgress?.phase.startsWith('retrying')
+                            ? t('settings.updateRetrying', { attempt: updateProgress.phase.replace('retrying (', '').replace(')', '') })
+                            : updateProgress?.phase === 'verifying'
+                              ? t('settings.updateVerifying')
+                              : updateProgress?.phase === 'ready'
+                                ? t('settings.updateReady')
+                                : `${t('settings.updateDownloading')} ${updateProgress?.percent ?? 0}%`)
+                      : (updateError ? t('settings.updateRetry') : t('settings.updateInstall'))}
+                  </button>
+                  {installing && (
+                    <div className="space-y-1 rounded bg-surface-2 p-2 border border-line">
+                      <div className="flex items-center justify-between text-[0.6875rem]">
+                        <span className="font-medium text-fg">
+                          {updateProgress?.phase === 'connecting'
+                            ? t('settings.updateConnecting')
+                            : updateProgress?.phase.startsWith('retrying')
+                              ? t('settings.updateRetrying', { attempt: updateProgress.phase.replace('retrying (', '').replace(')', '') })
+                              : updateProgress?.phase === 'verifying'
+                                ? t('settings.updateVerifying')
+                                : updateProgress?.phase === 'ready'
+                                  ? t('settings.updateReady')
+                                  : `${updateProgress?.percent ?? 0}%`}
+                        </span>
+                        {updateProgress?.phase === 'downloading' && (
+                          <span className="tabular text-muted-2">
+                            {formatBytes(updateProgress.downloaded)} / {formatBytes(updateProgress.total)}
+                            {updateProgress.bytesPerSec > 0 ? ` · ${formatBytes(updateProgress.bytesPerSec)}/s` : ''}
+                          </span>
+                        )}
+                      </div>
+                      <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-3">
+                        <div
+                          className={`h-full bg-blue-600 transition-all duration-150 ${updateProgress?.phase === 'connecting' ? 'w-1/3 animate-pulse' : ''}`}
+                          style={{
+                            width: updateProgress?.phase === 'connecting' ? '30%' : `${updateProgress?.percent ?? 0}%`,
+                          }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
               )}
               {updateError && <div className="text-[0.65625rem] text-red-500">{updateError}</div>}
               <div className="flex items-center justify-between gap-2 border-t border-line pt-2">
