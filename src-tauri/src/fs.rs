@@ -49,7 +49,7 @@ pub struct Entry {
 }
 
 impl Entry {
-    fn new(name: String, size: u64, mtime: u64, attrs: u32, id: u64) -> Self {
+    pub(crate) fn new(name: String, size: u64, mtime: u64, attrs: u32, id: u64) -> Self {
         let ext_key = natural_key(
             name.rsplit_once('.')
                 .map(|(_, ext)| ext)

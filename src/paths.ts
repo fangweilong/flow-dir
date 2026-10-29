@@ -158,6 +158,14 @@ export const isArchiveName = (name: string) => {
   return ARCHIVE_EXTS.some((ext) => lower.endsWith(`.${ext}`))
 }
 
+/** True when `path` is an archive file or points to a path inside an archive file. */
+export function isInsideArchive(path: string): boolean {
+  if (!path) return false
+  const norm = path.replace(/\\+$/, '').replace(/\//g, '\\')
+  const segments = norm.split('\\')
+  return segments.some((segment) => isArchiveName(segment))
+}
+
 export const formatSize = (n: number, dir: boolean) => {
   if (dir) return ''
   if (!Number.isFinite(n) || n < 0 || n > 1e15) return '—'

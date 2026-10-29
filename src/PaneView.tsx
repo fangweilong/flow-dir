@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { FileIcon } from './icons'
-import { crumbs, formatSize, formatTime, isDir, isFsPath, joinPath, parentPath, pathKey, resolveAddress, underPath } from './paths'
+import { crumbs, formatSize, formatTime, isArchiveName, isDir, isFsPath, isInsideArchive, joinPath, parentPath, pathKey, resolveAddress, underPath } from './paths'
 import { buildGitBadges } from './git'
 import type { GitBadges } from './git'
 import { pathIsDir } from './api'
@@ -472,7 +472,8 @@ export function PaneView({
   const activate = (entry: Entry) => {
     if (!tab) return
     const full = joinPath(tab.path, entry.name)
-    if (isDir(entry.attrs)) onNavigate(tab.id, full)
+    const shouldNavigate = isDir(entry.attrs) || (!isInsideArchive(tab.path) && isArchiveName(entry.name))
+    if (shouldNavigate) onNavigate(tab.id, full)
     else onOpenTarget(full)
   }
 
@@ -779,6 +780,7 @@ export function PaneView({
       return
     }
     if (matchBinding(ev, keys.copy) || matchBinding(ev, keys.cut)) {
+      if (matchBinding(ev, keys.cut) && isInsideArchive(tab.path)) return
       ev.preventDefault()
       onClipboard(matchBinding(ev, keys.cut))
       return
@@ -848,6 +850,7 @@ export function PaneView({
       update(tab.id, (d) => ({ ...d, selected: new Set(), anchor: '' }))
     }
     if (matchBinding(ev, keys.rename)) {
+      if (isInsideArchive(tab.path)) return
       ev.preventDefault()
       if (visibleSelected.size > 1) {
         onRenameMany(Array.from(visibleSelected))
@@ -860,6 +863,7 @@ export function PaneView({
     }
     // Shift+Delete shares the binding: the modifier picks permanent instead of Recycle Bin.
     if (matchBinding(ev, keys.delete, { ignoreShift: true })) {
+      if (isInsideArchive(tab.path)) return
       if (!visibleSelected.size) return
       ev.preventDefault()
       onDelete(Array.from(visibleSelected), ev.shiftKey)
@@ -871,6 +875,7 @@ export function PaneView({
       return
     }
     if (matchBinding(ev, keys.paste)) {
+      if (isInsideArchive(tab.path)) return
       ev.preventDefault()
       onPaste()
       return

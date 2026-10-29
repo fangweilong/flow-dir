@@ -38,7 +38,16 @@ pub fn set<R: Runtime>(
     pane_id: String,
     path: String,
 ) -> Result<(), ApiError> {
-    let folder = FsPath::new(&path);
+    let mut folder = FsPath::new(&path);
+    let resolved_parent;
+    if !folder.is_dir() {
+        if let Some((archive_path, _)) = crate::archive::resolve_archive_path(&path) {
+            if let Some(parent) = archive_path.parent() {
+                resolved_parent = parent.to_path_buf();
+                folder = &resolved_parent;
+            }
+        }
+    }
     let git_dir = metadata_dir(folder);
     // Case differs when the tab path and the notify reply were produced by different
     // sources; lowercasing both keeps the event split stable on the same volume.

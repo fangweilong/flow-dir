@@ -624,10 +624,13 @@ pub fn list(path: &str, limit: usize) -> Result<Vec<ArchiveEntry>, ApiError> {
             };
             let raw = file.name_raw();
             let utf8 = file.flags().as_u16() & 0x800 != 0;
+            let is_dir = file.is_dir() || raw.ends_with(b"/") || raw.ends_with(b"\\");
             if let Ok(name) = entry::decode(raw, utf8) {
                 entries.push(ArchiveEntry {
                     name,
-                    size: file.size(),
+                    size: if is_dir { 0 } else { file.size() },
+                    is_dir,
+                    mtime: 0,
                 });
             }
         }
@@ -644,11 +647,14 @@ pub fn list(path: &str, limit: usize) -> Result<Vec<ArchiveEntry>, ApiError> {
             .filter(|file| !file.name.is_empty())
             .take(limit)
             .filter_map(|file| {
+                let is_dir = file.is_directory;
                 entry::decode(file.name.as_bytes(), true)
                     .ok()
                     .map(|name| ArchiveEntry {
                         name,
-                        size: file.size,
+                        size: if is_dir { 0 } else { file.size },
+                        is_dir,
+                        mtime: 0,
                     })
             })
             .collect());
@@ -667,6 +673,8 @@ pub fn list(path: &str, limit: usize) -> Result<Vec<ArchiveEntry>, ApiError> {
                     entries.push(ArchiveEntry {
                         name,
                         size: item.uncompressed_size() as u64,
+                        is_dir: false,
+                        mtime: 0,
                     });
                 }
             }
@@ -685,9 +693,12 @@ pub fn list(path: &str, limit: usize) -> Result<Vec<ArchiveEntry>, ApiError> {
                 .clone()
                 .unwrap_or_else(|| member.name.clone().into_bytes());
             if let Ok(name) = entry::decode_rar(&raw, false) {
+                let is_dir = member.is_directory;
                 entries.push(ArchiveEntry {
                     name,
-                    size: member.unpacked_size.unwrap_or(0),
+                    size: if is_dir { 0 } else { member.unpacked_size.unwrap_or(0) },
+                    is_dir,
+                    mtime: 0,
                 });
             }
         }
@@ -715,9 +726,13 @@ pub fn list(path: &str, limit: usize) -> Result<Vec<ArchiveEntry>, ApiError> {
             let Ok(name) = entry::decode(&raw, false) else {
                 continue;
             };
+            let is_dir = item.header().entry_type().is_dir();
+            let mtime = item.header().mtime().unwrap_or(0) * 1000;
             entries.push(ArchiveEntry {
                 name,
-                size: item.header().size().unwrap_or(0),
+                size: if is_dir { 0 } else { item.header().size().unwrap_or(0) },
+                is_dir,
+                mtime,
             });
         }
         return Ok(entries);
@@ -725,6 +740,8 @@ pub fn list(path: &str, limit: usize) -> Result<Vec<ArchiveEntry>, ApiError> {
     Ok(vec![ArchiveEntry {
         name: format::output_name(name_of(path)),
         size: 0,
+        is_dir: false,
+        mtime: 0,
     }])
 }
 
@@ -739,15 +756,184 @@ fn push_iso_entries(node: &isomage::TreeNode, prefix: &str, limit: usize, out: &
             format!("{prefix}/{}", child.name)
         };
         if let Ok(name) = entry::decode(raw.as_bytes(), true) {
+            let is_dir = child.is_directory;
             out.push(ArchiveEntry {
                 name,
-                size: child.size,
+                size: if is_dir { 0 } else { child.size },
+                is_dir,
+                mtime: 0,
             });
         }
         if child.is_directory {
             push_iso_entries(child, &raw, limit, out);
         }
     }
+}
+
+/// Extracts a single entry from `archive` into `dest`.
+pub fn extract_single(
+    archive: &str,
+    inner: &str,
+    dest: &std::path::Path,
+    password: Option<&str>,
+) -> Result<(), ApiError> {
+    let format = format::detect(archive)
+        .ok_or_else(|| ApiError::new("UNSUPPORTED_FORMAT", name_of(archive)))?;
+    let inner_norm = inner.replace('/', "\\");
+    let inner_norm = inner_norm.trim_matches('\\');
+
+    match format {
+        Format::Zip => {
+            let file = File::open(archive).map_err(|e| ApiError::from_io(archive, &e))?;
+            let mut zip = zip::ZipArchive::new(file).map_err(|e| ApiError::new("ARCHIVE", e.to_string()))?;
+            for index in 0..zip.len() {
+                let opened = match password {
+                    Some(pwd) => zip.by_index_decrypt(index, pwd.as_bytes()),
+                    None => zip.by_index(index),
+                };
+                let Ok(mut member) = opened else { continue; };
+                let raw = member.name_raw().to_vec();
+                let utf8 = member.flags().as_u16() & 0x800 != 0;
+                if let Ok(name) = entry::decode(&raw, utf8) {
+                    if name.eq_ignore_ascii_case(inner_norm) {
+                        let mut out = File::create(dest).map_err(|e| ApiError::from_io(&dest.to_string_lossy(), &e))?;
+                        std::io::copy(&mut member, &mut out).map_err(|e| ApiError::from_io(&dest.to_string_lossy(), &e))?;
+                        return Ok(());
+                    }
+                }
+            }
+            Err(ApiError::new("NOT_FOUND", inner))
+        }
+        Format::SevenZ => {
+            use sevenz_rust2::{ArchiveReader, Password};
+            let mut reader = ArchiveReader::open(archive, Password::from(password.unwrap_or("")))
+                .map_err(|err| sevenz_error(err, password.is_some()))?;
+            let mut found = false;
+            let mut copy_err: Option<ApiError> = None;
+            let _ = reader.for_each_entries(|file, read| {
+                if let Ok(name) = entry::decode(file.name.as_bytes(), true) {
+                    if name.eq_ignore_ascii_case(inner_norm) {
+                        found = true;
+                        match File::create(dest) {
+                            Ok(mut out) => {
+                                if let Err(e) = std::io::copy(read, &mut out) {
+                                    copy_err = Some(ApiError::from_io(&dest.to_string_lossy(), &e));
+                                }
+                            }
+                            Err(e) => {
+                                copy_err = Some(ApiError::from_io(&dest.to_string_lossy(), &e));
+                            }
+                        }
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            });
+            if let Some(err) = copy_err {
+                return Err(err);
+            }
+            if found {
+                return Ok(());
+            }
+            Err(ApiError::new("NOT_FOUND", inner))
+        }
+        format if format.is_tar() => {
+            let mut tar = tar::Archive::new(reader(archive, format)?);
+            let items = tar.entries().map_err(|e| ApiError::new("ARCHIVE", e.to_string()))?;
+            for item in items {
+                let Ok(mut item) = item else { continue; };
+                let raw = item.path_bytes().to_vec();
+                if let Ok(name) = entry::decode(&raw, false) {
+                    if name.eq_ignore_ascii_case(inner_norm) {
+                        let mut out = File::create(dest).map_err(|e| ApiError::from_io(&dest.to_string_lossy(), &e))?;
+                        std::io::copy(&mut item, &mut out).map_err(|e| ApiError::from_io(&dest.to_string_lossy(), &e))?;
+                        return Ok(());
+                    }
+                }
+            }
+            Err(ApiError::new("NOT_FOUND", inner))
+        }
+        Format::Cab => {
+            let file = File::open(archive).map_err(|err| ApiError::from_io(archive, &err))?;
+            let mut cabinet = cab::Cabinet::new(file).map_err(|err| ApiError::new("ARCHIVE", err.to_string()))?;
+            let mut found_file = None;
+            for folder in cabinet.folder_entries() {
+                for item in folder.file_entries() {
+                    if let Ok(name) = entry::decode(item.name().as_bytes(), item.is_name_utf()) {
+                        if name.eq_ignore_ascii_case(inner_norm) {
+                            found_file = Some(item.name().to_string());
+                            break;
+                        }
+                    }
+                }
+                if found_file.is_some() {
+                    break;
+                }
+            }
+            if let Some(file_name) = found_file {
+                let mut reader = cabinet.read_file(&file_name).map_err(|err| ApiError::new("ARCHIVE", err.to_string()))?;
+                let mut out = File::create(dest).map_err(|e| ApiError::from_io(&dest.to_string_lossy(), &e))?;
+                std::io::copy(&mut reader, &mut out).map_err(|e| ApiError::from_io(&dest.to_string_lossy(), &e))?;
+                return Ok(());
+            }
+            Err(ApiError::new("NOT_FOUND", inner))
+        }
+        Format::Rar => {
+            let mut rar = open_rar(archive, password)?;
+            for index in 0..rar.len() {
+                let Ok(entry) = rar.by_index(index) else { continue; };
+                let info = entry.info();
+                let raw = info.raw_name_bytes.clone().unwrap_or_else(|| info.name.clone().into_bytes());
+                if let Ok(name) = entry::decode_rar(&raw, false) {
+                    if name.eq_ignore_ascii_case(inner_norm) {
+                        let mut out = File::create(dest).map_err(|e| ApiError::from_io(&dest.to_string_lossy(), &e))?;
+                        let had_password = password.is_some();
+                        entry.copy_to(&mut out).map_err(|err| rar_error(err, had_password))?;
+                        return Ok(());
+                    }
+                }
+            }
+            Err(ApiError::new("NOT_FOUND", inner))
+        }
+        Format::Iso => {
+            let mut file = File::open(archive).map_err(|err| ApiError::from_io(archive, &err))?;
+            let root = isomage::detect_and_parse_filesystem(&mut file, name_of(archive))
+                .map_err(|err| ApiError::new("ARCHIVE", err.to_string()))?;
+            if extract_iso_single(&mut file, &root, "", inner_norm, dest)? {
+                return Ok(());
+            }
+            Err(ApiError::new("NOT_FOUND", inner))
+        }
+        _ => Err(ApiError::new("UNSUPPORTED_FORMAT", name_of(archive))),
+    }
+}
+
+fn extract_iso_single(
+    file: &mut File,
+    node: &isomage::TreeNode,
+    prefix: &str,
+    target: &str,
+    dest: &std::path::Path,
+) -> Result<bool, ApiError> {
+    for child in &node.children {
+        let raw = if prefix.is_empty() {
+            child.name.clone()
+        } else {
+            format!("{prefix}/{}", child.name)
+        };
+        if let Ok(name) = entry::decode(raw.as_bytes(), true) {
+            if child.is_directory {
+                if extract_iso_single(file, child, &raw, target, dest)? {
+                    return Ok(true);
+                }
+            } else if name.eq_ignore_ascii_case(target) {
+                let mut out = File::create(dest).map_err(|e| ApiError::from_io(&dest.to_string_lossy(), &e))?;
+                isomage::cat_node(file, child, &mut out).map_err(|err| ApiError::new("ARCHIVE", err.to_string()))?;
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn name_of(path: &str) -> &str {

@@ -24,16 +24,223 @@ use crate::ops::{OpProgress, OpState};
 
 pub use sink::Sink;
 
-/// One entry of an archive, as shown by the preview panel.
+/// One entry of an archive, as shown by the preview panel and virtual directory listing.
 #[derive(Serialize, Clone)]
 pub struct ArchiveEntry {
     pub name: String,
     pub size: u64,
+    #[serde(default)]
+    pub is_dir: bool,
+    #[serde(default)]
+    pub mtime: u64,
 }
 
 /// Entry names for the preview panel; capped by the caller.
 pub fn preview_entries(path: &str, limit: usize) -> Result<Vec<ArchiveEntry>, ApiError> {
     backends::list(path, limit)
+}
+
+/// Resolves `path` to its underlying archive file and relative inner path, if it points to
+/// an archive file or a path inside one.
+pub fn resolve_archive_path(path: &str) -> Option<(std::path::PathBuf, String)> {
+    let clean = path.trim_end_matches(['\\', '/']);
+    let mut cur = Path::new(clean);
+    if cur.is_dir() {
+        return None;
+    }
+    if cur.is_file() {
+        if format::detect(&cur.to_string_lossy()).is_some() {
+            return Some((cur.to_path_buf(), String::new()));
+        }
+        return None;
+    }
+    let mut parts: Vec<&std::ffi::OsStr> = Vec::new();
+    while let Some(parent) = cur.parent() {
+        if let Some(file_name) = cur.file_name() {
+            parts.push(file_name);
+        }
+        if parent.is_file() {
+            if format::detect(&parent.to_string_lossy()).is_some() {
+                parts.reverse();
+                let inner = parts
+                    .iter()
+                    .map(|p| p.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("\\");
+                return Some((parent.to_path_buf(), inner));
+            }
+            return None;
+        }
+        if parent.is_dir() {
+            return None;
+        }
+        cur = parent;
+    }
+    None
+}
+
+/// True if `path` is an archive file or a valid directory inside an archive file.
+pub fn is_archive_or_inner_dir(path: &str) -> bool {
+    let Some((archive_path, inner_path)) = resolve_archive_path(path) else {
+        return false;
+    };
+    if inner_path.is_empty() {
+        return true;
+    }
+    is_inner_dir(&archive_path, &inner_path).unwrap_or(false)
+}
+
+/// Checks whether `inner_path` represents a directory inside `archive_path`.
+pub fn is_inner_dir(archive_path: &Path, inner_path: &str) -> Result<bool, ApiError> {
+    let entries = backends::list(&archive_path.to_string_lossy(), 500_000)?;
+    let target = inner_path.replace('/', "\\");
+    let target = target.trim_matches('\\').to_lowercase();
+    if target.is_empty() {
+        return Ok(true);
+    }
+    let prefix = format!("{target}\\");
+    for entry in entries {
+        let norm = entry.name.replace('/', "\\");
+        let norm_lower = norm.trim_matches('\\').to_lowercase();
+        if norm_lower.starts_with(&prefix) {
+            return Ok(true);
+        }
+        if norm_lower == target && entry.is_dir {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Lists immediate children of `inner_path` inside `archive_path` as directory entries.
+pub fn enumerate_virtual(
+    archive_path: &Path,
+    inner_path: &str,
+    cancel: &Arc<AtomicBool>,
+) -> Result<crate::fs::ScanOutcome, ApiError> {
+    use std::collections::HashMap;
+    use std::hash::{Hash, Hasher};
+
+    let entries = backends::list(&archive_path.to_string_lossy(), 500_000)?;
+    let default_mtime = archive_path
+        .metadata()
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let target_inner = inner_path.replace('/', "\\");
+    let target_inner = target_inner.trim_matches('\\').to_lowercase();
+
+    let mut map: HashMap<String, crate::fs::Entry> = HashMap::new();
+    let mut matched = false;
+
+    let hash_key = |name: &str| -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        archive_path.hash(&mut hasher);
+        target_inner.hash(&mut hasher);
+        name.to_lowercase().hash(&mut hasher);
+        hasher.finish()
+    };
+
+    for arc_entry in entries {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(ApiError::new("CANCELED", "enumeration canceled"));
+        }
+        let norm = arc_entry.name.replace('/', "\\");
+        let norm = norm.trim_matches('\\');
+        if norm.is_empty() {
+            continue;
+        }
+        let norm_lower = norm.to_lowercase();
+        let rel = if target_inner.is_empty() {
+            norm
+        } else {
+            let prefix = format!("{target_inner}\\");
+            if norm_lower.starts_with(&prefix) {
+                matched = true;
+                &norm[prefix.len()..]
+            } else if norm_lower == target_inner {
+                matched = true;
+                continue;
+            } else {
+                continue;
+            }
+        };
+        let rel = rel.trim_matches('\\');
+        if rel.is_empty() {
+            continue;
+        }
+        let mtime = if arc_entry.mtime > 0 { arc_entry.mtime } else { default_mtime };
+        if let Some((dir_name, _)) = rel.split_once('\\') {
+            let key = dir_name.to_lowercase();
+            map.entry(key).or_insert_with(|| {
+                crate::fs::Entry::new(dir_name.to_string(), 0, mtime, 0x10, hash_key(dir_name))
+            });
+        } else {
+            let key = rel.to_lowercase();
+            let is_dir = arc_entry.is_dir;
+            let attrs = if is_dir { 0x10 } else { 0 };
+            let size = if is_dir { 0 } else { arc_entry.size };
+            let id = hash_key(rel);
+            map.entry(key)
+                .and_modify(|existing| {
+                    if !existing.is_dir() && is_dir {
+                        *existing = crate::fs::Entry::new(rel.to_string(), 0, mtime, 0x10, id);
+                    }
+                })
+                .or_insert_with(|| crate::fs::Entry::new(rel.to_string(), size, mtime, attrs, id));
+        }
+    }
+
+    if !target_inner.is_empty() && !matched && map.is_empty() {
+        return Err(ApiError::new("NOT_FOUND", inner_path));
+    }
+
+    Ok(crate::fs::ScanOutcome {
+        entries: map.into_values().collect(),
+        truncated: false,
+    })
+}
+
+/// Extracts a single entry to the FlowDir temporary cache and returns the path on disk.
+pub fn extract_cached(archive_path: &Path, inner_path: &str) -> Result<std::path::PathBuf, ApiError> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    archive_path.hash(&mut hasher);
+    let hash = hasher.finish();
+
+    let temp = std::env::temp_dir().join("FlowDir").join("archive_cache").join(format!("{hash:016x}"));
+    let inner_norm = inner_path.replace('/', "\\");
+    let dest = temp.join(inner_norm.trim_matches('\\'));
+
+    let arc_mtime = archive_path
+        .metadata()
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let dest_mtime = dest
+        .metadata()
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    if dest.is_file() && dest_mtime >= arc_mtime && arc_mtime > 0 {
+        return Ok(dest);
+    }
+
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| ApiError::from_io(&parent.to_string_lossy(), &e))?;
+    }
+
+    backends::extract_single(&archive_path.to_string_lossy(), &inner_norm, &dest, None)?;
+    Ok(dest)
 }
 
 /// Starts extraction on a background thread. Preconditions are checked before spawning so
@@ -450,6 +657,107 @@ mod tests {
         assert_eq!(std::fs::read(dest.join("docs\\说明.txt")).unwrap(), b"tar body");
         // A collision at the destination is renamed, never overwritten.
         assert_eq!(std::fs::read(dest.join("说明.txt")).unwrap(), b"existing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn virtual_archive_directory_navigation_and_extraction() {
+        let dir = temp_dir("virtual_dir");
+        let archive = dir.join("test.zip");
+        {
+            let file = std::fs::File::create(&archive).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default();
+            zip.start_file("folder/nested/item.txt", opts).unwrap();
+            std::io::Write::write_all(&mut zip, b"nested content").unwrap();
+            zip.start_file("root.txt", opts).unwrap();
+            std::io::Write::write_all(&mut zip, b"root content").unwrap();
+            zip.finish().unwrap();
+        }
+
+        // 1. resolve_archive_path
+        let res_root = resolve_archive_path(archive.to_str().unwrap()).unwrap();
+        assert_eq!(res_root.0, archive);
+        assert_eq!(res_root.1, "");
+
+        let nested_path = format!("{}\\folder\\nested\\item.txt", archive.display());
+        let res_nested = resolve_archive_path(&nested_path).unwrap();
+        assert_eq!(res_nested.0, archive);
+        assert_eq!(res_nested.1, "folder\\nested\\item.txt");
+
+        let non_archive = dir.join("not_archive.txt");
+        std::fs::write(&non_archive, b"hi").unwrap();
+        assert!(resolve_archive_path(non_archive.to_str().unwrap()).is_none());
+        assert!(resolve_archive_path(dir.to_str().unwrap()).is_none());
+
+        // 2. enumerate_virtual root
+        let cancel = Arc::new(AtomicBool::new(false));
+        let root_listing = enumerate_virtual(&archive, "", &cancel).unwrap();
+        assert_eq!(root_listing.entries.len(), 2);
+        let folder_entry = root_listing.entries.iter().find(|e| e.name == "folder").unwrap();
+        assert!(folder_entry.is_dir());
+        let root_file = root_listing.entries.iter().find(|e| e.name == "root.txt").unwrap();
+        assert!(!root_file.is_dir());
+        assert_eq!(root_file.size, 12);
+
+        // 3. enumerate_virtual subfolder
+        let sub_listing = enumerate_virtual(&archive, "folder", &cancel).unwrap();
+        assert_eq!(sub_listing.entries.len(), 1);
+        assert_eq!(sub_listing.entries[0].name, "nested");
+        assert!(sub_listing.entries[0].is_dir());
+
+        let deep_listing = enumerate_virtual(&archive, "folder\\nested", &cancel).unwrap();
+        assert_eq!(deep_listing.entries.len(), 1);
+        assert_eq!(deep_listing.entries[0].name, "item.txt");
+        assert!(!deep_listing.entries[0].is_dir());
+        assert_eq!(deep_listing.entries[0].size, 14);
+
+        // 4. is_archive_or_inner_dir & is_inner_dir
+        assert!(is_archive_or_inner_dir(archive.to_str().unwrap()));
+        assert!(is_archive_or_inner_dir(&format!("{}\\folder", archive.display())));
+        assert!(is_archive_or_inner_dir(&format!("{}\\folder\\nested", archive.display())));
+        assert!(!is_archive_or_inner_dir(&format!("{}\\nonexistent", archive.display())));
+        assert!(is_inner_dir(&archive, "folder").unwrap());
+        assert!(!is_inner_dir(&archive, "folder\\nested\\item.txt").unwrap());
+
+        // 5. extract_cached
+        let cached = extract_cached(&archive, "folder\\nested\\item.txt").unwrap();
+        assert!(cached.is_file());
+        assert_eq!(std::fs::read(&cached).unwrap(), b"nested content");
+
+        // 6. 7z and tar.gz single extraction
+        let sevenz_path = dir.join("test.7z");
+        {
+            let mut writer = sevenz_rust2::ArchiveWriter::create(&sevenz_path).unwrap();
+            writer
+                .push_archive_entry(
+                    sevenz_rust2::ArchiveEntry::new_file("deep/sub/doc.txt"),
+                    Some(&b"7z deep content"[..]),
+                )
+                .unwrap();
+            writer.finish().unwrap();
+        }
+        let cached_7z = extract_cached(&sevenz_path, "deep\\sub\\doc.txt").unwrap();
+        assert!(cached_7z.is_file());
+        assert_eq!(std::fs::read(&cached_7z).unwrap(), b"7z deep content");
+
+        let targz_path = dir.join("test.tar.gz");
+        {
+            let file = std::fs::File::create(&targz_path).unwrap();
+            let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+            let mut builder = tar::Builder::new(encoder);
+            let mut header = tar::Header::new_gnu();
+            let body = b"tar content";
+            header.set_size(body.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, "a/b/file.txt", &body[..]).unwrap();
+            builder.into_inner().unwrap().finish().unwrap();
+        }
+        let cached_tar = extract_cached(&targz_path, "a\\b\\file.txt").unwrap();
+        assert!(cached_tar.is_file());
+        assert_eq!(std::fs::read(&cached_tar).unwrap(), b"tar content");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

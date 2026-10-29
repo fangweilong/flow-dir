@@ -98,7 +98,7 @@ import {
 } from './fonts'
 import { DEFAULT_SETTINGS, fromSnapshot, toSnapshot } from './persist'
 import type { Settings } from './persist'
-import { baseName, isArchiveName, isDir, isFsPath, joinPath, parentPath, pathKey, sameVolume, treeChain, underPath } from './paths'
+import { baseName, isArchiveName, isDir, isFsPath, isInsideArchive, joinPath, parentPath, pathKey, sameVolume, treeChain, underPath } from './paths'
 import { centerOffset } from './scroll'
 import { formatBinding, isTextInput, matchBinding, menuHint, resolveShortcuts } from './shortcuts'
 import {
@@ -2915,10 +2915,9 @@ export default function App() {
       const dir = isDir(entry.attrs)
       const pane = wsRef.current?.panes[paneId]
       const tabPath = pane ? wsRef.current?.tabs[pane.activeTabId]?.path : undefined
-      const archivePath =
-        !dir && paths.length === 1 && tabPath && isArchiveName(entry.name)
-          ? joinPath(tabPath, entry.name)
-          : null
+      const inArchive = Boolean(tabPath && isInsideArchive(tabPath))
+      const isArchive = !dir && paths.length === 1 && tabPath && !inArchive && isArchiveName(entry.name)
+      const archivePath = isArchive ? joinPath(tabPath!, entry.name) : null
       const archiveMenu: MenuItem[] = archivePath
         ? [
             { kind: 'sep' },
@@ -2955,7 +2954,7 @@ export default function App() {
             const tab = pane ? current?.tabs[pane.activeTabId] : undefined
             if (!tab) return
             const target = joinPath(tab.path, entry.name)
-            if (dir) navigate(tab.id, target)
+            if (dir || isArchive) navigate(tab.id, target)
             else openTarget(target)
           },
         },
@@ -2969,43 +2968,47 @@ export default function App() {
               .catch(() => showToast(t('toast.copyFailed')))
           },
         },
-        {
-          kind: 'item',
-          label: t('menu.cut'),
-          hint: menuHint(keys.cut),
-          onSelect: () => {
-            clipboardCopy(paths, true)
-              .then(() => showToast(t('toast.cut', { count: paths.length })))
-              .catch(() => showToast(t('toast.copyFailed')))
-          },
-        },
-        { kind: 'item', label: t('menu.paste'), hint: menuHint(keys.paste), onSelect: () => pasteInto(paneId) },
-        { kind: 'sep' },
-        {
-          kind: 'item',
-          label: paths.length > 1 ? t('menu.batchRename') : t('menu.rename'),
-          hint: menuHint(keys.rename),
-          onSelect: () =>
-            paths.length > 1
-              ? startRenameMany(paneId, paths.map(baseName))
-              : startRename(paneId, entry.name),
-        },
-        {
-          kind: 'item',
-          label: t('menu.delete'),
-          hint: menuHint(keys.delete),
-          danger: true,
-          onSelect: () => deleteEntries(paneId, [entry.name], false),
-        },
-        {
-          kind: 'item',
-          label: t('menu.deletePermanent'),
-          hint: menuHint(`shift+${keys.delete}`),
-          danger: true,
-          onSelect: () => deleteEntries(paneId, [entry.name], true),
-        },
-        ...archiveMenu,
-        ...compressMenu,
+        ...(!inArchive
+          ? [
+              {
+                kind: 'item' as const,
+                label: t('menu.cut'),
+                hint: menuHint(keys.cut),
+                onSelect: () => {
+                  clipboardCopy(paths, true)
+                    .then(() => showToast(t('toast.cut', { count: paths.length })))
+                    .catch(() => showToast(t('toast.copyFailed')))
+                },
+              },
+              { kind: 'item' as const, label: t('menu.paste'), hint: menuHint(keys.paste), onSelect: () => pasteInto(paneId) },
+              { kind: 'sep' as const },
+              {
+                kind: 'item' as const,
+                label: paths.length > 1 ? t('menu.batchRename') : t('menu.rename'),
+                hint: menuHint(keys.rename),
+                onSelect: () =>
+                  paths.length > 1
+                    ? startRenameMany(paneId, paths.map(baseName))
+                    : startRename(paneId, entry.name),
+              },
+              {
+                kind: 'item' as const,
+                label: t('menu.delete'),
+                hint: menuHint(keys.delete),
+                danger: true,
+                onSelect: () => deleteEntries(paneId, [entry.name], false),
+              },
+              {
+                kind: 'item' as const,
+                label: t('menu.deletePermanent'),
+                hint: menuHint(`shift+${keys.delete}`),
+                danger: true,
+                onSelect: () => deleteEntries(paneId, [entry.name], true),
+              },
+              ...archiveMenu,
+              ...compressMenu,
+            ]
+          : []),
         { kind: 'sep' },
         { kind: 'item', label: t('menu.hash'), onSelect: () => setFileTools({ mode: 'hash', paths }) },
         { kind: 'item', label: t('menu.copyPath'), onSelect: () => copyPaths(paths) },
@@ -3037,6 +3040,10 @@ export default function App() {
       const selected = listData[tab.id]?.selected
       const names = selected && selected.has(entry.name) ? Array.from(selected) : [entry.name]
       const paths = names.map((name) => joinPath(tab.path, name))
+      if (tab.path && isInsideArchive(tab.path)) {
+        setMenu({ x: point.clientX, y: point.clientY, items: rowFallback(paneId, entry, paths) })
+        return
+      }
       const dpr = window.devicePixelRatio || 1
       void shellMenuShow(
         paths,
@@ -3080,11 +3087,16 @@ export default function App() {
       if (!tab) return
       const data = listData[tab.id]
       // The drive overview has no folder to create, paste, or reveal in.
+      const inArchive = Boolean(tab.path && isInsideArchive(tab.path))
       const items: MenuItem[] = tab.path
         ? [
-            { kind: 'item', label: t('menu.newFolder'), onSelect: () => createFolder(paneId) },
-            { kind: 'item', label: t('menu.paste'), hint: menuHint(keys.paste), onSelect: () => pasteInto(paneId) },
-            { kind: 'sep' },
+            ...(!inArchive
+              ? [
+                  { kind: 'item' as const, label: t('menu.newFolder'), onSelect: () => createFolder(paneId) },
+                  { kind: 'item' as const, label: t('menu.paste'), hint: menuHint(keys.paste), onSelect: () => pasteInto(paneId) },
+                  { kind: 'sep' as const },
+                ]
+              : []),
             { kind: 'item', label: t('menu.refresh'), hint: menuHint(keys.refresh), onSelect: () => manualRefresh() },
             {
               kind: 'item',
@@ -3100,14 +3112,19 @@ export default function App() {
               },
             },
             { kind: 'sep' },
-            {
-              kind: 'item',
-              label: t('menu.openInExplorer'),
-              onSelect: () =>
-                void explorerOpen(tab.path).catch((e: unknown) =>
-                  showToast(t('op.failed', { code: errorCode(e) })),
-                ),
-            },
+            ...(!inArchive
+              ? [
+                  { kind: 'sep' as const },
+                  {
+                    kind: 'item' as const,
+                    label: t('menu.openInExplorer'),
+                    onSelect: () =>
+                      void explorerOpen(tab.path).catch((e: unknown) =>
+                        showToast(t('op.failed', { code: errorCode(e) })),
+                      ),
+                  },
+                ]
+              : []),
             {
               kind: 'item',
               label: pane.hidden ? t('list.hideHidden') : t('list.showHidden'),

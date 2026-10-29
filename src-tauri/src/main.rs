@@ -140,20 +140,24 @@ fn list_dir(
         // Progress-only batches go out while the directory is still being read, so a slow
         // share grows the counter instead of leaving the pane on a spinner.
         let mut reported = 0usize;
-        let outcome = fs::enumerate_reporting(&path, hidden, &cancel, &mut |count| {
-            if count < reported + 256 {
-                return;
-            }
-            reported = count;
-            let _ = on_batch.send(DirBatch {
-                gen,
-                scanned: count as u32,
-                done: false,
-                truncated: false,
-                items: Vec::new(),
-                error: None,
-            });
-        });
+        let outcome = if let Some((archive_path, inner_path)) = archive::resolve_archive_path(&path) {
+            archive::enumerate_virtual(&archive_path, &inner_path, &cancel)
+        } else {
+            fs::enumerate_reporting(&path, hidden, &cancel, &mut |count| {
+                if count < reported + 256 {
+                    return;
+                }
+                reported = count;
+                let _ = on_batch.send(DirBatch {
+                    gen,
+                    scanned: count as u32,
+                    done: false,
+                    truncated: false,
+                    items: Vec::new(),
+                    error: None,
+                });
+            })
+        };
         let (mut entries, truncated) = match outcome {
             Ok(outcome) => (outcome.entries, outcome.truncated),
             Err(err) => {
@@ -338,9 +342,15 @@ async fn tree_dirs(path: String, hidden: bool) -> Result<TreeListing, ApiError> 
 /// leaving the current directory, so a typo cannot replace a working folder with an error.
 #[tauri::command]
 async fn path_is_dir(path: String) -> bool {
-    tauri::async_runtime::spawn_blocking(move || std::path::Path::new(&path).is_dir())
-        .await
-        .unwrap_or(false)
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = std::path::Path::new(&path);
+        if p.is_dir() {
+            return true;
+        }
+        archive::is_archive_or_inner_dir(&path)
+    })
+    .await
+    .unwrap_or(false)
 }
 
 #[tauri::command]
@@ -811,6 +821,25 @@ async fn preview_info(
     let external = settings.external_preview.clone();
     let limits = preview::Limits::from_settings(&settings);
     tauri::async_runtime::spawn_blocking(move || {
+        if let Some((archive_path, inner_path)) = archive::resolve_archive_path(&path) {
+            if !inner_path.is_empty() {
+                if archive::is_inner_dir(&archive_path, &inner_path)? {
+                    return Ok(preview::PreviewInfo {
+                        kind: "folder".to_string(),
+                        ..Default::default()
+                    });
+                }
+                let cached_file = archive::extract_cached(&archive_path, &inner_path)?;
+                return preview::info(
+                    cached_file.to_string_lossy().into_owned(),
+                    width,
+                    bg,
+                    &external,
+                    limits,
+                    hydrate.unwrap_or(false),
+                );
+            }
+        }
         preview::info(path, width, bg, &external, limits, hydrate.unwrap_or(false))
     })
     .await
@@ -1048,7 +1077,16 @@ fn config_warnings() -> Vec<&'static str> {
 
 #[tauri::command]
 fn open_path(path: String) -> Result<(), ApiError> {
-    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let target_path = if let Some((archive_path, inner_path)) = archive::resolve_archive_path(&path) {
+        if !inner_path.is_empty() {
+            archive::extract_cached(&archive_path, &inner_path)?.to_string_lossy().into_owned()
+        } else {
+            path
+        }
+    } else {
+        path
+    };
+    let wide: Vec<u16> = target_path.encode_utf16().chain(std::iter::once(0)).collect();
     let result = unsafe {
         ShellExecuteW(
             None,
@@ -1067,9 +1105,9 @@ fn open_path(path: String) -> Result<(), ApiError> {
     Err(match code {
         // The shell has no default handler for this extension; the caller offers the
         // system "Open with" dialog instead of leaving the double-click silent.
-        31 => ApiError::new("NO_ASSOCIATION", path),
-        2 => ApiError::new("NOT_FOUND", path),
-        5 => ApiError::new("ACCESS_DENIED", path),
+        31 => ApiError::new("NO_ASSOCIATION", target_path),
+        2 => ApiError::new("NOT_FOUND", target_path),
+        5 => ApiError::new("ACCESS_DENIED", target_path),
         _ => ApiError::new("SHELL_FAILED", format!("ShellExecuteW 返回 {code}")),
     })
 }
@@ -1086,8 +1124,17 @@ async fn open_with(path: String) -> Result<(), ApiError> {
     use windows::Win32::UI::Shell::{
         SHOpenWithDialog, OAIF_ALLOW_REGISTRATION, OAIF_EXEC, OPENASINFO,
     };
+    let target_path = if let Some((archive_path, inner_path)) = archive::resolve_archive_path(&path) {
+        if !inner_path.is_empty() {
+            archive::extract_cached(&archive_path, &inner_path)?.to_string_lossy().into_owned()
+        } else {
+            path
+        }
+    } else {
+        path
+    };
     let join = tauri::async_runtime::spawn_blocking(move || {
-        let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        let wide: Vec<u16> = target_path.encode_utf16().chain(std::iter::once(0)).collect();
         unsafe {
             let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
             if hr.is_err() && hr.0 as u32 != 0x8001_0106 {
