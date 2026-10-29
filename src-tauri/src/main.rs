@@ -341,13 +341,22 @@ async fn tree_dirs(path: String, hidden: bool) -> Result<TreeListing, ApiError> 
 /// Whether the path is an existing folder. The address bar checks a target before
 /// leaving the current directory, so a typo cannot replace a working folder with an error.
 #[tauri::command]
+async fn expand_path(raw: String) -> String {
+    let fallback = raw.clone();
+    tauri::async_runtime::spawn_blocking(move || fs::expand_path(&raw))
+        .await
+        .unwrap_or(fallback)
+}
+
+#[tauri::command]
 async fn path_is_dir(path: String) -> bool {
     tauri::async_runtime::spawn_blocking(move || {
-        let p = std::path::Path::new(&path);
+        let expanded = fs::expand_path(&path);
+        let p = std::path::Path::new(&expanded);
         if p.is_dir() {
             return true;
         }
-        archive::is_archive_or_inner_dir(&path)
+        archive::is_archive_or_inner_dir(&expanded)
     })
     .await
     .unwrap_or(false)
@@ -587,6 +596,77 @@ fn archive_compress(
         },
         on_progress,
     )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn archive_prepare_drag(paths: Vec<String>) -> Result<Vec<String>, ApiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut out = Vec::with_capacity(paths.len());
+        for p in paths {
+            if let Some((arc, inner)) = archive::resolve_archive_path(&p) {
+                if !inner.is_empty() {
+                    let cached = archive::extract_cached(&arc, &inner)?;
+                    out.push(cached.to_string_lossy().into_owned());
+                    continue;
+                }
+            }
+            out.push(p);
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| ApiError::new("THREAD", e.to_string()))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn archive_extract_items(
+    items: Vec<String>,
+    dest: String,
+) -> Result<Vec<String>, ApiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dest_path = std::path::Path::new(&dest);
+        let mut extracted = Vec::new();
+        for item in items {
+            if let Some((arc, inner)) = archive::resolve_archive_path(&item) {
+                if inner.is_empty() {
+                    continue;
+                }
+                let is_dir = archive::is_inner_dir(&arc, &inner).unwrap_or(false);
+                if is_dir {
+                    let folder_name = std::path::Path::new(&inner).file_name().unwrap_or_default();
+                    let target_folder = dest_path.join(folder_name);
+                    std::fs::create_dir_all(&target_folder)
+                        .map_err(|e| ApiError::from_io(&target_folder.to_string_lossy(), &e))?;
+                    let entries = archive::backends::list(&arc.to_string_lossy(), 500_000)?;
+                    for entry in entries {
+                        let norm = entry.name.replace('/', "\\");
+                        let norm = norm.trim_matches('\\');
+                        if norm.len() > inner.len()
+                            && norm[..inner.len()].eq_ignore_ascii_case(&inner)
+                            && norm.chars().nth(inner.len()) == Some('\\')
+                        {
+                            let rel_suffix = &norm[inner.len()..].trim_start_matches('\\');
+                            let target_file = target_folder.join(rel_suffix);
+                            if let Some(parent) = target_file.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                            if archive::backends::extract_single(&arc.to_string_lossy(), norm, &target_file, None).is_ok() {
+                                extracted.push(target_file.to_string_lossy().into_owned());
+                            }
+                        }
+                    }
+                } else {
+                    let file_name = std::path::Path::new(&inner).file_name().unwrap_or_default();
+                    let target_file = dest_path.join(file_name);
+                    archive::backends::extract_single(&arc.to_string_lossy(), &inner, &target_file, None)?;
+                    extracted.push(target_file.to_string_lossy().into_owned());
+                }
+            }
+        }
+        Ok(extracted)
+    })
+    .await
+    .map_err(|e| ApiError::new("THREAD", e.to_string()))?
 }
 
 /// Starts a checksum job; progress arrives on the channel and `tool_cancel` stops it.
@@ -1402,6 +1482,7 @@ fn main() {
             drives,
             tree_dirs,
             path_is_dir,
+            expand_path,
             paths_exist,
             unique_paths,
             sort_order,
@@ -1434,6 +1515,8 @@ fn main() {
             op_retry_elevated,
             archive_extract,
             archive_compress,
+            archive_prepare_drag,
+            archive_extract_items,
             hash_start,
             dup_start,
             compare_level,

@@ -1,6 +1,6 @@
 [package]
 name = "flowdir"
-version = "0.6.9"
+version = "0.6.10"
 description = "FlowDir file manager"
 edition = "2021"
 rust-version = "1.93"
@@ -74,3 +74,5 @@ toml_edit = { version = "0.25.5", features = ["serde"] }
 [profile.release]
 lto = "thin"
 codegen-units = 1
+strip = true
+panic = "abort"

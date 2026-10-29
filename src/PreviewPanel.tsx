@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { makeT } from './i18n'
 import type { Translate } from './i18n'
 import { formatSize, formatTime } from './paths'
@@ -56,6 +57,8 @@ export function PreviewPanel({
   onDownload,
 }: Props) {
   const t = makeT(lang)
+  const [htmlViewMode, setHtmlViewMode] = useState<'preview' | 'source'>('preview')
+
 
   return (
     <aside
@@ -108,6 +111,57 @@ export function PreviewPanel({
                 />
               </div>
             )}
+            {info.kind === 'audio' && info.url && (
+              <div className="flex h-full flex-col items-center justify-center px-4 text-center">
+                <svg viewBox="0 0 48 48" className="h-14 w-14 text-pink-500" fill="currentColor" aria-hidden>
+                  <path d="M24 6v22.5A6.5 6.5 0 1 0 28 34V14h12V6H24Z" />
+                </svg>
+                <div className="mt-3 max-w-full truncate text-[0.8125rem] font-medium text-fg-strong">{name}</div>
+                <audio controls src={info.url} className="mt-4 w-full max-w-xs" preload="metadata" />
+              </div>
+            )}
+
+            {info.kind === 'html' && (
+              <div className="flex h-full flex-col">
+                <div className="flex shrink-0 items-center justify-end gap-1 pb-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setHtmlViewMode('preview')}
+                    className={`rounded px-2 py-0.5 text-[0.625rem] ${
+                      htmlViewMode === 'preview'
+                        ? 'bg-sel font-medium text-fg-strong'
+                        : 'text-muted hover:bg-surface-3'
+                    }`}
+                  >
+                    {t('preview.htmlRender')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setHtmlViewMode('source')}
+                    className={`rounded px-2 py-0.5 text-[0.625rem] ${
+                      htmlViewMode === 'source'
+                        ? 'bg-sel font-medium text-fg-strong'
+                        : 'text-muted hover:bg-surface-3'
+                    }`}
+                  >
+                    {t('preview.htmlSource')}
+                  </button>
+                </div>
+                {htmlViewMode === 'preview' ? (
+                  <iframe
+                    srcDoc={info.text ?? ''}
+                    sandbox="allow-same-origin"
+                    title={name}
+                    className="min-h-0 flex-1 w-full rounded border border-line bg-white"
+                  />
+                ) : (
+                  <pre data-selectable className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words font-mono text-[0.6875rem] leading-relaxed text-fg">
+                    {info.text}
+                  </pre>
+                )}
+              </div>
+            )}
+
 
             {info.kind === 'folder' && (
               <div className="grid h-full place-items-center px-4 text-center">

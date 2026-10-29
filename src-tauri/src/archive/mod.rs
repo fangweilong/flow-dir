@@ -7,7 +7,7 @@
 
 pub mod format;
 
-mod backends;
+pub mod backends;
 mod entry;
 mod sink;
 pub mod write;

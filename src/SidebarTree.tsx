@@ -26,6 +26,7 @@ type Props = TreeState & {
   currentPath: string
   onToggle: (path: string) => void
   onOpen: (path: string) => void
+  onContextMenu?: (path: string, point: { clientX: number; clientY: number }) => void
 }
 
 /**
@@ -43,6 +44,7 @@ export function SidebarTree({
   currentPath,
   onToggle,
   onOpen,
+  onContextMenu,
 }: Props) {
   const selectedKey = pathKey(selectedPath)
   const currentKey = pathKey(currentPath)
@@ -63,6 +65,7 @@ export function SidebarTree({
           currentKey={currentKey}
           onToggle={onToggle}
           onOpen={onOpen}
+          onContextMenu={onContextMenu}
         />
       ))}
     </div>
@@ -80,6 +83,7 @@ type RowProps = TreeState & {
   currentKey: string
   onToggle: (path: string) => void
   onOpen: (path: string) => void
+  onContextMenu?: (path: string, point: { clientX: number; clientY: number }) => void
 }
 
 /**
@@ -99,6 +103,7 @@ const TreeRow = memo(function TreeRow({
   currentKey,
   onToggle,
   onOpen,
+  onContextMenu,
 }: RowProps) {
   const key = pathKey(path)
   const expanded = key in open
@@ -118,6 +123,12 @@ const TreeRow = memo(function TreeRow({
               ? 'font-medium text-fg-strong hover:bg-surface-3'
               : 'text-fg hover:bg-surface-3'
         }`}
+        onContextMenu={(ev) => {
+          if (!onContextMenu || !expandable) return
+          ev.preventDefault()
+          ev.stopPropagation()
+          onContextMenu(path, { clientX: ev.clientX, clientY: ev.clientY })
+        }}
         style={{ paddingLeft: 2 + Math.min(depth, INDENT_MAX_DEPTH) * INDENT_STEP }}
       >
         {expandable ? (
@@ -168,6 +179,7 @@ const TreeRow = memo(function TreeRow({
               currentKey={currentKey}
               onToggle={onToggle}
               onOpen={onOpen}
+              onContextMenu={onContextMenu}
             />
           )
         })}

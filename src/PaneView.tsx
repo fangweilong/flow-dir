@@ -4,7 +4,7 @@ import { FileIcon } from './icons'
 import { crumbs, formatSize, formatTime, isArchiveName, isDir, isFsPath, isInsideArchive, joinPath, parentPath, pathKey, resolveAddress, underPath } from './paths'
 import { buildGitBadges } from './git'
 import type { GitBadges } from './git'
-import { pathIsDir } from './api'
+import { expandPath, pathIsDir } from './api'
 import { formatBinding, matchBinding } from './shortcuts'
 import type { ShortcutId } from './shortcuts'
 import { matchTypeAhead } from './typeahead'
@@ -673,24 +673,33 @@ export function PaneView({
       closeAddressEdit()
       return
     }
-    // Relative addresses are resolved against the current folder; `c:` lands on the root.
-    const next = resolveAddress(tab.path, raw)
-    if (pathKey(next) === pathKey(tab.path)) {
-      closeAddressEdit()
-      return
-    }
     const seq = ++addressSeq.current
-    void pathIsDir(next)
-      .catch(() => false)
-      .then((ok) => {
+    void expandPath(raw)
+      .then((expanded) => {
         if (seq !== addressSeq.current) return
-        if (!ok) {
-          setAddressBad(true)
-          onPathInvalid(next)
+        // Relative addresses are resolved against the current folder; `c:` lands on the root.
+        const next = resolveAddress(tab.path, expanded)
+        if (pathKey(next) === pathKey(tab.path)) {
+          closeAddressEdit()
           return
         }
-        closeAddressEdit()
-        onNavigate(tab.id, next)
+        void pathIsDir(next)
+          .catch(() => false)
+          .then((ok) => {
+            if (seq !== addressSeq.current) return
+            if (!ok) {
+              setAddressBad(true)
+              onPathInvalid(next)
+              return
+            }
+            closeAddressEdit()
+            onNavigate(tab.id, next)
+          })
+      })
+      .catch(() => {
+        if (seq !== addressSeq.current) return
+        setAddressBad(true)
+        onPathInvalid(raw)
       })
   }
 
@@ -966,6 +975,7 @@ export function PaneView({
                 data-tab={id}
                 data-tab-active={selected ? '1' : '0'}
                 data-tab-pinned={tabState.pinned ? '1' : '0'}
+                data-drop-dir={tabState.path || undefined}
                 onPointerDown={(ev) => {
                   if (ev.button !== 0) return
                   onActivateTab(id)
@@ -1210,6 +1220,7 @@ export function PaneView({
                 <button
                   type="button"
                   data-crumb={part.path}
+                  data-drop-dir={part.path}
                   // A crumb jumps straight to that folder, like Explorer's breadcrumbs.
                   onClick={() => tab && pathKey(part.path) !== pathKey(tab.path) && onNavigate(tab.id, part.path)}
                   title={part.path}

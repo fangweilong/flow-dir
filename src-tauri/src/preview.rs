@@ -93,6 +93,10 @@ const VIDEO_EXT: &[&str] = &[
     "mp4", "m4v", "mkv", "mov", "avi", "webm", "wmv", "flv", "mpg", "mpeg", "ts", "m2ts",
 ];
 
+const AUDIO_EXT: &[&str] = &[
+    "mp3", "wav", "flac", "ogg", "m4a", "aac", "wma",
+];
+
 /// Extensions always treated as text. Anything else is sniffed, so an unlisted or
 /// extension-less file still previews when its bytes look like text.
 const TEXT_EXT: &[&str] = &[
@@ -335,6 +339,20 @@ pub fn handle_request<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) ->
             }
             Err(err) => plain(StatusCode::INTERNAL_SERVER_ERROR, &err.code),
         },
+        ext if AUDIO_EXT.contains(&ext) => match std::fs::read(path) {
+            Ok(bytes) => {
+                let mime = match ext {
+                    "mp3" => "audio/mpeg",
+                    "wav" => "audio/wav",
+                    "flac" => "audio/flac",
+                    "ogg" => "audio/ogg",
+                    "m4a" | "aac" => "audio/mp4",
+                    _ => "audio/octet-stream",
+                };
+                ok(mime, bytes)
+            }
+            Err(err) => plain(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+        },
         _ => plain(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported"),
     }
 }
@@ -454,6 +472,16 @@ pub fn info(
         return Ok(info);
     }
 
+    if AUDIO_EXT.contains(&ext.as_str()) {
+        let encoded =
+            percent_encoding::utf8_percent_encode(&path, percent_encoding::NON_ALPHANUMERIC);
+        info.kind = "audio".to_string();
+        info.url = Some(format!(
+            "http://fd.localhost/preview?path={encoded}&v={mtime}-{size}"
+        ));
+        return Ok(info);
+    }
+
     // Every format the extraction layer reads can also be listed here, so 7z/rar/tar
     // previews are no longer limited to zip's central directory.
     if archive::format::from_name(&path).is_some() {
@@ -463,6 +491,11 @@ pub fn info(
     }
 
     match ext.as_str() {
+        "html" | "htm" => {
+            let bytes = read_prefix(&path, limits.text_bytes)?;
+            info.kind = "html".to_string();
+            info.text = Some(decode_text(&bytes));
+        }
         "exe" | "dll" | "sys" | "msi" => {
             info.kind = "binary".to_string();
             info.meta = Some(version_rows(&path));

@@ -24,6 +24,8 @@ export const treeDirs = (path: string, hidden: boolean) =>
   invoke<{ names: string[]; truncated: boolean }>('tree_dirs', { path, hidden })
 /** True when the path is an existing folder; validates an address-bar edit before navigating. */
 export const pathIsDir = (path: string) => invoke<boolean>('path_is_dir', { path })
+/** Expands environment variables (%VAR%) and ~ in a path. */
+export const expandPath = (raw: string) => invoke<string>('expand_path', { raw })
 /** Repository status for the folder; empty when it is not a work tree. */
 export const gitStatus = (path: string) => invoke<GitStatus>('git_status', { path })
 export const quickAccess = () => invoke<Place[]>('quick_access')
@@ -124,6 +126,14 @@ export function archiveCompress(
   channel.onmessage = onProgress
   return invoke<void>('archive_compress', { jobId, paths, dest, format, level, password, onProgress: channel })
 }
+
+/** Resolves archive virtual paths to cached real files so OLE drag can offer them. */
+export const archivePrepareDrag = (paths: string[]) =>
+  invoke<string[]>('archive_prepare_drag', { paths })
+
+/** Extracts individual virtual entries from an archive into `dest`. */
+export const archiveExtractItems = (items: string[], dest: string) =>
+  invoke<string[]>('archive_extract_items', { items, dest })
 
 /** Streaming SHA-256/SHA-1/MD5 over the given paths; results arrive with the final message. */
 export function hashStart(

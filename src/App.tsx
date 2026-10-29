@@ -28,6 +28,8 @@ import { SidebarTree } from './SidebarTree'
 import {
   archiveCompress,
   archiveExtract,
+  archiveExtractItems,
+  archivePrepareDrag,
   cancelDir,
   COMPRESS_EXTENSIONS,
   COMPRESS_FORMATS,
@@ -2510,6 +2512,17 @@ export default function App() {
           invalidateGit(dir)
         }
       }
+      if (items.some(isInsideArchive) && !isInsideArchive(targetDir)) {
+        void archiveExtractItems(items, targetDir)
+          .then((extracted) => {
+            invalidateTree(targetDir)
+            invalidateGit(targetDir)
+            refreshPanes()
+            showToast(t('toast.copied', { count: extracted.length }))
+          })
+          .catch(() => showToast(t('toast.copyFailed')))
+        return
+      }
       if (forced === 'copy') {
         runOp('copy', items, { targetDir, after })
         return
@@ -2566,7 +2579,9 @@ export default function App() {
         ) {
           detach()
           setRowDrag(null)
-          void dragOut(names.map((name) => joinPath(sourceDir, name)))
+          const rawPaths = names.map((name) => joinPath(sourceDir, name))
+          void archivePrepareDrag(rawPaths)
+            .then((paths) => dragOut(paths))
             .then((effect) => {
               if (effect !== 'move') return
               // The target app moved the files; the source listing is stale now.
@@ -2776,6 +2791,17 @@ export default function App() {
             showToast(t('toast.noClipboard'))
             return
           }
+          if (clip.paths.some(isInsideArchive) && !isInsideArchive(tab.path)) {
+            void archiveExtractItems(clip.paths, tab.path)
+              .then((extracted) => {
+                invalidateTree(tab.path)
+                invalidateGit(tab.path)
+                refreshPanes()
+                showToast(t('toast.copied', { count: extracted.length }))
+              })
+              .catch(() => showToast(t('toast.copyFailed')))
+            return
+          }
           runOp(clip.cut ? 'move' : 'copy', clip.paths, { targetDir: tab.path })
         })
         .catch(() => showToast(t('toast.noClipboard')))
@@ -2910,6 +2936,56 @@ export default function App() {
     )
   }, [])
 
+  const isPinnedPlace = useCallback(
+    (targetPath: string) => {
+      const lower = targetPath.toLowerCase()
+      return (
+        settings.customPlaces.some((p) => p.path.toLowerCase() === lower) ||
+        places.some((p) => p.path.toLowerCase() === lower && !settings.hiddenPlaces.includes(p.key))
+      )
+    },
+    [places, settings.customPlaces, settings.hiddenPlaces],
+  )
+
+  const togglePinPlace = useCallback(
+    (targetPath: string) => {
+      const lower = targetPath.toLowerCase()
+      const isCustom = settings.customPlaces.some((p) => p.path.toLowerCase() === lower)
+      if (isCustom) {
+        updateSettings({
+          ...settings,
+          customPlaces: settings.customPlaces.filter((p) => p.path.toLowerCase() !== lower),
+        })
+        showToast(t('sidebar.unpinned'))
+        return
+      }
+      const builtin = places.find((p) => p.path.toLowerCase() === lower)
+      if (builtin) {
+        if (settings.hiddenPlaces.includes(builtin.key)) {
+          updateSettings({
+            ...settings,
+            hiddenPlaces: settings.hiddenPlaces.filter((k) => k !== builtin.key),
+          })
+          showToast(t('sidebar.pinned'))
+        } else {
+          updateSettings({
+            ...settings,
+            hiddenPlaces: [...settings.hiddenPlaces, builtin.key],
+          })
+          showToast(t('sidebar.unpinned'))
+        }
+        return
+      }
+      const name = targetPath.split(/[\\/]/).filter(Boolean).pop() || targetPath
+      updateSettings({
+        ...settings,
+        customPlaces: [...settings.customPlaces, { name, path: targetPath }],
+      })
+      showToast(t('sidebar.pinned'))
+    },
+    [places, settings, showToast, t, updateSettings],
+  )
+
   const rowFallback = useCallback(
     (paneId: string, entry: Entry, paths: string[]): MenuItem[] => {
       const dir = isDir(entry.attrs)
@@ -3007,6 +3083,16 @@ export default function App() {
               },
               ...archiveMenu,
               ...compressMenu,
+              ...(dir && paths.length === 1
+                ? [
+                    { kind: 'sep' as const },
+                    {
+                      kind: 'item' as const,
+                      label: isPinnedPlace(paths[0]) ? t('sidebar.unpinPlace') : t('sidebar.pinPlace'),
+                      onSelect: () => togglePinPlace(paths[0]),
+                    },
+                  ]
+                : []),
             ]
           : []),
         { kind: 'sep' },
@@ -3027,6 +3113,8 @@ export default function App() {
       startRename,
       startRenameMany,
       t,
+      isPinnedPlace,
+      togglePinPlace,
     ],
   )
 
@@ -3575,14 +3663,153 @@ export default function App() {
 
   const openPlaceMenu = useCallback(
     (place: QuickPlaceEntry, point: { clientX: number; clientY: number }) => {
+      const paneId = activePane?.id
       const items: MenuItem[] = [
         { kind: 'item', label: t('menu.open'), onSelect: () => activeTab && navigate(activeTab.id, place.path) },
+        {
+          kind: 'item',
+          label: t('menu.openInNewTab'),
+          onSelect: () => {
+            if (!paneId) return
+            const newTabId = uid('t')
+            setWs((prev) => {
+              if (!prev) return prev
+              const pane = prev.panes[paneId]
+              if (!pane) return prev
+              return {
+                ...prev,
+                tabs: { ...prev.tabs, [newTabId]: { id: newTabId, path: place.path, history: [place.path], histIdx: 0 } },
+                panes: { ...prev.panes, [paneId]: { ...pane, tabIds: [...pane.tabIds, newTabId], activeTabId: newTabId } },
+              }
+            })
+          },
+        },
+        {
+          kind: 'item',
+          label: t('menu.openInNewPane'),
+          onSelect: () => {
+            if (!paneId) return
+            const newPaneId = uid('p')
+            const newTabId = uid('t')
+            setWs((prev) => {
+              if (!prev) return prev
+              const root = splitPane(prev.root, paneId, 'col', 'after', newPaneId)
+              return {
+                ...prev,
+                root,
+                tabs: { ...prev.tabs, [newTabId]: { id: newTabId, path: place.path, history: [place.path], histIdx: 0 } },
+                panes: {
+                  ...prev.panes,
+                  [newPaneId]: {
+                    id: newPaneId,
+                    tabIds: [newTabId],
+                    activeTabId: newTabId,
+                    sort: DEFAULT_SORT,
+                    hidden: settingsRef.current.showHidden,
+                  },
+                },
+                activePaneId: newPaneId,
+              }
+            })
+          },
+        },
+        { kind: 'sep' },
+        { kind: 'item', label: t('menu.copyPath'), onSelect: () => copyPaths([place.path]) },
         { kind: 'sep' },
         { kind: 'item', label: t('sidebar.removePlace'), danger: true, onSelect: () => removePlace(place) },
       ]
       setMenu({ x: point.clientX, y: point.clientY, items })
     },
-    [activeTab, navigate, removePlace, t],
+    [activePane, activeTab, copyPaths, navigate, removePlace, t],
+  )
+
+  const openTreeContextMenu = useCallback(
+    (targetPath: string, point: { clientX: number; clientY: number }) => {
+      const paneId = activePane?.id
+      const pinned = isPinnedPlace(targetPath)
+      const items: MenuItem[] = [
+        {
+          kind: 'item',
+          label: t('menu.open'),
+          onSelect: () => activeTab && navigate(activeTab.id, targetPath),
+        },
+        {
+          kind: 'item',
+          label: t('menu.openInNewTab'),
+          onSelect: () => {
+            if (!paneId) return
+            const newTabId = uid('t')
+            setWs((prev) => {
+              if (!prev) return prev
+              const pane = prev.panes[paneId]
+              if (!pane) return prev
+              return {
+                ...prev,
+                tabs: {
+                  ...prev.tabs,
+                  [newTabId]: { id: newTabId, path: targetPath, history: [targetPath], histIdx: 0 },
+                },
+                panes: {
+                  ...prev.panes,
+                  [paneId]: { ...pane, tabIds: [...pane.tabIds, newTabId], activeTabId: newTabId },
+                },
+              }
+            })
+          },
+        },
+        {
+          kind: 'item',
+          label: t('menu.openInNewPane'),
+          onSelect: () => {
+            if (!paneId) return
+            const newPaneId = uid('p')
+            const newTabId = uid('t')
+            setWs((prev) => {
+              if (!prev) return prev
+              const root = splitPane(prev.root, paneId, 'col', 'after', newPaneId)
+              return {
+                ...prev,
+                root,
+                tabs: {
+                  ...prev.tabs,
+                  [newTabId]: { id: newTabId, path: targetPath, history: [targetPath], histIdx: 0 },
+                },
+                panes: {
+                  ...prev.panes,
+                  [newPaneId]: {
+                    id: newPaneId,
+                    tabIds: [newTabId],
+                    activeTabId: newTabId,
+                    sort: DEFAULT_SORT,
+                    hidden: settingsRef.current.showHidden,
+                  },
+                },
+                activePaneId: newPaneId,
+              }
+            })
+          },
+        },
+        { kind: 'sep' },
+        {
+          kind: 'item',
+          label: pinned ? t('sidebar.unpinPlace') : t('sidebar.pinPlace'),
+          onSelect: () => togglePinPlace(targetPath),
+        },
+        { kind: 'sep' },
+        {
+          kind: 'item',
+          label: t('menu.copyPath'),
+          onSelect: () => copyPaths([targetPath]),
+        },
+        {
+          kind: 'item',
+          label: t('menu.openInExplorer'),
+          onSelect: () => void explorerOpen(targetPath).catch(() => undefined),
+        },
+      ]
+      setMenu({ x: point.clientX, y: point.clientY, items })
+    },
+    [activePane, activeTab, copyPaths, isPinnedPlace, navigate, t, togglePinPlace],
   )
 
   const openDriveRowMenu = useCallback(
@@ -3983,6 +4210,7 @@ export default function App() {
                   currentPath={activeTab?.path ?? ''}
                   onToggle={toggleTree}
                   onOpen={openTreePath}
+                  onContextMenu={openTreeContextMenu}
                 />
               </section>
             </aside>

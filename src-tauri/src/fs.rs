@@ -728,6 +728,33 @@ pub fn quick_access() -> Vec<Place> {
     out
 }
 
+/// Expands environment variables like `%APPDATA%`, `%TEMP%` and leading `~` in a path.
+pub fn expand_path(raw: &str) -> String {
+    let mut text = raw.trim();
+    if text.starts_with('"') && text.ends_with('"') && text.len() >= 2 {
+        text = text[1..text.len() - 1].trim();
+    }
+    if text.is_empty() {
+        return String::new();
+    }
+    let mut s = text.to_string();
+    if s.starts_with('~') {
+        if let Ok(home) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
+            s = format!("{}{}", home, &s[1..]);
+        }
+    }
+    if s.contains('%') {
+        let re = regex::Regex::new(r"%([^%]+)%").unwrap();
+        s = re
+            .replace_all(&s, |caps: &regex::Captures| {
+                let var = &caps[1];
+                std::env::var(var).unwrap_or_else(|_| format!("%{var}%"))
+            })
+            .into_owned();
+    }
+    s
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -899,5 +926,21 @@ mod tests {
                 "{key} must use {path}"
             );
         }
+    }
+
+    #[test]
+    fn expand_path_resolves_env_and_home() {
+        let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
+        if !home.is_empty() {
+            assert_eq!(expand_path("~"), home);
+            assert_eq!(expand_path("~/Documents"), format!("{home}/Documents"));
+        }
+        let temp = std::env::var("TEMP").unwrap_or_default();
+        if !temp.is_empty() {
+            assert_eq!(expand_path("%TEMP%"), temp);
+            assert_eq!(expand_path("\"%TEMP%\""), temp);
+        }
+        assert_eq!(expand_path("C:\\Windows"), "C:\\Windows");
+        assert_eq!(expand_path(""), "");
     }
 }
