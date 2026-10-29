@@ -314,7 +314,7 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
       t('settings.autostart'),
       settings.globalHotkey,
     ].join(' '),
-    graphics: [t('settings.graphics'), t('settings.gpuAccel'), t('settings.restartNow')].join(' '),
+    graphics: [t('settings.graphics'), t('settings.gpuAccel'), t('settings.reclaimMemory'), t('settings.restartNow')].join(' '),
     quickAccess: [t('settings.quickAccess'), ...settings.customPlaces.map((place) => place.name)].join(' '),
     preview: [t('settings.previewSection'), t('settings.externalPreview'), ...settings.externalPreview.map((rule) => rule.ext)].join(' '),
     config: [t('settings.configDir'), t('settings.configOpen')].join(' '),
@@ -1083,6 +1083,14 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
                 >
                   {t('settings.restartNow')}
                 </button>
+              </div>
+              <div className="mt-3">
+                <ToggleRow
+                  label={t('settings.reclaimMemory')}
+                  hint={t('settings.reclaimMemoryHint')}
+                  value={settings.reclaimMemory}
+                  onChange={(value) => onChange({ ...settings, reclaimMemory: value })}
+                />
               </div>
             </div>
           </section>

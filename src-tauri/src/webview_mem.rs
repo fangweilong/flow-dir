@@ -70,8 +70,10 @@ pub fn watch(app: AppHandle) {
             let Some(window) = app.get_webview_window("main") else {
                 return;
             };
-            let hidden =
-                window.is_minimized().unwrap_or(false) || !window.is_visible().unwrap_or(true);
+            let cache = app.state::<crate::settings::SettingsCache>();
+            let enabled = cache.get(&app).reclaim_memory;
+            let hidden = enabled
+                && (window.is_minimized().unwrap_or(false) || !window.is_visible().unwrap_or(true));
             if hidden == parked {
                 continue;
             }

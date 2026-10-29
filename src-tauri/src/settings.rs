@@ -53,6 +53,74 @@ impl SettingsCache {
         *self.0.lock().unwrap() = Some(Arc::new(settings));
     }
 }
+/// Deserializes a u32 from either an integer, a floating-point number (rounded), or a string.
+/// This prevents IPC serialization errors when frontend math produces fractional pixel widths.
+pub(crate) fn deserialize_lenient_u32<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct LenientU32Visitor;
+
+    impl<'de> serde::de::Visitor<'de> for LenientU32Visitor {
+        type Value = u32;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("an integer, floating point, or numeric string convertible to u32")
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<u32, E>
+        where
+            E: serde::de::Error,
+        {
+            u32::try_from(value).map_err(serde::de::Error::custom)
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<u32, E>
+        where
+            E: serde::de::Error,
+        {
+            if value < 0 {
+                return Ok(0);
+            }
+            u32::try_from(value).map_err(serde::de::Error::custom)
+        }
+
+        fn visit_f64<E>(self, value: f64) -> Result<u32, E>
+        where
+            E: serde::de::Error,
+        {
+            if value.is_nan() || value <= 0.0 {
+                Ok(0)
+            } else if value >= u32::MAX as f64 {
+                Ok(u32::MAX)
+            } else {
+                Ok(value.round() as u32)
+            }
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<u32, E>
+        where
+            E: serde::de::Error,
+        {
+            if let Ok(val) = v.parse::<u32>() {
+                return Ok(val);
+            }
+            if let Ok(val) = v.parse::<f64>() {
+                if val.is_nan() || val <= 0.0 {
+                    return Ok(0);
+                }
+                if val >= u32::MAX as f64 {
+                    return Ok(u32::MAX);
+                }
+                return Ok(val.round() as u32);
+            }
+            Err(serde::de::Error::custom(format!("invalid u32 numeric value: {v}")))
+        }
+    }
+
+    deserializer.deserialize_any(LenientU32Visitor)
+}
+
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase", default)]
@@ -68,8 +136,10 @@ pub struct Settings {
     /// Sidebar (quick access + drives) visibility.
     pub sidebar_open: bool,
     /// Sidebar width in px while open; drag-resizable in the UI.
+    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
     pub sidebar_width: u32,
     /// Preview panel width in px while open; drag-resizable in the UI.
+    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
     pub preview_width: u32,
     /// Extra quick-access entries appended after the built-in ones.
     pub custom_places: Vec<QuickPlace>,
@@ -82,8 +152,11 @@ pub struct Settings {
     /// WebView2 hardware compositing. Takes effect on the next launch because the
     /// argument is fixed when the browser process is created.
     pub gpu_accel: bool,
+    /// Reclaims WebView2 memory by parking the renderer while minimized. Default false to avoid resume hangs.
+    pub reclaim_memory: bool,
     /// Automatic update check interval in hours; `0` disables background checks and
     /// leaves only the manual button in Settings.
+    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
     pub update_interval_hours: u32,
     /// System notification when a long operation finishes in the background.
     pub notify_ops: bool,
@@ -92,29 +165,38 @@ pub struct Settings {
     /// Single UI font family, assembled into a stack by the frontend.
     pub font_family: String,
     /// Base UI font size in px; drives the rem scale of the whole interface.
+    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
     pub font_size: u32,
     /// Tab-strip font family; empty inherits `font_family`.
     pub tab_font_family: String,
     /// Tab-strip font size in px; drives the strip height and tab icons.
+    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
     pub tab_font_size: u32,
     /// File-list font family; empty inherits `font_family`.
     pub list_font_family: String,
     /// File-list font size in px; drives rows, columns and icons.
+    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
     pub list_font_size: u32,
     /// Navigation-bar font family; empty inherits `font_family`.
     pub nav_font_family: String,
     /// Navigation-bar font size in px; drives its controls.
+    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
     pub nav_font_size: u32,
     /// File-list name column width in px at the default font size; `0` fills the pane and
     /// leaves no gutter, any other value leaves the rest of the row blank.
+    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
     pub list_name_width: u32,
     /// File-list size column width in px at the default font size; drag-resizable.
+    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
     pub list_size_width: u32,
     /// File-list modified column width in px at the default font size; drag-resizable.
+    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
     pub list_time_width: u32,
     /// Drive overview capacity column width in px at the default font size; drag-resizable.
+    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
     pub drive_capacity_width: u32,
     /// Drive overview free-space column width in px at the default font size; drag-resizable.
+    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
     pub drive_free_width: u32,
     /// File-list "size" column visibility.
     pub list_col_size: bool,
@@ -123,24 +205,32 @@ pub struct Settings {
     /// File-list "modified" column visibility.
     pub list_col_time: bool,
     /// File-list "type" column width in px at the default font size; drag-resizable.
+    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
     pub list_type_width: u32,
     /// Undo/redo history depth, 1–100.
+    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
     pub undo_limit: u32,
     /// Largest file the preview will read, in MB (1–4096).
+    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
     pub preview_max_file_mb: u32,
     /// Largest width/height a rendered image or PDF page may use (256–16384).
+    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
     pub preview_max_dimension: u32,
     /// How much of a text file is shown, in KB (1–1024).
+    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
     pub preview_text_kb: u32,
     /// Reopened-tab stack depth (1–50); `Ctrl+Shift+T` walks it.
+    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
     pub closed_tab_limit: u32,
     /// Restore the previous tab set on launch.
     pub restore_tabs_on_start: bool,
     /// Middle-click / Ctrl+click on a folder opens it in a background tab.
     pub new_tab_on_middle_click: bool,
     /// Duplicate-scan worker threads; 0 picks `min(4, cores / 2)`.
+    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
     pub dup_concurrency: u32,
     /// Read-rate cap for duplicate scans in MB/s; 0 means unlimited.
+    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
     pub dup_max_mb_per_sec: u32,
     /// Directory names the duplicate scan never descends into.
     pub dup_exclude: Vec<String>,
@@ -326,6 +416,7 @@ impl Default for Settings {
             external_preview: Vec::new(),
             shortcuts: Vec::new(),
             gpu_accel: true,
+            reclaim_memory: false,
             update_interval_hours: 24,
             notify_ops: true,
             log_level: "info".to_string(),
@@ -507,6 +598,10 @@ drive_free_width = 84
 # WebView2 硬件合成，关闭省约 90MB 内存 / GPU compositing, saves ~90MB when off
 gpu_accel = true
 
+# 最小化时挂起 WebView2 回收内存（默认关闭，避免长期后台唤醒挂起）
+# reclaim WebView2 memory on minimize; false by default to prevent resume hangs
+reclaim_memory = false
+
 # 自动检查更新间隔（小时，0 = 只在设置里手动检查）
 # automatic update check interval in hours; 0 = manual checks only
 update_interval_hours = 24
@@ -603,6 +698,7 @@ struct FileSettings {
     sidebar_width: u32,
     preview_width: u32,
     gpu_accel: bool,
+    reclaim_memory: bool,
     update_interval_hours: u32,
     notify_ops: bool,
     log_level: String,
@@ -658,6 +754,7 @@ impl Default for FileSettings {
             sidebar_width: base.sidebar_width,
             preview_width: base.preview_width,
             gpu_accel: base.gpu_accel,
+            reclaim_memory: base.reclaim_memory,
             update_interval_hours: base.update_interval_hours,
             notify_ops: base.notify_ops,
             log_level: base.log_level,
@@ -714,6 +811,7 @@ impl From<FileSettings> for Settings {
             sidebar_width: file.sidebar_width,
             preview_width: file.preview_width,
             gpu_accel: file.gpu_accel,
+            reclaim_memory: file.reclaim_memory,
             update_interval_hours: file.update_interval_hours,
             notify_ops: file.notify_ops,
             log_level: file.log_level,
@@ -835,6 +933,7 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), A
     set_value(&mut doc, "sidebar_width", Value::from(settings.sidebar_width as i64));
     set_value(&mut doc, "preview_width", Value::from(settings.preview_width as i64));
     set_value(&mut doc, "gpu_accel", Value::from(settings.gpu_accel));
+    set_value(&mut doc, "reclaim_memory", Value::from(settings.reclaim_memory));
     set_value(
         &mut doc,
         "update_interval_hours",
@@ -1218,5 +1317,23 @@ mod tests {
         assert_eq!(parsed.shortcuts.len(), 1);
         assert_eq!(parsed.shortcuts[0].id, "search");
         assert_eq!(parsed.shortcuts[0].keys, "ctrl+shift+f");
+    }
+    #[test]
+    fn lenient_u32_deserializes_floats_and_integers() {
+        // Floating point widths from drag calculations must round into valid u32 without failing.
+        let json = r#"{"listSizeWidth": 434.90909090909093, "sidebarWidth": 250.2, "previewWidth": "320"}"#;
+        let parsed: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.list_size_width, 435);
+        assert_eq!(parsed.sidebar_width, 250);
+        assert_eq!(parsed.preview_width, 320);
+    }
+    #[test]
+    fn reclaim_memory_defaults_to_false() {
+        assert!(!Settings::default().reclaim_memory);
+        let parsed: FileSettings = toml_edit::de::from_str(TEMPLATE).unwrap();
+        assert!(!parsed.reclaim_memory);
+        let json = r#"{"reclaimMemory": true}"#;
+        let parsed_json: Settings = serde_json::from_str(json).unwrap();
+        assert!(parsed_json.reclaim_memory);
     }
 }

@@ -1111,11 +1111,11 @@ export default function App() {
     ) => {
       updateSettings({
         ...settingsRef.current,
-        listSizeWidth,
-        listTypeWidth,
-        listTimeWidth,
-        driveCapacityWidth,
-        driveFreeWidth,
+        listSizeWidth: Math.round(listSizeWidth),
+        listTypeWidth: Math.round(listTypeWidth),
+        listTimeWidth: Math.round(listTimeWidth),
+        driveCapacityWidth: Math.round(driveCapacityWidth),
+        driveFreeWidth: Math.round(driveFreeWidth),
       })
     },
     [updateSettings],
@@ -1123,7 +1123,8 @@ export default function App() {
 
   /** Name-column width; `0` returns to the fill-the-pane layout. */
   const setNameWidth = useCallback(
-    (listNameWidth: number) => updateSettings({ ...settingsRef.current, listNameWidth }),
+    (listNameWidth: number) =>
+      updateSettings({ ...settingsRef.current, listNameWidth: Math.round(listNameWidth) }),
     [updateSettings],
   )
 

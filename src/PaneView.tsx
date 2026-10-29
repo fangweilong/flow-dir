@@ -575,7 +575,13 @@ export function PaneView({
       setDraft(null)
       if (!moved || Math.round(next) === Math.round(start)) return
       const widths = live()
-      onColWidths(widths.size, widths.type, widths.time, widths.capacity, widths.free)
+      onColWidths(
+        Math.round(widths.size),
+        Math.round(widths.type),
+        Math.round(widths.time),
+        Math.round(widths.capacity),
+        Math.round(widths.free),
+      )
     }
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', end)
@@ -599,7 +605,13 @@ export function PaneView({
       free: colDriveFree,
     }
     const widths = { ...stored, [key]: defaults[key] }
-    onColWidths(widths.size, widths.type, widths.time, widths.capacity, widths.free)
+    onColWidths(
+      Math.round(widths.size),
+      Math.round(widths.type),
+      Math.round(widths.time),
+      Math.round(widths.capacity),
+      Math.round(widths.free),
+    )
   }
 
   /**

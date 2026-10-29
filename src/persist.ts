@@ -26,6 +26,7 @@ export type Settings = {
   externalPreview: ExternalPreviewRule[]
   shortcuts: ShortcutOverride[]
   gpuAccel: boolean
+  reclaimMemory: boolean
   updateIntervalHours: number
   /** System notification when a long operation finishes while the window is unfocused. */
   notifyOps: boolean
@@ -116,6 +117,7 @@ export const DEFAULT_SETTINGS: Settings = {
   externalPreview: [],
   shortcuts: [],
   gpuAccel: true,
+  reclaimMemory: false,
   updateIntervalHours: 24,
   notifyOps: true,
   logLevel: 'info',
