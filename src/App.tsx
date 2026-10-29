@@ -2,41 +2,27 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { getCurrentWebview } from '@tauri-apps/api/webview'
 import iconUrl from './assets/icon.png'
 import { PaneView } from './PaneView'
 import type { MenuPoint } from './PaneView'
 import { FeatureIcon, refreshIconCache } from './icons'
-import { ContextMenu } from './ContextMenu'
 import type { MenuItem } from './ContextMenu'
 import { OpsPanel } from './OpsPanel'
-import { FolderPickerDialog } from './FolderPickerDialog'
-import { HistoryPanel } from './HistoryPanel'
-import { PromptDialog } from './PromptDialog'
-import { BatchRenameDialog } from './BatchRenameDialog'
-import { ConfirmDialog } from './ConfirmDialog'
-import { CompressDialog } from './CompressDialog'
-import type { CompressValues } from './CompressDialog'
-import { FileToolsPanel } from './FileToolsPanel'
+import { ModalContainer } from './ModalContainer'
+import { useFileOperations } from './hooks/useFileOperations'
+import { useDragAndDrop } from './hooks/useDragAndDrop'
+import { useTreeAndGit } from './hooks/useTreeAndGit'
 import { PreviewPanel } from './PreviewPanel'
 import { SearchOverlay } from './SearchOverlay'
-import { ComparePanel } from './ComparePanel'
-import type { SyncAction } from './ComparePanel'
 import { themeIsDark } from './themes'
-import { SettingsModal } from './SettingsModal'
 import { SidebarTree } from './SidebarTree'
 import {
-  archiveCompress,
-  archiveExtract,
   archiveExtractItems,
-  archivePrepareDrag,
   cancelDir,
-  COMPRESS_EXTENSIONS,
   COMPRESS_FORMATS,
   clipboardCopy,
   clipboardPaste,
   configWarnings,
-  dragOut,
   driveEject,
   drives,
   explorerOpen,
@@ -44,17 +30,13 @@ import {
   layoutPreserve,
   layoutSave,
   listDir,
-  notifyOp,
   openPath,
   openWith,
   opCancel,
-  opRetryElevated,
-  opStart,
   previewExternal,
   previewInfo,
   quitApp,
   quickAccess,
-  restoreRecycle,
   setAppTheme,
   settingsLoad,
   settingsSave,
@@ -66,24 +48,18 @@ import {
   sortOrder,
   taskbarProgress,
   titlebarMenu,
-  treeDirs,
-  uniquePaths,
   updateCheck,
-  gitStatus,
   watchClear,
   watchSet,
 } from './api'
-import type { CompressFormat, OpRequest, SortItem } from './api'
-import { EMPTY_GIT, EMPTY_LIST, emptyList, filterMatches } from './types'
+import type { CompressFormat, SortItem } from './api'
+import { EMPTY_LIST, emptyList, filterMatches } from './types'
 import type {
   Drive,
   Entry,
-  GitStatus,
   Lang,
   LaunchRequest,
   ListData,
-  OpKind,
-  OpProgress,
   Place,
   PreviewInfo,
   SortState,
@@ -100,7 +76,7 @@ import {
 } from './fonts'
 import { DEFAULT_SETTINGS, fromSnapshot, toSnapshot } from './persist'
 import type { Settings } from './persist'
-import { baseName, isArchiveName, isDir, isFsPath, isInsideArchive, joinPath, parentPath, pathKey, sameVolume, treeChain, underPath } from './paths'
+import { baseName, isArchiveName, isDir, isFsPath, isInsideArchive, joinPath, pathKey, sameVolume, treeChain } from './paths'
 import { centerOffset } from './scroll'
 import { formatBinding, isTextInput, matchBinding, menuHint, resolveShortcuts } from './shortcuts'
 import {
@@ -117,8 +93,6 @@ import {
   uid,
 } from './workspace'
 import type { DropMode, Node, PaneState, TabState, Workspace } from './workspace'
-import { UNDO_LIMIT, undoEntryFor } from './undo'
-import type { OpRequestShape, UndoEntry, UndoPayload } from './undo'
 
 /** Error code of a rejected IPC call; `ApiError` is `{ code, detail }`. */
 const errorCode = (err: unknown): string =>
@@ -127,7 +101,6 @@ const errorCode = (err: unknown): string =>
     : String(err)
 
 /** Folders whose full change list stays cached; older ones refetch on demand. */
-const GIT_CACHE_LIMIT = 64
 
 /**
  * Inactive tabs whose rows stay in memory, so returning to one shows its filter,
@@ -157,20 +130,8 @@ type DragState = {
   target: { paneId: string; mode: DropMode } | null
 }
 
-/** A resolved drop destination plus the box to outline while hovering it. */
-type DropTarget = { dir: string; left: number; top: number; width: number; height: number }
 
 /** In-flight pointer drag of file rows; `started` separates a click from a real drag. */
-type RowDragState = {
-  names: string[]
-  sourceDir: string
-  x: number
-  y: number
-  started: boolean
-  target: DropTarget | null
-  copy: boolean
-  move: boolean
-}
 
 type SplitNode = Extract<Node, { t: 'split' }>
 
@@ -186,8 +147,6 @@ export default function App() {
   const [places, setPlaces] = useState<Place[]>([])
   const [driveList, setDriveList] = useState<Drive[]>([])
   const [drag, setDrag] = useState<DragState | null>(null)
-  const [rowDrag, setRowDrag] = useState<RowDragState | null>(null)
-  const [osDrag, setOsDrag] = useState<{ paths: string[]; target: DropTarget | null } | null>(null)
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [updateAvailable, setUpdateAvailable] = useState<string | null>(null)
@@ -225,21 +184,6 @@ export default function App() {
   })
   const [toast, setToast] = useState<string | null>(null)
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null)
-  /** Archive waiting for a destination from the in-app folder picker. */
-  const [extractTarget, setExtractTarget] = useState<{ archive: string; initial: string } | null>(null)
-  /** Selection waiting for format/level/password from the compression dialog. */
-  const [compressTarget, setCompressTarget] = useState<{
-    paths: string[]
-    dir: string
-    format: CompressFormat
-    name: string
-  } | null>(null)
-  /** Archive whose password the backend asked for, with the destination to retry. */
-  const [passwordPrompt, setPasswordPrompt] = useState<{
-    archive: string
-    dest: string
-    wrong: boolean
-  } | null>(null)
   const [prompt, setPrompt] = useState<{
     paneId: string
     title: string
@@ -259,25 +203,8 @@ export default function App() {
     { mode: 'hash'; paths: string[] } | { mode: 'dup'; root: string } | null
   >(null)
   const [compareOpen, setCompareOpen] = useState(false)
-  const [ops, setOps] = useState<Record<string, OpProgress>>({})
-  /** Original request per running/finished op, so an ACCESS_DENIED result can be retried. */
-  const opRequests = useRef<Record<string, OpRequest>>({})
-  const [elevating, setElevating] = useState<string | null>(null)
-  /** The undo/redo history list is open. */
   const [historyOpen, setHistoryOpen] = useState(false)
-  /** Count of operations still running when the window was asked to close. */
   const [quitBusy, setQuitBusy] = useState<number | null>(null)
-  /** Sidebar tree: expanded folders (key → display path) and their cached children. */
-  const [treeOpen, setTreeOpen] = useState<Record<string, string>>({})
-  const [treeNodes, setTreeNodes] = useState<Record<string, string[]>>({})
-  /** Folders whose child list hit the scan/row cap; the tree marks them instead of hiding the cut. */
-  const [treeTruncated, setTreeTruncated] = useState<Record<string, boolean>>({})
-  /** Folders whose child read failed; kept out of the cache so expanding retries them. */
-  const [treeErrors, setTreeErrors] = useState<Record<string, boolean>>({})
-  /** `git status` per folder, keyed by {@link pathKey}; empty repo = no badges. */
-  const [gitByDir, setGitByDir] = useState<Record<string, GitStatus>>({})
-  /** Bumped by invalidation so the fetch effect re-arms even if nothing was cached yet. */
-  const [gitEpoch, setGitEpoch] = useState(0)
 
   const wsRef = useRef<Workspace | null>(null)
   const layoutRef = useRef<HTMLDivElement>(null)
@@ -302,40 +229,13 @@ export default function App() {
   const rescanTimers = useRef(new Map<string, number>())
   /** Strongest pending change per pane: a content event must not swallow a structural one. */
   const pendingStructural = useRef(new Map<string, boolean>())
-  /** Latest git cache, so the event listener can skip probes for folders outside a repository. */
-  const gitByDirRef = useRef<Record<string, GitStatus>>({})
   const toastTimer = useRef<number | null>(null)
-  /** Undo stack: process-local, capped, only fully successful operations. */
-  const undoStack = useRef<UndoEntry[]>([])
-  /** Reversed entries; cleared as soon as a new operation lands on the undo stack. */
-  const redoStack = useRef<UndoEntry[]>([])
-  /** Bumped after each stack change so the history panel re-renders. */
-  const [historyEpoch, setHistoryEpoch] = useState(0)
-  const undoCounter = useRef(0)
-  /** A permanent delete succeeded last, so an empty stack is not "nothing happened". */
-  const lastIrreversible = useRef(false)
   const notifiedUpdate = useRef<string | null>(null)
-  /** Latest taskbar aggregate; IPC is coalesced so progress ticks do not spawn threads. */
   const taskbarWant = useRef<{ state: string; done: number; total: number } | null>(null)
   const taskbarTimer = useRef<number | null>(null)
   const taskbarSentAt = useRef(0)
   const previewRequest = useRef(0)
-  const treePending = useRef(new Set<string>())
-  /** Per-folder request generation; a reply from an older mode is dropped. */
-  const treeGeneration = useRef(new Map<string, number>())
-  const treeCounter = useRef(0)
-  const treeOpenRef = useRef<Record<string, string>>({})
-  const gitPending = useRef(new Set<string>())
-  /** Bumped on invalidation so a reply that started earlier is discarded. */
-  const gitSeq = useRef(new Map<string, number>())
   const sidebarRef = useRef<HTMLElement | null>(null)
-  const treeNodesRef = useRef<Record<string, string[]>>({})
-  /** Mirror of `treeErrors` for the stable fetch callbacks. */
-  const treeErrorsRef = useRef<Record<string, boolean>>({})
-
-  useEffect(() => {
-    gitByDirRef.current = gitByDir
-  }, [gitByDir])
 
   const lang: Lang = settings.language
   const t = useMemo(() => makeT(lang), [lang])
@@ -358,177 +258,22 @@ export default function App() {
     setUiLanguage(lang)
   }, [lang])
 
-  /**
-   * Fetches one tree node. Callers only ask for folders that are open, so the cache
-   * never grows with folders the user never looked at; a repeated request while one
-   * is in flight is dropped instead of queueing.
-   */
-  const loadTree = useCallback((path: string, force = false) => {
-    const key = pathKey(path)
-    if (!isFsPath(path) || treePending.current.has(key)) return
-    if (!force && (treeNodesRef.current[key] || treeErrorsRef.current[key])) return
-    treePending.current.add(key)
-    const generation = ++treeCounter.current
-    treeGeneration.current.set(key, generation)
-    const reply = (names: string[], truncated: boolean) => {
-      if (treeGeneration.current.get(key) !== generation) return
-      treeNodesRef.current = { ...treeNodesRef.current, [key]: names }
-      setTreeNodes(treeNodesRef.current)
-      setTreeTruncated((prev) =>
-        prev[key] === truncated ? prev : { ...prev, [key]: truncated },
-      )
-      if (treeErrorsRef.current[key]) {
-        const rest = { ...treeErrorsRef.current }
-        delete rest[key]
-        treeErrorsRef.current = rest
-        setTreeErrors(rest)
-      }
-    }
-    treeDirs(path, settingsRef.current.showHidden)
-      .then((listing) => reply(listing.names, listing.truncated))
-      .catch(() => {
-        if (treeGeneration.current.get(key) !== generation) return
-        // A failed read is not an empty folder: caching [] would hide the retry forever.
-        treeErrorsRef.current = { ...treeErrorsRef.current, [key]: true }
-        setTreeErrors(treeErrorsRef.current)
-      })
-      .finally(() => {
-        if (treeGeneration.current.get(key) === generation) treePending.current.delete(key)
-      })
-  }, [])
-
-  /** Drops one folder's children; open nodes refetch on the next pass. */
-  const invalidateTree = useCallback((path: string) => {
-    const key = pathKey(path)
-    // A reply already in flight must not repopulate the node after this invalidation.
-    treeGeneration.current.set(key, ++treeCounter.current)
-    if (!(key in treeNodesRef.current) && !treeErrorsRef.current[key]) return
-    if (key in treeNodesRef.current) {
-      const next = { ...treeNodesRef.current }
-      delete next[key]
-      treeNodesRef.current = next
-      setTreeNodes(next)
-    }
-    if (treeErrorsRef.current[key]) {
-      const rest = { ...treeErrorsRef.current }
-      delete rest[key]
-      treeErrorsRef.current = rest
-      setTreeErrors(rest)
-    }
-    setTreeTruncated((prev) => {
-      if (!(key in prev)) return prev
-      const rest = { ...prev }
-      delete rest[key]
-      return rest
-    })
-  }, [])
-
-  /**
-   * Expanding paints the cache first and refreshes behind it, so a long-unseen folder
-   * never flashes empty and never shows a folder that was deleted meanwhile.
-   */
-  const toggleTree = useCallback(
-    (path: string) => {
-      const key = pathKey(path)
-      const opening = !(key in treeOpenRef.current)
-      if (opening) treeOpenRef.current = { ...treeOpenRef.current, [key]: path }
-      setTreeOpen((prev) => {
-        if (!(key in prev)) return { ...prev, [key]: path }
-        const next = { ...prev }
-        delete next[key]
-        return next
-      })
-      if (opening) {
-        // Re-expanding a folder whose read failed is the retry gesture.
-        if (treeErrorsRef.current[key]) {
-          const rest = { ...treeErrorsRef.current }
-          delete rest[key]
-          treeErrorsRef.current = rest
-          setTreeErrors(rest)
-        }
-        loadTree(path, true)
-      }
-    },
-    [loadTree],
-  )
-
-  // Single funnel for fetches: expanding, an invalidation and the hidden-files toggle
-  // all just leave open nodes without children, and this pass fills the gaps.
-  useEffect(() => {
-    treeOpenRef.current = treeOpen
-    if (!settings.sidebarOpen) return
-    for (const [key, path] of Object.entries(treeOpen)) {
-      if (!treeNodes[key] && !treeErrors[key]) loadTree(path)
-    }
-  }, [settings.sidebarOpen, treeOpen, treeNodes, treeErrors, loadTree])
-
-  useEffect(() => {
-    // Replies requested under the previous hidden mode must not repopulate the cleared
-    // cache, so bump the generation of every folder that is cached or in flight.
-    for (const key of new Set([...Object.keys(treeNodesRef.current), ...treePending.current])) {
-      treeGeneration.current.set(key, ++treeCounter.current)
-    }
-    treeNodesRef.current = {}
-    treePending.current.clear()
-    treeErrorsRef.current = {}
-    setTreeNodes({})
-    setTreeTruncated({})
-    setTreeErrors({})
-  }, [settings.showHidden])
-
-  /** One `git status` per visited folder; failures cache as "no repository". */
-  const loadGit = useCallback((dir: string) => {
-    const key = pathKey(dir)
-    if (!dir || gitPending.current.has(key)) return
-    const seq = (gitSeq.current.get(key) ?? 0) + 1
-    gitSeq.current.set(key, seq)
-    gitPending.current.add(key)
-    const store = (status: GitStatus) =>
-      setGitByDir((prev) => {
-        if (gitSeq.current.get(key) !== seq) return prev
-        const next = { ...prev, [key]: status }
-        // Bound the cache; entries are pruned to the folder, but folders are unbounded.
-        const keys = Object.keys(next)
-        for (const stale of keys.slice(0, Math.max(0, keys.length - GIT_CACHE_LIMIT))) delete next[stale]
-        return next
-      })
-    gitStatus(dir)
-      .then(store)
-      .catch(() => store(EMPTY_GIT))
-      .finally(() => {
-        if (gitSeq.current.get(key) === seq) gitPending.current.delete(key)
-      })
-  }, [])
-
-  /** Drops cached status (and any reply still in flight) so the next pass re-runs git. */
-  const invalidateGit = useCallback((dir: string) => {
-    const key = pathKey(dir)
-    gitSeq.current.set(key, (gitSeq.current.get(key) ?? 0) + 1)
-    gitPending.current.delete(key)
-    setGitEpoch((epoch) => epoch + 1)
-    setGitByDir((prev) => {
-      if (!(key in prev)) return prev
-      const next = { ...prev }
-      delete next[key]
-      return next
-    })
-  }, [])
-
-  // Badges are cosmetic: wait out fast arrow-key scrolling so holding a key does not
-  // spawn one `git status` per folder passed through.
-  useEffect(() => {
-    if (!ws) return
-    const missing: string[] = []
-    for (const pane of Object.values(ws.panes)) {
-      const tab = ws.tabs[pane.activeTabId]
-      if (tab?.path && !(pathKey(tab.path) in gitByDir)) missing.push(tab.path)
-    }
-    if (!missing.length) return
-    const timer = window.setTimeout(() => {
-      for (const dir of missing) loadGit(dir)
-    }, 150)
-    return () => window.clearTimeout(timer)
-  }, [ws, gitByDir, gitEpoch, loadGit])
+  const {
+    treeOpen,
+    setTreeOpen,
+    treeNodes,
+    treeTruncated,
+    gitByDir,
+    gitByDirRef,
+    invalidateTree,
+    toggleTree,
+    invalidateGit,
+  } = useTreeAndGit({
+    settingsRef,
+    sidebarOpen: settings.sidebarOpen,
+    showHidden: settings.showHidden,
+    ws,
+  })
 
   const showToast = useCallback((text: string, ms = 2200) => {
     setToast(text)
@@ -572,40 +317,6 @@ export default function App() {
     [showToast],
   )
 
-  /**
-   * Taskbar progress mirrors the aggregate of running operations: one bar for the batch,
-   * error/paused when a tick failed or was canceled, cleared once nothing is running.
-   */
-  useEffect(() => {
-    const active = Object.values(ops).filter((op) => !op.done)
-    const state = !active.length
-      ? 'none'
-      : active.some((op) => op.failedCount > 0 || op.error)
-        ? 'error'
-        : active.some((op) => op.aborted)
-          ? 'paused'
-          : 'normal'
-    let done = 0
-    let total = 0
-    for (const op of active) {
-      const each = Math.max(op.total, 1)
-      done += Math.min(op.current, each)
-      total += each
-    }
-    taskbarWant.current = { state, done, total }
-    const flush = () => {
-      taskbarTimer.current = null
-      const want = taskbarWant.current
-      if (!want) return
-      taskbarSentAt.current = Date.now()
-      void taskbarProgress(want.state, want.done, want.total).catch(() => undefined)
-    }
-    // A pending trailing flush already sends the newest value when it fires.
-    if (taskbarTimer.current) return
-    const wait = 160 - (Date.now() - taskbarSentAt.current)
-    if (wait <= 0) flush()
-    else taskbarTimer.current = window.setTimeout(flush, wait)
-  }, [ops])
 
   useEffect(
     () => () => {
@@ -1923,764 +1634,86 @@ export default function App() {
     refreshPanes()
   }, [refreshPanes])
 
-  /** Clamped history depth from settings; both stacks follow it. */
-  const undoLimit = useCallback(
-    () => Math.max(1, Math.min(100, settingsRef.current.undoLimit || UNDO_LIMIT)),
-    [],
-  )
+  const {
+    ops,
+    setOps,
+    elevating,
+    runOp,
+    retryElevated,
+    extractArchive,
+    runCompress,
+    requestCompress,
+    runSyncActions,
+    undoLast,
+    redoLast,
+    undoTo,
+    undoStack,
+    redoStack,
+    historyEpoch,
+    passwordPrompt,
+    setPasswordPrompt,
+    extractTarget,
+    setExtractTarget,
+    compressTarget,
+    setCompressTarget,
+  } = useFileOperations({
+    settingsRef,
+    t,
+    showToast,
+    refreshPanes,
+    invalidateTree,
+    invalidateGit,
+  })
+
+  const {
+    rowDrag,
+    osDrag,
+    startRowDrag,
+  } = useDragAndDrop({
+    wsRef,
+    listData,
+    t,
+    showToast,
+    refreshPanes,
+    invalidateTree,
+    invalidateGit,
+    runOp,
+  })
 
   /**
-   * Records one reversible operation. A new operation invalidates the redo stack, and the
-   * depth follows `undo_limit` (1–100).
+   * Taskbar progress mirrors the aggregate of running operations: one bar for the batch,
+   * error/paused when a tick failed or was canceled, cleared once nothing is running.
    */
-  const pushUndo = useCallback(
-    (payload: UndoPayload, request: OpRequestShape, dirs: string[]) => {
-      undoCounter.current += 1
-      undoStack.current.push({
-        ...payload,
-        id: undoCounter.current,
-        at: Date.now(),
-        request,
-        dirs,
-      })
-      const limit = undoLimit()
-      while (undoStack.current.length > limit) undoStack.current.shift()
-      redoStack.current.length = 0
-      setHistoryEpoch((epoch) => epoch + 1)
-    },
-    [undoLimit],
-  )
-
-  const runOp = useCallback(
-    (
-      kind: OpKind,
-      sources: string[],
-      options?: {
-        targetDir?: string
-        newName?: string
-        newNames?: string[]
-        permanent?: boolean
-        /** Sync previews confirmed the overwrite already; skip the shell's per-file prompt. */
-        overwrite?: boolean
-        after?: () => void
-        /**
-         * `false` skips the undo stack; undo and redo move the entry themselves once the
-         * shell call succeeded, so a failed step never leaves the history.
-         */
-        record?: boolean
-        /** Folders recorded with the history entry, invalidated when it is reversed. */
-        dirsAfter?: string[]
-        onDone?: (ok: boolean) => void
-      },
-    ) => {
-      if (!sources.length) return
-      const opId = uid('op')
-      const request: OpRequestShape = {
-        kind,
-        sources,
-        targetDir: options?.targetDir,
-        newName: options?.newName,
-        newNames: options?.newNames,
-        permanent: options?.permanent,
-        overwrite: options?.overwrite,
-      }
-      opRequests.current[opId] = { opId, ...request }
-      const recordEntry = (payload: UndoPayload | null, dirs: string[]) => {
-        if (options?.record === false) return
-        if (!payload) {
-          if (kind === 'delete' && options?.permanent) lastIrreversible.current = true
-          return
-        }
-        // A reversible step supersedes the permanent one; an empty stack then means a normal
-        // "nothing to undo", not "the last thing you did cannot be undone".
-        lastIrreversible.current = false
-        pushUndo(payload, request, dirs)
-      }
-      setOps((prev) => ({
-        ...prev,
-        [opId]: {
-          opId,
-          phase: kind,
-          current: 0,
-          total: sources.length,
-          name: null,
-          work: 0,
-          workTotal: 0,
-          failedCount: 0,
-          failed: [],
-          done: false,
-          aborted: false,
-          error: null,
-        },
-      }))
-      const drop = (delay: number) =>
-        window.setTimeout(() => {
-          delete opRequests.current[opId]
-          setOps((prev) => {
-            const next = { ...prev }
-            delete next[opId]
-            return next
-          })
-        }, delay)
-      // With the window in the background the toast and the card are invisible, so the
-      // completion is pushed to a system notification (and the taskbar button flashes).
-      const remind = (text: string) => {
-        if (!settingsRef.current.notifyOps || document.hasFocus()) return
-        void notifyOp(t('notify.title'), text).catch(() => undefined)
-      }
-      const announce = (text: string) => {
-        showToast(text)
-        remind(text)
-      }
-      opStart(
-        {
-          opId,
-          kind,
-          sources,
-          targetDir: options?.targetDir,
-          newName: options?.newName,
-          newNames: options?.newNames,
-          permanent: options?.permanent,
-          overwrite: options?.overwrite,
-        },
-        (progress) => {
-          setOps((prev) => (prev[opId] ? { ...prev, [opId]: progress } : prev))
-          if (!progress.done) return
-          // A denied operation keeps its card until dismissed: the failure list is where the
-          // "retry as administrator" action lives.
-          const denied =
-            progress.error?.code === 'ACCESS_DENIED' ||
-            progress.failed.some((failure) => failure.code === 'ACCESS_DENIED')
-          if (progress.error) {
-            announce(t('op.failed', { code: progress.error.code }))
-            options?.onDone?.(false)
-            if (!denied) drop(5000)
-            return
-          }
-          // Cancellation wins over the item failures it produced: those items were not
-          // attempted, so they are not "failed" from the user's point of view.
-          if (progress.aborted) {
-            announce(t('op.canceled'))
-            options?.onDone?.(false)
-            drop(2500)
-            return
-          }
-          if (progress.failedCount > 0) {
-            const failed = progress.failedCount
-            const ok = Math.max(0, progress.total - failed)
-            announce(t('op.partial', { ok, failed }))
-            // Record the part that did land: Ctrl+Z after a partial move must undo the
-            // files that were moved, not skip back to an older unrelated step.
-            recordEntry(
-              undoEntryFor(kind, sources, {
-                ...options,
-                skip: progress.failed.map((failure) => failure.path),
-              }),
-              options?.dirsAfter ?? [],
-            )
-            // Rows that did make it are on disk; a stale list would hide them.
-            options?.after?.()
-            refreshPanes()
-            // A partly applied step stays on the history: undoing half of it must not
-            // silently drop the other half from the stack.
-            options?.onDone?.(false)
-            // Keep the card around so the failure list stays readable.
-            drop(denied ? 600_000 : 15000)
-            return
-          }
-          recordEntry(undoEntryFor(kind, sources, options), options?.dirsAfter ?? [])
-          options?.after?.()
-          refreshPanes()
-          remind(t('op.done'))
-          options?.onDone?.(true)
-          drop(800)
-        },
-      ).catch((e: unknown) => {
-        showToast(t('op.failed', { code: String(e) }))
-        options?.onDone?.(false)
-        drop(4000)
-      })
-    },
-    [pushUndo, refreshPanes, showToast, t],
-  )
-
-  /**
-   * The GUI stays non-elevated; this asks the backend to launch the same executable through
-   * UAC, waits for its report and then re-enumerates what the elevated run changed.
-   */
-  const retryElevated = useCallback(
-    (opId: string) => {
-      const request = opRequests.current[opId]
-      if (!request || elevating) return
-      setElevating(opId)
-      showToast(t('op.elevating'))
-      opRetryElevated(request)
-        .then((report) => {
-          refreshPanes()
-          if (report.error) {
-            showToast(t('op.failed', { code: report.error.code }))
-          } else if (report.aborted) {
-            showToast(t('op.canceled'))
-          } else if (report.failedTotal > 0) {
-            showToast(
-              t('op.partial', {
-                ok: Math.max(0, request.sources.length - report.failedTotal),
-                failed: report.failedTotal,
-              }),
-            )
-          } else {
-            showToast(t('op.done'))
-            delete opRequests.current[opId]
-            setOps((prev) => {
-              if (!(opId in prev)) return prev
-              const next = { ...prev }
-              delete next[opId]
-              return next
-            })
-          }
-        })
-        .catch((err: unknown) => {
-          const code = errorCode(err)
-          showToast(
-            code === 'ELEVATION_CANCELED'
-              ? t('op.elevationCanceled')
-              : t('op.failed', { code }),
-          )
-        })
-        .finally(() => setElevating(null))
-    },
-    [elevating, refreshPanes, showToast, t],
-  )
-
-  /**
-   * Extracts one archive into `dest`. It reuses the operation card for progress, and the
-   * job lives in the backend's op state, so the existing cancel button stops it.
-   */
-  const extractArchive = useCallback(
-    (archive: string, dest: string, password?: string) => {
-      const opId = `extract-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-      setOps((prev) => ({
-        ...prev,
-        [opId]: {
-          opId,
-          phase: 'extract',
-          current: 0,
-          total: 0,
-          name: null,
-          work: 0,
-          workTotal: 0,
-          failedCount: 0,
-          failed: [],
-          done: false,
-          aborted: false,
-          error: null,
-        },
-      }))
-      const drop = (delay: number) =>
-        window.setTimeout(() => {
-          setOps((prev) => {
-            const next = { ...prev }
-            delete next[opId]
-            return next
-          })
-        }, delay)
-      archiveExtract(opId, archive, dest, password ?? null, (progress) => {
-        setOps((prev) => (prev[opId] ? { ...prev, [opId]: progress } : prev))
-        if (!progress.done) return
-        if (progress.error) {
-          const code = progress.error.code
-          if (code === 'PASSWORD_REQUIRED' || code === 'WRONG_PASSWORD') {
-            setPasswordPrompt({ archive, dest, wrong: code === 'WRONG_PASSWORD' })
-            drop(3000)
-            return
-          }
-          showToast(t('op.failed', { code }))
-          drop(5000)
-          return
-        }
-        if (progress.aborted) {
-          showToast(t('op.canceled'))
-          drop(2500)
-          return
-        }
-        refreshPanes()
-        if (progress.failedCount > 0) {
-          showToast(
-            t('op.partial', {
-              ok: Math.max(0, progress.total - progress.failedCount),
-              failed: progress.failedCount,
-            }),
-            8000,
-          )
-          // The failure list is where the skipped names (unsafe, encrypted) live, so both
-          // the toast and the card stay long enough to read them.
-          drop(30000)
-          return
-        }
-        showToast(t('op.done'))
-        drop(800)
-      }).catch((e: unknown) => {
-        showToast(t('op.failed', { code: errorCode(e) }))
-        drop(4000)
-      })
-    },
-    [refreshPanes, showToast, t],
-  )
-
-  /** Starts a compression job and mirrors its progress into the ops stack. */
-  const runCompress = useCallback(
-    (paths: string[], dest: string, format: CompressFormat, level: number, password: string | null) => {
-      const opId = `compress-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-      setOps((prev) => ({
-        ...prev,
-        [opId]: {
-          opId,
-          phase: 'compress',
-          current: 0,
-          total: 0,
-          name: null,
-          work: 0,
-          workTotal: 0,
-          failedCount: 0,
-          failed: [],
-          done: false,
-          aborted: false,
-          error: null,
-        },
-      }))
-      const drop = (delay: number) =>
-        window.setTimeout(() => {
-          setOps((prev) => {
-            const next = { ...prev }
-            delete next[opId]
-            return next
-          })
-        }, delay)
-      archiveCompress(opId, paths, dest, format, level, password, (progress) => {
-        setOps((prev) => (prev[opId] ? { ...prev, [opId]: progress } : prev))
-        if (!progress.done) return
-        if (progress.error) {
-          showToast(t('op.failed', { code: progress.error.code }))
-          drop(5000)
-          return
-        }
-        if (progress.aborted) {
-          showToast(t('op.canceled'))
-          drop(2500)
-          return
-        }
-        refreshPanes()
-        showToast(t('op.done'))
-        drop(800)
-      }).catch((e: unknown) => {
-        showToast(t('op.failed', { code: errorCode(e) }))
-        drop(4000)
-      })
-    },
-    [refreshPanes, showToast, t],
-  )
-
-  /**
-   * `auto` skips the dialog: the shell menu's format leaves start immediately with the
-   * default level. The name is uniquified first so an existing archive is never replaced.
-   */
-  const requestCompress = useCallback(
-    (paths: string[], dir: string, format: CompressFormat, auto: boolean) => {
-      const base = paths.length === 1 ? baseName(paths[0]) : baseName(dir) || 'archive'
-      const extension = COMPRESS_EXTENSIONS[format]
-      void uniquePaths([joinPath(dir, `${base}${extension}`)])
-        .then(([dest]) => {
-          if (auto) runCompress(paths, dest, format, 6, null)
-          else setCompressTarget({ paths, dir, format, name: baseName(dest) })
-        })
-        .catch((e: unknown) => showToast(t('op.failed', { code: errorCode(e) })))
-    },
-    [runCompress, showToast, t],
-  )
-
-  /** Runs one reverse/replay step and resolves with the shell outcome. */
-  const runStep = useCallback(
-    (kind: OpKind, sources: string[], options: Parameters<typeof runOp>[2] = {}) =>
-      new Promise<boolean>((resolve) => {
-        runOp(kind, sources, { ...options, record: false, onDone: resolve })
-      }),
-    [runOp],
-  )
-
-  /**
-   * Runs a compare preview one shell operation at a time. Copies that share a target
-   * folder are batched so one sync does not fill the undo stack with single files.
-   */
-  const runSyncActions = useCallback(
-    (actions: SyncAction[]) =>
-      new Promise<void>((resolve) => {
-        const copies = new Map<string, string[]>()
-        const deletes: string[] = []
-        for (const action of actions) {
-          if (action.kind === 'copy') {
-            const list = copies.get(action.targetDir) ?? []
-            list.push(action.source)
-            copies.set(action.targetDir, list)
-          } else {
-            deletes.push(...action.paths)
-          }
-        }
-        const steps: (() => void)[] = []
-        for (const [targetDir, sources] of copies) {
-          steps.push(() =>
-            runOp('copy', sources, { targetDir, overwrite: true, onDone: runNext }),
-          )
-        }
-        if (deletes.length) {
-          steps.push(() => runOp('delete', deletes, { onDone: runNext }))
-        }
-        let index = 0
-        function runNext() {
-          if (index >= steps.length) {
-            resolve()
-            return
-          }
-          steps[index++]()
-        }
-        runNext()
-      }),
-    [runOp],
-  )
-
-  /**
-   * Reverses one entry. The stack is peeked, not popped: a failed undo keeps the step in
-   * place, so pressing Ctrl+Z again targets the same operation instead of losing it.
-   */
-  const applyUndo = useCallback(
-    async (entry: UndoEntry): Promise<boolean> => {
-      const afterDirs = (dirs: string[]) => () => {
-        for (const dir of new Set(dirs)) {
-          invalidateTree(dir)
-          invalidateGit(dir)
-        }
-      }
-      switch (entry.kind) {
-        case 'rename': {
-          const dirs = entry.items.map((item) => parentPath(item.path))
-          return runStep(
-            'rename',
-            entry.items.map((item) => joinPath(parentPath(item.path), item.newName)),
-            { newNames: entry.items.map((item) => item.oldName), after: afterDirs(dirs) },
-          )
-        }
-        case 'move': {
-          // A move keeps the names, so only the original folders are needed.
-          const byDir = new Map<string, string[]>()
-          for (const item of entry.items) {
-            const dir = parentPath(item.from)
-            byDir.set(dir, [...(byDir.get(dir) ?? []), item.to])
-          }
-          const results = await Promise.all(
-            [...byDir].map(([dir, paths]) =>
-              runStep('move', paths, { targetDir: dir, after: afterDirs([dir]) }),
-            ),
-          )
-          return results.every(Boolean)
-        }
-        case 'copy':
-          return runStep('delete', entry.created, {
-            after: afterDirs(entry.created.map(parentPath)),
-          })
-        case 'delete': {
-          try {
-            const report = await restoreRecycle(entry.paths)
-            if (report.missing.length) {
-              showToast(
-                t('undo.partial', { ok: report.restored.length, failed: report.missing.length }),
-              )
-            } else {
-              showToast(t('undo.done'))
-            }
-            for (const path of report.restored) invalidateTree(parentPath(path))
-            refreshPanes()
-            return report.restored.length > 0
-          } catch (e: unknown) {
-            showToast(t('op.failed', { code: errorCode(e) }))
-            return false
-          }
-        }
-      }
-    },
-    [invalidateGit, invalidateTree, refreshPanes, runStep, showToast, t],
-  )
-
-  /** Ctrl+Z: reverse the newest recorded operation, then hand it to the redo stack. */
-  const undoLast = useCallback(() => {
-    const entry = undoStack.current[undoStack.current.length - 1]
-    if (!entry) {
-      showToast(t(lastIrreversible.current ? 'undo.irreversible' : 'undo.empty'))
-      return
-    }
-    void applyUndo(entry).then((ok) => {
-      if (!ok) return
-      undoStack.current.pop()
-      redoStack.current.push(entry)
-      while (redoStack.current.length > undoLimit()) redoStack.current.shift()
-      setHistoryEpoch((epoch) => epoch + 1)
-    })
-  }, [applyUndo, showToast, t])
-
-  /** Ctrl+Y: replay the request behind the newest undone entry. */
-  const redoLast = useCallback(() => {
-    const entry = redoStack.current[redoStack.current.length - 1]
-    if (!entry) {
-      showToast(t('redo.empty'))
-      return
-    }
-    const { request } = entry
-    void runStep(request.kind, request.sources, {
-      targetDir: request.targetDir,
-      newName: request.newName,
-      newNames: request.newNames,
-      permanent: request.permanent,
-      overwrite: request.overwrite,
-      after: () => {
-        for (const dir of new Set(entry.dirs)) {
-          invalidateTree(dir)
-          invalidateGit(dir)
-        }
-      },
-    }).then((ok) => {
-      if (!ok) return
-      redoStack.current.pop()
-      undoStack.current.push(entry)
-      const limit = undoLimit()
-      while (undoStack.current.length > limit) undoStack.current.shift()
-      setHistoryEpoch((epoch) => epoch + 1)
-    })
-  }, [invalidateGit, invalidateTree, runStep, showToast, t, undoLimit])
-
-  /** History panel: undo every entry newer than `id`, including that one. */
-  const undoTo = useCallback(
-    (id: number) => {
-      const target = undoStack.current.findIndex((entry) => entry.id === id)
-      if (target < 0) return
-      const steps = undoStack.current.length - target
-      const walk = (left: number) => {
-        if (left <= 0) return
-        const entry = undoStack.current[undoStack.current.length - 1]
-        if (!entry) return
-        void applyUndo(entry).then((ok) => {
-          if (!ok) return
-          undoStack.current.pop()
-          redoStack.current.push(entry)
-          while (redoStack.current.length > undoLimit()) redoStack.current.shift()
-          setHistoryEpoch((epoch) => epoch + 1)
-          walk(left - 1)
-        })
-      }
-      walk(steps)
-    },
-    [applyUndo, undoLimit],
-  )
-
-  /** Nearest element carrying `data-drop-dir`, with the box the highlight should cover. */
-  const resolveDropTarget = useCallback((x: number, y: number): DropTarget | null => {
-    const hit = document.elementFromPoint(x, y)
-    const el = hit instanceof Element ? hit.closest<HTMLElement>('[data-drop-dir]') : null
-    const dir = el?.dataset.dropDir
-    if (!el || !dir) return null
-    const rect = el.getBoundingClientRect()
-    return { dir, left: rect.left, top: rect.top, width: rect.width, height: rect.height }
-  }, [])
-
-  /**
-   * Drops full paths into a folder with Explorer's semantics: same volume moves, cross
-   * volume copies, Ctrl forces copy and Shift forces move. Dropping into the source
-   * folder, onto the item itself, or into its own subtree is skipped rather than turned
-   * into a duplicate or a recursion.
-   */
-  const dropPaths = useCallback(
-    (sources: string[], targetDir: string, forced: 'copy' | 'move' | null) => {
-      const target = pathKey(targetDir)
-      const items = sources.filter(
-        (source) =>
-          pathKey(source) !== target &&
-          pathKey(parentPath(source)) !== target &&
-          !underPath(targetDir, source),
-      )
-      if (!items.length) return
-      const dirs = Array.from(new Set([targetDir, ...items.map(parentPath)]))
-      const after = () => {
-        for (const dir of dirs) {
-          invalidateTree(dir)
-          invalidateGit(dir)
-        }
-      }
-      if (items.some(isInsideArchive) && !isInsideArchive(targetDir)) {
-        void archiveExtractItems(items, targetDir)
-          .then((extracted) => {
-            invalidateTree(targetDir)
-            invalidateGit(targetDir)
-            refreshPanes()
-            showToast(t('toast.copied', { count: extracted.length }))
-          })
-          .catch(() => showToast(t('toast.copyFailed')))
-        return
-      }
-      if (forced === 'copy') {
-        runOp('copy', items, { targetDir, after })
-        return
-      }
-      if (forced === 'move') {
-        runOp('move', items, { targetDir, after })
-        return
-      }
-      const moving = items.filter((source) => sameVolume(source, targetDir))
-      const copying = items.filter((source) => !sameVolume(source, targetDir))
-      // Mixed selections can need both modes at once, exactly like Explorer.
-      if (copying.length) runOp('copy', copying, { targetDir, after })
-      if (moving.length) runOp('move', moving, { targetDir, after })
-    },
-    [invalidateGit, invalidateTree, runOp],
-  )
-
-  /**
-   * Pointer-based in-app drag. HTML5 `dragstart` is avoided on purpose: WebView2 and the
-   * tab-drag gesture both live in the same pointer space, and pointer events keep the
-   * drop target resolution under our control.
-   */
-  const startRowDrag = useCallback(
-    (paneId: string, entry: Entry, ev: React.PointerEvent) => {
-      if (ev.button !== 0) return
-      const current = wsRef.current
-      const pane = current?.panes[paneId]
-      const tab = pane && current ? current.tabs[pane.activeTabId] : undefined
-      if (!current || !pane || !tab?.path) return
-      const data = listData[tab.id]
-      const names = data?.selected.has(entry.name)
-        ? Array.from(data.selected)
-        : [entry.name]
-      const sourceDir = tab.path
-      const startX = ev.clientX
-      const startY = ev.clientY
-      let started = false
-      let userSelect = ''
-
-      const move = (e: PointerEvent) => {
-        if (!started) {
-          if (Math.hypot(e.clientX - startX, e.clientY - startY) < 4) return
-          started = true
-          userSelect = document.body.style.userSelect
-          document.body.style.userSelect = 'none'
-        }
-        // Leaving the window means the drop target is Explorer, the desktop or another
-        // app: hand the gesture to OLE before the button is released.
-        if (
-          e.clientX < 0 ||
-          e.clientY < 0 ||
-          e.clientX >= window.innerWidth ||
-          e.clientY >= window.innerHeight
-        ) {
-          detach()
-          setRowDrag(null)
-          const rawPaths = names.map((name) => joinPath(sourceDir, name))
-          void archivePrepareDrag(rawPaths)
-            .then((paths) => dragOut(paths))
-            .then((effect) => {
-              if (effect !== 'move') return
-              // The target app moved the files; the source listing is stale now.
-              invalidateTree(sourceDir)
-              invalidateGit(sourceDir)
-              refreshPanes()
-            })
-            .catch(() => showToast(t('drag.outFailed')))
-          return
-        }
-        setRowDrag({
-          names,
-          sourceDir,
-          x: e.clientX,
-          y: e.clientY,
-          started: true,
-          target: resolveDropTarget(e.clientX, e.clientY),
-          copy: e.ctrlKey || e.metaKey,
-          move: e.shiftKey && !(e.ctrlKey || e.metaKey),
-        })
-      }
-      const detach = () => {
-        window.removeEventListener('pointermove', move)
-        window.removeEventListener('pointerup', up)
-        window.removeEventListener('pointercancel', cancel)
-        window.removeEventListener('keydown', onKey)
-        if (started) document.body.style.userSelect = userSelect
-      }
-      const finish = (e: PointerEvent | null) => {
-        detach()
-        setRowDrag(null)
-        if (!e) return
-        const target = resolveDropTarget(e.clientX, e.clientY)
-        if (!target) return
-        const forced = e.ctrlKey || e.metaKey ? 'copy' : e.shiftKey ? 'move' : null
-        dropPaths(
-          names.map((name) => joinPath(sourceDir, name)),
-          target.dir,
-          forced,
-        )
-      }
-      const up = (e: PointerEvent) => finish(e)
-      const cancel = () => finish(null)
-      const onKey = (e: KeyboardEvent) => {
-        if (e.key === 'Escape') finish(null)
-      }
-      window.addEventListener('pointermove', move)
-      window.addEventListener('pointerup', up)
-      window.addEventListener('pointercancel', cancel)
-      window.addEventListener('keydown', onKey)
-    },
-    [dropPaths, invalidateGit, invalidateTree, listData, refreshPanes, resolveDropTarget, showToast, t],
-  )
-
-  // Files dragged in from Explorer or the desktop. Tauri reports physical pixels, while
-  // the hit test works in CSS pixels, so the position is scaled before resolving a target.
   useEffect(() => {
-    const mods = { ctrl: false, shift: false }
-    const onModifier = (e: KeyboardEvent) => {
-      mods.ctrl = e.ctrlKey
-      mods.shift = e.shiftKey
+    const active = Object.values(ops).filter((op) => !op.done)
+    const state = !active.length
+      ? 'none'
+      : active.some((op) => op.failedCount > 0 || op.error)
+        ? 'error'
+        : active.some((op) => op.aborted)
+          ? 'paused'
+          : 'normal'
+    let done = 0
+    let total = 0
+    for (const op of active) {
+      const each = Math.max(op.total, 1)
+      done += Math.min(op.current, each)
+      total += each
     }
-    let paths: string[] = []
-    let disposed = false
-    let unlisten: (() => void) | undefined
-    void getCurrentWebview()
-      .onDragDropEvent((event) => {
-        const payload = event.payload
-        if (payload.type === 'leave') {
-          paths = []
-          setOsDrag(null)
-          return
-        }
-        const dpr = window.devicePixelRatio || 1
-        const target = resolveDropTarget(payload.position.x / dpr, payload.position.y / dpr)
-        if (payload.type === 'enter') paths = payload.paths
-        if (payload.type === 'drop') {
-          const dropped = payload.paths.filter((path) => isFsPath(path))
-          setOsDrag(null)
-          if (!target || !dropped.length) return
-          const forced = mods.ctrl ? 'copy' : mods.shift ? 'move' : null
-          dropPaths(dropped, target.dir, forced)
-          return
-        }
-        setOsDrag({ paths, target })
-      })
-      .then((fn) => {
-        if (disposed) fn()
-        else unlisten = fn
-      })
-    window.addEventListener('keydown', onModifier)
-    window.addEventListener('keyup', onModifier)
-    return () => {
-      disposed = true
-      unlisten?.()
-      window.removeEventListener('keydown', onModifier)
-      window.removeEventListener('keyup', onModifier)
+    taskbarWant.current = { state, done, total }
+    const flush = () => {
+      taskbarTimer.current = null
+      const want = taskbarWant.current
+      if (!want) return
+      taskbarSentAt.current = Date.now()
+      void taskbarProgress(want.state, want.done, want.total).catch(() => undefined)
     }
-  }, [dropPaths, resolveDropTarget])
+    // A pending trailing flush already sends the newest value when it fires.
+    if (taskbarTimer.current) return
+    const wait = 160 - (Date.now() - taskbarSentAt.current)
+    if (wait <= 0) flush()
+    else taskbarTimer.current = window.setTimeout(flush, wait)
+  }, [ops])
 
   const pathsFor = useCallback((paneId: string, names: string[]): string[] => {
     const current = wsRef.current
@@ -4315,7 +3348,6 @@ export default function App() {
         onRetryElevated={retryElevated}
         onCancel={(opId) => void opCancel(opId)}
         onDismiss={(opId) => {
-          delete opRequests.current[opId]
           setOps((prev) => {
             if (!(opId in prev)) return prev
             const next = { ...prev }
@@ -4325,210 +3357,54 @@ export default function App() {
         }}
       />
 
-      {historyOpen && (
-        <HistoryPanel
-          key={historyEpoch}
-          lang={lang}
-          undo={undoStack.current}
-          redo={redoStack.current}
-          onUndoTo={undoTo}
-          onRedo={redoLast}
-          onClose={() => setHistoryOpen(false)}
-        />
-      )}
-
-      {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
-
-      {passwordPrompt && (
-        <PromptDialog
-          title={t('archive.passwordTitle')}
-          initial=""
-          password
-          hint={
-            passwordPrompt.wrong
-              ? t('archive.passwordWrong')
-              : t('archive.passwordHint', { name: baseName(passwordPrompt.archive) })
-          }
-          lang={lang}
-          onConfirm={(value) => {
-            const pending = passwordPrompt
-            setPasswordPrompt(null)
-            extractArchive(pending.archive, pending.dest, value)
-          }}
-          onClose={() => setPasswordPrompt(null)}
-        />
-      )}
-
-      {extractTarget && (
-        <FolderPickerDialog
-          title={t('menu.extractTo')}
-          initial={extractTarget.initial}
-          lang={lang}
-          onPick={(target) => {
-            const pending = extractTarget
-            setExtractTarget(null)
-            extractArchive(pending.archive, target)
-          }}
-          onClose={() => setExtractTarget(null)}
-        />
-      )}
-
-      {prompt && (
-        <PromptDialog
-          title={prompt.title}
-          initial={prompt.initial}
-          lang={lang}
-          onConfirm={(value) => {
-            const pending = prompt
-            prompt.submit(value)
-            setPrompt(null)
-            // Hand the keyboard back to the list, so Delete/F2 keep working.
-            focusList(pending.paneId)
-          }}
-          onClose={() => {
-            const pending = prompt
-            setPrompt(null)
-            if (pending) focusList(pending.paneId)
-          }}
-        />
-      )}
-
-      {compressTarget && (
-        <CompressDialog
-          title={t('compress.title')}
-          dir={compressTarget.dir}
-          name={compressTarget.name}
-          format={compressTarget.format}
-          lang={lang}
-          onClose={() => setCompressTarget(null)}
-          onSubmit={(values: CompressValues) => {
-            const pending = compressTarget
-            setCompressTarget(null)
-            // The dialog keeps the extension in sync with the format, but a hand-edited
-            // name may drop it; the archive must not be written without one.
-            const extension = COMPRESS_EXTENSIONS[values.format]
-            const name = values.name.toLowerCase().endsWith(extension)
-              ? values.name
-              : `${values.name}${extension}`
-            void uniquePaths([joinPath(pending.dir, name)])
-              .then(([dest]) =>
-                runCompress(pending.paths, dest, values.format, values.level, values.password),
-              )
-              .catch((e: unknown) => showToast(t('op.failed', { code: errorCode(e) })))
-          }}
-        />
-      )}
-
-      {batchRename && (
-        <BatchRenameDialog
-          dir={batchRename.dir}
-          names={batchRename.names}
-          lang={lang}
-          onClose={() => {
-            const pending = batchRename
-            setBatchRename(null)
-            focusList(pending.paneId)
-          }}
-          onConfirm={(pairs) => {
-            const dir = batchRename.dir
-            const paneId = batchRename.paneId
-            runOp(
-              'rename',
-              pairs.map((pair) => joinPath(dir, pair.from)),
-              { newNames: pairs.map((pair) => pair.to) },
-            )
-            setBatchRename(null)
-            focusList(paneId)
-          }}
-        />
-      )}
-
-      {fileTools && (
-        <FileToolsPanel
-          lang={lang}
-          mode={fileTools.mode}
-          paths={fileTools.mode === 'hash' ? fileTools.paths : []}
-          root={fileTools.mode === 'dup' ? fileTools.root : ''}
-          includeHidden={activePane?.hidden ?? settings.showHidden}
-          dupConcurrency={settings.dupConcurrency}
-          dupMaxMbPerSec={settings.dupMaxMbPerSec}
-          dupExclude={settings.dupExclude}
-          onDelete={(paths) => runOp('delete', paths)}
-          onToast={showToast}
-          onClose={() => setFileTools(null)}
-        />
-      )}
-
-      {compareOpen && (
-        <ComparePanel
-          lang={lang}
-          initialLeft={comparePaths[0] ?? ''}
-          initialRight={comparePaths[1] ?? ''}
-          openFolders={openFolders}
-          includeHidden={activePane?.hidden ?? settings.showHidden}
-          fontSize={settings.fontSize}
-          iconSize={settings.iconSize}
-          hashRateBytes={settings.dupMaxMbPerSec * 1024 * 1024}
-          onClose={() => setCompareOpen(false)}
-          onToast={showToast}
-          onSync={runSyncActions}
-        />
-      )}
-
-      {deleteConfirm && (
-        <ConfirmDialog
-          lang={lang}
-          title={t(deleteConfirm.permanent ? 'confirm.deleteTitle' : 'confirm.recycleTitle')}
-          message={t(
-            deleteConfirm.permanent ? 'confirm.deletePermanent' : 'confirm.recycle',
-            { count: deleteConfirm.names.length },
-          )}
-          detail={confirmDetail}
-          confirmLabel={t(
-            deleteConfirm.permanent ? 'confirm.deletePermanentAction' : 'confirm.recycleAction',
-          )}
-          danger
-          onConfirm={() => {
-            const pending = deleteConfirm
-            setDeleteConfirm(null)
-            focusList(pending.paneId)
-            runOp('delete', pathsFor(pending.paneId, pending.names), { permanent: pending.permanent })
-          }}
-          onClose={() => {
-            const pending = deleteConfirm
-            setDeleteConfirm(null)
-            if (pending) focusList(pending.paneId)
-          }}
-        />
-      )}
-
-      {quitBusy !== null && (
-        <ConfirmDialog
-          lang={lang}
-          title={t('confirm.quitTitle')}
-          message={t('confirm.quitBusy', { count: quitBusy })}
-          confirmLabel={t('confirm.quitAnyway')}
-          danger
-          onConfirm={() => {
-            setQuitBusy(null)
-            void quitApp()
-          }}
-          onClose={() => setQuitBusy(null)}
-        />
-      )}
-
-      {settingsOpen && (
-        <SettingsModal
-          settings={settings}
-          lang={lang}
-          onChange={updateSettings}
-          onOpenLocation={openInApp}
-          onClose={() => {
-            setSettingsOpen(false)
-            if (activePane) focusList(activePane.id)
-          }}
-        />
-      )}
+      <ModalContainer
+        lang={lang}
+        t={t}
+        settings={settings}
+        updateSettings={updateSettings}
+        activePane={activePane}
+        focusList={focusList}
+        showToast={showToast}
+        runOp={runOp}
+        extractArchive={extractArchive}
+        runCompress={runCompress}
+        runSyncActions={runSyncActions}
+        openInApp={openInApp}
+        pathsFor={pathsFor}
+        openFolders={openFolders}
+        comparePaths={comparePaths}
+        historyOpen={historyOpen}
+        setHistoryOpen={setHistoryOpen}
+        historyEpoch={historyEpoch}
+        undoStack={undoStack}
+        redoStack={redoStack}
+        undoTo={undoTo}
+        redoLast={redoLast}
+        menu={menu}
+        setMenu={setMenu}
+        passwordPrompt={passwordPrompt}
+        setPasswordPrompt={setPasswordPrompt}
+        extractTarget={extractTarget}
+        setExtractTarget={setExtractTarget}
+        prompt={prompt}
+        setPrompt={setPrompt}
+        compressTarget={compressTarget}
+        setCompressTarget={setCompressTarget}
+        batchRename={batchRename}
+        setBatchRename={setBatchRename}
+        fileTools={fileTools}
+        setFileTools={setFileTools}
+        compareOpen={compareOpen}
+        setCompareOpen={setCompareOpen}
+        deleteConfirm={deleteConfirm}
+        setDeleteConfirm={setDeleteConfirm}
+        confirmDetail={confirmDetail}
+        quitBusy={quitBusy}
+        setQuitBusy={setQuitBusy}
+        quitApp={quitApp}
+        settingsOpen={settingsOpen}
+        setSettingsOpen={setSettingsOpen}
+      />
     </div>
   )
 }
