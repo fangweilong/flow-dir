@@ -322,9 +322,7 @@ unsafe extern "system" fn owner_proc(
     ) {
         let handled = CONTEXT.with(|cell| {
             let borrow = cell.borrow();
-            let Some((menu2, menu3)) = borrow.as_ref() else {
-                return None;
-            };
+            let (menu2, menu3) = borrow.as_ref()?;
             unsafe {
                 if let Some(menu3) = menu3 {
                     let mut result = LRESULT(0);
@@ -670,14 +668,16 @@ unsafe fn track(
             outcome.action = Some(extra.action.into());
         } else if (ID_CMD_FIRST..=ID_CMD_LAST).contains(&command) {
             let offset = command - ID_CMD_FIRST;
-            let mut info = CMINVOKECOMMANDINFOEX::default();
-            info.cbSize = std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32;
-            info.fMask = CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE;
-            info.hwnd = hwnd;
-            info.lpVerb = PCSTR(offset as usize as *const u8);
-            info.lpVerbW = PCWSTR(offset as usize as *const u16);
-            info.nShow = windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL.0;
-            info.ptInvoke = windows::Win32::Foundation::POINT { x, y };
+            let info = CMINVOKECOMMANDINFOEX {
+                cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
+                fMask: CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE,
+                hwnd,
+                lpVerb: PCSTR(offset as usize as *const u8),
+                lpVerbW: PCWSTR(offset as usize as *const u16),
+                nShow: windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL.0,
+                ptInvoke: windows::Win32::Foundation::POINT { x, y },
+                ..Default::default()
+            };
             let invoked = context.InvokeCommand(&info as *const _ as *const CMINVOKECOMMANDINFO);
             if let Err(err) = invoked {
                 CONTEXT.with(|cell| *cell.borrow_mut() = None);

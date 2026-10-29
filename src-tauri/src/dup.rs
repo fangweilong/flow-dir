@@ -428,7 +428,7 @@ pub fn start(
 
                 let sample_bytes: u64 = candidates
                     .iter()
-                    .map(|c| (c.size.min(SAMPLE * 2)).max(1))
+                    .map(|c| c.size.clamp(1, SAMPLE * 2))
                     .sum();
                 let quick: Vec<Option<String>> = parallel_map(
                         &candidates,

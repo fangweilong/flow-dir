@@ -86,9 +86,11 @@ struct RootData {
     tracked: Arc<Vec<String>>,
 }
 
+type ChildCacheEntry = (Instant, Vec<GitRepo>);
+
 static ROOT_CACHE: LazyLock<Mutex<HashMap<String, RootData>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-static CHILD_CACHE: LazyLock<Mutex<HashMap<String, (Instant, Vec<GitRepo>)>>> =
+static CHILD_CACHE: LazyLock<Mutex<HashMap<String, ChildCacheEntry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Drops cached status for a repository root, called when the watcher reports a change

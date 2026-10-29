@@ -116,14 +116,16 @@ fn bitmap_to_png(bitmap: HBITMAP) -> Result<Vec<u8>, windows::core::Error> {
         let stride = (width * 4) as u32;
         let mut pixels = vec![0u8; (stride * height as u32) as usize];
 
-        let mut dib = BITMAPINFO::default();
-        dib.bmiHeader = BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: width,
-            biHeight: -height,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB.0,
+        let mut dib = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                biHeight: -height,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let dc = GetDC(None);
@@ -150,7 +152,7 @@ fn encode_png(width: u32, height: u32, bgra: &[u8]) -> Result<Vec<u8>, windows::
             CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
         let mut buffer = vec![0u8; PNG_BUFFER];
         let stream: IWICStream = factory.CreateStream()?;
-        stream.InitializeFromMemory(&mut buffer)?;
+        stream.InitializeFromMemory(&buffer)?;
 
         let encoder: IWICBitmapEncoder =
             factory.CreateEncoder(&GUID_ContainerFormatPng, std::ptr::null())?;

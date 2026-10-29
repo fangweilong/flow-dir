@@ -318,7 +318,7 @@ pub fn start_hash(
                 results.push(HashResult {
                     path: path.clone(),
                     algorithm: algorithm.clone(),
-                    hash: outcome.as_ref().map(|h| h.clone()).unwrap_or_default(),
+                    hash: outcome.as_deref().unwrap_or_default().to_string(),
                     size: sizes[index],
                     error: outcome.err().map(|e| e.detail),
                 });

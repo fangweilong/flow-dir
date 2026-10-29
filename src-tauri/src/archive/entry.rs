@@ -114,7 +114,7 @@ fn language_codepage() -> u32 {
     static PAGE: OnceLock<u32> = OnceLock::new();
     *PAGE.get_or_init(|| {
         let language = unsafe { GetUserDefaultUILanguage() };
-        let page = match (language & 0x03ff, language >> 10) {
+        match (language & 0x03ff, language >> 10) {
             // Traditional Chinese locales (TW/HK/MO) use 950, the rest of zh uses 936.
             (0x04, 1) => 950,
             (0x04, _) => 936,
@@ -128,8 +128,7 @@ fn language_codepage() -> u32 {
                     ansi
                 }
             }
-        };
-        page
+        }
     })
 }
 

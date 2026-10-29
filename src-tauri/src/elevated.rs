@@ -125,13 +125,12 @@ pub fn request_elevated(
     let exe = std::env::current_exe()
         .map_err(|err| ApiError::new("ELEVATED", format!("current exe: {err}")))?;
     let params = params_for(&pipe_name, &nonce);
-    let report = std::thread::Builder::new()
+    std::thread::Builder::new()
         .name("flowdir-elevate".into())
         .spawn(move || run_worker(&exe, &params, &pipe_name, &nonce, request, cancel))
         .map_err(|err| ApiError::new("ELEVATED", err.to_string()))?
         .join()
-        .map_err(|_| ApiError::new("ELEVATED", "elevation thread panicked"))?;
-    report
+        .map_err(|_| ApiError::new("ELEVATED", "elevation thread panicked"))?
 }
 
 fn random_hex() -> String {

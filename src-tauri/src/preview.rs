@@ -636,13 +636,14 @@ fn decode_text(bytes: &[u8]) -> String {
 }
 
 fn decode_utf16(bytes: &[u8], little_endian: bool) -> String {
-    let units: Vec<u16> = bytes
-        .chunks_exact(2)
+    let (chunks, _) = bytes.as_chunks::<2>();
+    let units: Vec<u16> = chunks
+        .iter()
         .map(|pair| {
             if little_endian {
-                u16::from_le_bytes([pair[0], pair[1]])
+                u16::from_le_bytes(*pair)
             } else {
-                u16::from_be_bytes([pair[0], pair[1]])
+                u16::from_be_bytes(*pair)
             }
         })
         .collect();
@@ -926,7 +927,7 @@ fn bgra_to_bmp(width: u32, height: u32, pixels: &[u8], stride: u32, bg: Option<u
         None => (0, 0, 0),
     };
     let mut bmp = Vec::with_capacity(54 + pixels.len());
-    let file_size = 54 + (stride * height) as u32;
+    let file_size = 54 + (stride * height);
     bmp.extend_from_slice(b"BM");
     bmp.extend_from_slice(&file_size.to_le_bytes());
     bmp.extend_from_slice(&[0, 0, 0, 0]);
@@ -942,7 +943,8 @@ fn bgra_to_bmp(width: u32, height: u32, pixels: &[u8], stride: u32, bg: Option<u
 
     for row in (0..height).rev() {
         let start = (row * stride) as usize;
-        for px in pixels[start..start + stride as usize].chunks_exact(4) {
+        let (chunks, _) = pixels[start..start + stride as usize].as_chunks::<4>();
+        for px in chunks {
             if bg.is_some() {
                 let alpha = px[3] as u32;
                 let blend = |channel: u8, base: u8| -> u8 {

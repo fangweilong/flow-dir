@@ -864,7 +864,7 @@ pub fn load<R: Runtime>(app: &AppHandle<R>) -> Settings {
     // `settings.toml` → `settings.bak.toml` → defaults. A parse failure never writes:
     // overwriting a hand-edited file with the template loses the user's settings for good.
     match parse_file(&path) {
-        Parse::Ok(settings) => return settings,
+        Parse::Ok(settings) => return *settings,
         Parse::Invalid => {
             CONFIG_REJECTED.store(true, Ordering::Relaxed);
             let _ = std::fs::copy(&path, dir.join("settings.rejected.toml"));
@@ -872,7 +872,7 @@ pub fn load<R: Runtime>(app: &AppHandle<R>) -> Settings {
         Parse::Missing => {}
     }
     if let Parse::Ok(settings) = parse_file(&dir.join("settings.bak.toml")) {
-        return settings;
+        return *settings;
     }
     // One-time conversion from the JSON file used before TOML support.
     let legacy = dir.join("settings.json");
@@ -894,7 +894,7 @@ pub fn load<R: Runtime>(app: &AppHandle<R>) -> Settings {
 }
 
 enum Parse {
-    Ok(Settings),
+    Ok(Box<Settings>),
     Invalid,
     Missing,
 }
@@ -902,7 +902,7 @@ enum Parse {
 fn parse_file(path: &std::path::Path) -> Parse {
     match std::fs::read_to_string(path) {
         Ok(text) => match toml_edit::de::from_str::<FileSettings>(&text) {
-            Ok(file) => Parse::Ok(Settings::from(file).normalize()),
+            Ok(file) => Parse::Ok(Box::new(Settings::from(file).normalize())),
             Err(_) => Parse::Invalid,
         },
         Err(_) => Parse::Missing,

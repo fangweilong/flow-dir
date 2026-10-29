@@ -470,7 +470,7 @@ fn item_path(item: &IShellItem) -> Option<String> {
 
 /// Last path segment, used as the progress caption when the shell passes no name.
 fn file_name(path: &str) -> Option<String> {
-    path.rsplit(|c| c == '\\' || c == '/')
+    path.rsplit(['\\', '/'])
         .find(|part| !part.is_empty())
         .map(str::to_string)
 }
