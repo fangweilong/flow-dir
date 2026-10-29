@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { MutableRefObject } from 'react'
 import type { OpKind, OpProgress } from '../types'
 import type { Settings } from '../persist'
@@ -11,6 +11,7 @@ import {
   opRetryElevated,
   opStart,
   restoreRecycle,
+  taskbarProgress,
   uniquePaths,
   COMPRESS_EXTENSIONS,
   type CompressFormat,
@@ -80,7 +81,9 @@ export function useFileOperations({
   const undoCounter = useRef(0)
   const lastIrreversible = useRef(false)
   const opRequests = useRef<Record<string, OpRequestShape & { opId: string }>>({})
-
+  const taskbarWant = useRef<{ state: string; done: number; total: number } | null>(null)
+  const taskbarTimer = useRef<number | null>(null)
+  const taskbarSentAt = useRef(0)
   const undoLimit = useCallback(
     () => settingsRef.current.undoLimit ?? UNDO_LIMIT,
     [settingsRef],
@@ -563,6 +566,36 @@ export function useFileOperations({
     },
     [applyUndo, undoLimit],
   )
+
+  useEffect(() => {
+    const active = Object.values(ops).filter((op) => !op.done)
+    const state = !active.length
+      ? 'none'
+      : active.some((op) => op.failedCount > 0 || op.error)
+        ? 'error'
+        : active.some((op) => op.aborted)
+          ? 'paused'
+          : 'normal'
+    let done = 0
+    let total = 0
+    for (const op of active) {
+      const each = Math.max(op.total, 1)
+      done += Math.min(op.current, each)
+      total += each
+    }
+    taskbarWant.current = { state, done, total }
+    const flush = () => {
+      taskbarTimer.current = null
+      const want = taskbarWant.current
+      if (!want) return
+      taskbarSentAt.current = Date.now()
+      void taskbarProgress(want.state, want.done, want.total).catch(() => undefined)
+    }
+    if (taskbarTimer.current) return
+    const wait = 160 - (Date.now() - taskbarSentAt.current)
+    if (wait <= 0) flush()
+    else taskbarTimer.current = window.setTimeout(flush, wait)
+  }, [ops])
 
   return {
     ops,
