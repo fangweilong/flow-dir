@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { dupStart, exportText, hashStart, pickFolder, toolCancel, toolPause } from './api'
-import { makeT } from './i18n'
+import { makeT, type Translate } from './i18n'
 import type { DupGroup, DupProgress, HashProgress } from './types'
 import type { Lang } from './types'
 
@@ -61,6 +61,7 @@ export function FileToolsPanel({
   const t = useMemo(() => makeT(lang), [lang])
   const jobId = useRef(`tool-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`)
   const [algorithm, setAlgorithm] = useState('sha256')
+  const [compareHash, setCompareHash] = useState('')
   const [minSizeKb, setMinSizeKb] = useState(1)
   const [hidden, setHidden] = useState(includeHidden)
   const [hashProgress, setHashProgress] = useState<HashProgress | null>(null)
@@ -291,19 +292,50 @@ export function FileToolsPanel({
 
         <div className="shrink-0 space-y-2 border-b border-line px-3 py-2">
           {hash ? (
-            <div className="flex items-center gap-2 text-[0.6875rem] text-muted">
-              <span>{t('tools.algorithm')}</span>
-              <select
-                value={algorithm}
-                onChange={(ev) => setAlgorithm(ev.target.value)}
-                className="h-6 rounded border border-line bg-surface-2 px-1 text-fg outline-none"
-              >
-                <option value="sha256">SHA-256</option>
-                <option value="sha1">SHA-1</option>
-                <option value="md5">MD5</option>
-              </select>
-              <span className="ml-auto text-muted-2">{t('tools.elapsed', { time: formatDuration(Date.now() - started.current) })}</span>
-            </div>
+            <>
+              <div className="flex items-center gap-2 text-[0.6875rem] text-muted">
+                <span>{t('tools.algorithm')}</span>
+                <select
+                  value={algorithm}
+                  onChange={(ev) => setAlgorithm(ev.target.value)}
+                  className="h-6 rounded border border-line bg-surface-2 px-1 text-fg outline-none"
+                >
+                  <option value="sha256">SHA-256</option>
+                  <option value="sha1">SHA-1</option>
+                  <option value="md5">MD5</option>
+                </select>
+                <span className="ml-auto text-muted-2">{t('tools.elapsed', { time: formatDuration(Date.now() - started.current) })}</span>
+              </div>
+              <div className="flex items-center gap-2 text-[0.6875rem]">
+                <span className="shrink-0 text-muted">{t('tools.compareHash')}</span>
+                <input
+                  value={compareHash}
+                  onChange={(ev) => setCompareHash(ev.target.value)}
+                  placeholder={t('tools.comparePh')}
+                  className="h-6 min-w-0 flex-1 rounded border border-line bg-surface-2 px-1.5 font-mono text-[0.6875rem] text-fg outline-none focus:border-blue-400"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    void navigator.clipboard?.readText?.().then((text) => {
+                      if (text) setCompareHash(text.trim())
+                    })
+                  }}
+                  className="shrink-0 rounded border border-line px-2 py-0.5 text-[0.6875rem] text-muted hover:bg-surface-3 hover:text-fg"
+                >
+                  {t('tools.pasteClipboard')}
+                </button>
+                {compareHash.trim() && (
+                  <button
+                    type="button"
+                    onClick={() => setCompareHash('')}
+                    className="shrink-0 rounded px-1.5 py-0.5 text-[0.6875rem] text-muted-2 hover:bg-surface-3 hover:text-fg"
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
+            </>
           ) : (
             <div className="flex items-center gap-3 text-[0.6875rem] text-muted">
               <label className="flex items-center gap-1">
@@ -369,7 +401,14 @@ export function FileToolsPanel({
 
         <div className="min-h-0 flex-1 overflow-auto px-3 py-2">
           {hash ? (
-            <HashTable progress={hashProgress} t={t} />
+            <HashTable
+              progress={hashProgress}
+              compareHash={compareHash}
+              onCopyHash={(h) => {
+                void navigator.clipboard?.writeText(h).then(() => onToast(t('tools.copyDone')))
+              }}
+              t={t}
+            />
           ) : (
             <DupTable
               progress={dupProgress}
@@ -422,8 +461,19 @@ export function FileToolsPanel({
   )
 }
 
-function HashTable({ progress, t }: { progress: HashProgress | null; t: (key: any, vars?: Record<string, string | number>) => string }) {
+function HashTable({
+  progress,
+  compareHash,
+  onCopyHash,
+  t,
+}: {
+  progress: HashProgress | null
+  compareHash: string
+  onCopyHash: (hash: string) => void
+  t: Translate
+}) {
   const rows = progress?.results ?? []
+  const target = compareHash.trim().toLowerCase()
   if (!rows.length) return <div className="py-6 text-center text-[0.6875rem] text-muted-2">{progress?.done ? t('tools.noResults') : '…'}</div>
   return (
     <table className="w-full text-left text-[0.65625rem]">
@@ -435,17 +485,50 @@ function HashTable({ progress, t }: { progress: HashProgress | null; t: (key: an
         </tr>
       </thead>
       <tbody>
-        {rows.map((row) => (
-          <tr key={row.path} className="border-t border-line/60">
-            <td className="max-w-[18rem] truncate py-0.5 pr-2 font-mono text-fg" title={row.hash}>
-              {row.error ? <span className="text-red-500">{t('tools.hashError')}</span> : row.hash}
-            </td>
-            <td className="whitespace-nowrap py-0.5 pr-2 tabular text-muted">{formatBytes(row.size)}</td>
-            <td className="truncate py-0.5 text-fg" title={row.path}>
-              {row.path}
-            </td>
-          </tr>
-        ))}
+        {rows.map((row) => {
+          const isMatch = Boolean(target && row.hash && row.hash.toLowerCase() === target)
+          const isMismatch = Boolean(target && row.hash && !row.error && row.hash.toLowerCase() !== target)
+          return (
+            <tr
+              key={row.path}
+              className={`group border-t border-line/60 transition-colors ${
+                isMatch ? 'bg-emerald-500/10' : isMismatch ? 'opacity-80' : ''
+              }`}
+            >
+              <td className="max-w-[18rem] truncate py-1 pr-2 font-mono text-fg" title={row.hash}>
+                <div className="flex items-center gap-1.5">
+                  <span className={isMatch ? 'font-semibold text-emerald-600 dark:text-emerald-400' : ''}>
+                    {row.error ? <span className="text-red-500">{t('tools.hashError')}</span> : row.hash}
+                  </span>
+                  {isMatch && (
+                    <span className="shrink-0 rounded bg-emerald-500/20 px-1 py-0.2 text-[0.625rem] font-semibold text-emerald-600 dark:text-emerald-400">
+                      {t('tools.hashMatched')}
+                    </span>
+                  )}
+                  {isMismatch && (
+                    <span className="shrink-0 rounded bg-red-500/10 px-1 py-0.2 text-[0.625rem] text-red-400">
+                      {t('tools.hashMismatch')}
+                    </span>
+                  )}
+                  {row.hash && (
+                    <button
+                      type="button"
+                      onClick={() => onCopyHash(row.hash)}
+                      title={t('tools.copy')}
+                      className="shrink-0 rounded px-1 opacity-0 hover:text-blue-500 group-hover:opacity-100"
+                    >
+                      📋
+                    </button>
+                  )}
+                </div>
+              </td>
+              <td className="whitespace-nowrap py-1 pr-2 tabular text-muted">{formatBytes(row.size)}</td>
+              <td className="truncate py-1 text-fg" title={row.path}>
+                {row.path}
+              </td>
+            </tr>
+          )
+        })}
       </tbody>
     </table>
   )
@@ -460,7 +543,7 @@ function DupTable({
   progress: DupProgress | null
   selected: Set<string>
   onToggle: (path: string) => void
-  t: (key: any, vars?: Record<string, string | number>) => string
+  t: Translate
 }) {
   const groups = progress?.groups ?? []
   if (!groups.length)

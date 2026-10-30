@@ -1318,6 +1318,38 @@ fn explorer_open(path: String) -> Result<(), ApiError> {
         .map(|_| ())
         .map_err(|e| ApiError::from_io(&path, &e))
 }
+#[tauri::command]
+fn open_terminal(path: String) -> Result<(), ApiError> {
+    if !std::path::Path::new(&path).is_dir() {
+        return Err(ApiError::new("NOT_DIR", path));
+    }
+
+    if std::process::Command::new("wt")
+        .args(["-d", &path])
+        .spawn()
+        .is_ok()
+    {
+        return Ok(());
+    }
+
+    let escaped = path.replace('\'', "''");
+    if std::process::Command::new("powershell")
+        .args(["-NoExit", "-Command", &format!("Set-Location -LiteralPath '{escaped}'")])
+        .current_dir(&path)
+        .spawn()
+        .is_ok()
+    {
+        return Ok(());
+    }
+
+    std::process::Command::new("cmd")
+        .args(["/k", &format!("cd /d \"{path}\"")])
+        .current_dir(&path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| ApiError::from_io(&path, &e))
+}
+
 
 #[tauri::command]
 fn reveal_path(path: String) -> Result<(), ApiError> {
@@ -1555,6 +1587,7 @@ fn main() {
             open_with,
             explorer_open,
             reveal_path,
+            open_terminal,
             layout_save,
             layout_preserve,
             layout_load,

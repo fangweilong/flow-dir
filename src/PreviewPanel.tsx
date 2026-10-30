@@ -9,6 +9,7 @@ import { CsvPreview } from './components/preview/CsvPreview'
 import { MarkdownPreview } from './components/preview/MarkdownPreview'
 import { JsonPreview } from './components/preview/JsonPreview'
 import { HexPreview } from './components/preview/HexPreview'
+import { CodePreview } from './components/preview/CodePreview'
 
 type Props = {
   info: PreviewInfo | null
@@ -66,6 +67,7 @@ export function PreviewPanel({
   const [htmlViewMode, setHtmlViewMode] = useState<'preview' | 'source'>('preview')
   const [binaryMode, setBinaryMode] = useState<'meta' | 'hex'>('meta')
   const [textViewMode, setTextViewMode] = useState<'text' | 'hex'>('text')
+  const [imageFit, setImageFit] = useState(true)
 
   return (
     <aside
@@ -109,7 +111,32 @@ export function PreviewPanel({
 
         {!loading && !error && info && (
           <>
-            {(info.kind === 'image' || info.kind === 'pdf' || info.kind === 'video') && info.url && (
+            {info.kind === 'image' && info.url && (
+              <div className="flex h-full flex-col">
+                <div className="flex shrink-0 items-center justify-between pb-1 text-[0.625rem]">
+                  <span className="font-mono text-muted-2">
+                    {info.dimensions ? `${info.dimensions} px` : ''}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setImageFit((prev) => !prev)}
+                    className="rounded bg-surface-2 px-1.5 py-0.5 text-muted hover:bg-surface-3 hover:text-fg"
+                  >
+                    {imageFit ? '1:1' : 'Fit'}
+                  </button>
+                </div>
+                <div className="min-h-0 flex-1 overflow-auto grid place-items-center">
+                  <img
+                    src={info.url}
+                    alt={name}
+                    className={`rounded border border-line shadow-sm ${
+                      imageFit ? 'max-h-full max-w-full object-contain' : 'max-w-none'
+                    }`}
+                  />
+                </div>
+              </div>
+            )}
+            {(info.kind === 'pdf' || info.kind === 'video') && info.url && (
               <div className="grid h-full place-items-center">
                 <img
                   src={info.url}
@@ -230,9 +257,7 @@ export function PreviewPanel({
                   </div>
                 )}
                 {textViewMode === 'text' || !info.hex ? (
-                  <pre data-selectable className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words font-mono text-[0.6875rem] leading-relaxed text-fg">
-                    {info.text}
-                  </pre>
+                  <CodePreview text={info.text} name={name} t={t} />
                 ) : (
                   <HexPreview hex={info.hex} t={t} />
                 )}
@@ -354,7 +379,11 @@ export function PreviewPanel({
 
       {info && (
         <footer className="flex h-7 shrink-0 items-center justify-between border-t border-line px-2.5 text-[0.65625rem] text-muted-2">
-          <span>{info.kind === 'folder' ? '' : `${t('preview.size')} ${formatSize(info.size, false)}`}</span>
+          <span>
+            {info.kind === 'folder'
+              ? ''
+              : `${info.dimensions ? `${info.dimensions} · ` : ''}${t('preview.size')} ${formatSize(info.size, false)}`}
+          </span>
           <span>{formatTime(info.mtime)}</span>
         </footer>
       )}

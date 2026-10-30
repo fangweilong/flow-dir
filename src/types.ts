@@ -198,6 +198,7 @@ export type PreviewInfo = {
   url?: string | null
   text?: string | null
   hex?: string | null
+  dimensions?: string | null
   entries?: ArchiveEntry[] | null
   meta?: MetaRow[] | null
   reason?: string | null

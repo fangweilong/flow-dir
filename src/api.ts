@@ -50,6 +50,7 @@ export const sortOrder = (items: SortItem[], key: string, dir: string) =>
   invoke<number[]>('sort_order', { items, key, dir })
 export const revealPath = (path: string) => invoke<void>('reveal_path', { path })
 export const explorerOpen = (path: string) => invoke<void>('explorer_open', { path })
+export const openTerminal = (path: string) => invoke<void>('open_terminal', { path })
 
 export const layoutSave = (workspace: unknown) => invoke<void>('layout_save', { workspace })
 export const layoutLoad = () => invoke<unknown>('layout_load')

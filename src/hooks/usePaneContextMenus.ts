@@ -14,6 +14,7 @@ import {
   COMPRESS_FORMATS,
   driveEject,
   explorerOpen,
+  openTerminal,
   shellMenuBackgroundShow,
   shellMenuShow,
   shellProperties,
@@ -208,6 +209,14 @@ export function usePaneContextMenus({
                       label: isPinnedPlace(paths[0]) ? t('sidebar.unpinPlace') : t('sidebar.pinPlace'),
                       onSelect: () => togglePinPlace(paths[0]),
                     },
+                    {
+                      kind: 'item' as const,
+                      label: t('menu.openTerminal'),
+                      onSelect: () =>
+                        void openTerminal(paths[0]).catch((e: unknown) =>
+                          showToast(t('op.failed', { code: errorCode(e) })),
+                        ),
+                    },
                   ]
                 : []),
             ]
@@ -330,6 +339,14 @@ export function usePaneContextMenus({
             { kind: 'sep' },
             ...(!inArchive
               ? [
+                  {
+                    kind: 'item' as const,
+                    label: t('menu.openTerminal'),
+                    onSelect: () =>
+                      void openTerminal(tab.path).catch((e: unknown) =>
+                        showToast(t('op.failed', { code: errorCode(e) })),
+                      ),
+                  },
                   {
                     kind: 'item' as const,
                     label: t('menu.openInExplorer'),

@@ -6,7 +6,7 @@ import type { Translate } from '../i18n'
 import type { MenuPoint } from '../PaneView'
 import { formatBinding } from '../shortcuts'
 import { pathKey, resolveAddress } from '../paths'
-import { executeAddressCommand, expandPath, pathIsDir } from '../api'
+import { executeAddressCommand, expandPath, openTerminal, pathIsDir } from '../api'
 
 export const driveRoot = (path: string | undefined): string => {
   if (!path) return 'C:\\'
@@ -258,19 +258,34 @@ export const AddressBar = forwardRef<AddressBarHandle, AddressBarProps>(function
             ))}
           </div>
           {tab?.path && (
-            <button
-              type="button"
-              data-copy-path
-              onClick={() => onCopyPath(tab.path)}
-              title={t('address.copyPath')}
-              aria-label={t('address.copyPath')}
-              className="grid h-full w-[1.67em] shrink-0 place-items-center border-l border-line text-muted-2 hover:bg-surface-3 hover:text-fg"
-            >
-              <svg viewBox="0 0 16 16" className="h-[1em] w-[1em]" fill="none" stroke="currentColor" strokeWidth="1.4">
-                <rect x="3.5" y="3.5" width="7" height="9" rx="1.2" />
-                <path d="M6 3.5v-.7a1 1 0 0 1 1-1h4.3a1 1 0 0 1 1 1v7.4a1 1 0 0 1-1 1H9.5" />
-              </svg>
-            </button>
+            <>
+              <button
+                type="button"
+                data-copy-path
+                onClick={() => onCopyPath(tab.path)}
+                title={t('address.copyPath')}
+                aria-label={t('address.copyPath')}
+                className="grid h-full w-[1.67em] shrink-0 place-items-center border-l border-line text-muted-2 hover:bg-surface-3 hover:text-fg"
+              >
+                <svg viewBox="0 0 16 16" className="h-[1em] w-[1em]" fill="none" stroke="currentColor" strokeWidth="1.4">
+                  <rect x="3.5" y="3.5" width="7" height="9" rx="1.2" />
+                  <path d="M6 3.5v-.7a1 1 0 0 1 1-1h4.3a1 1 0 0 1 1 1v7.4a1 1 0 0 1-1 1H9.5" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                data-open-terminal
+                onClick={() => tab?.path && void openTerminal(tab.path).catch(() => undefined)}
+                title={t('menu.openTerminal')}
+                aria-label={t('menu.openTerminal')}
+                className="grid h-full w-[1.67em] shrink-0 place-items-center border-l border-line text-muted-2 hover:bg-surface-3 hover:text-fg"
+              >
+                <svg viewBox="0 0 16 16" className="h-[1em] w-[1em]" fill="none" stroke="currentColor" strokeWidth="1.4">
+                  <path d="m4 5 3.5 3L4 11" strokeLinecap="round" strokeLinejoin="round" />
+                  <path d="M8.5 11h3.5" strokeLinecap="round" />
+                </svg>
+              </button>
+            </>
           )}
         </div>
       )}

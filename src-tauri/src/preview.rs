@@ -175,6 +175,7 @@ pub struct PreviewInfo {
     pub url: Option<String>,
     pub text: Option<String>,
     pub hex: Option<String>,
+    pub dimensions: Option<String>,
     pub entries: Option<Vec<ArchiveEntry>>,
     pub meta: Option<Vec<MetaRow>>,
     pub reason: Option<String>,
@@ -522,15 +523,30 @@ pub fn info(
         return Ok(info);
     }
 
-    if IMAGE_EXT.contains(&ext.as_str()) || ext == "pdf" || VIDEO_EXT.contains(&ext.as_str()) {
+    if IMAGE_EXT.contains(&ext.as_str()) {
+        let encoded =
+            percent_encoding::utf8_percent_encode(&path, percent_encoding::NON_ALPHANUMERIC);
+        info.kind = "image".to_string();
+        if let Some((w, h)) = probe_image_dimensions(&path) {
+            info.dimensions = Some(format!("{w} × {h}"));
+            info.meta = Some(vec![MetaRow {
+                label: "Dimensions".to_string(),
+                value: format!("{w} × {h} px"),
+            }]);
+        }
+        info.url = Some(format!(
+            "http://fd.localhost/preview?path={encoded}&w={width}&bg={bg:06x}&v={mtime}-{size}"
+        ));
+        return Ok(info);
+    }
+
+    if ext == "pdf" || VIDEO_EXT.contains(&ext.as_str()) {
         let encoded =
             percent_encoding::utf8_percent_encode(&path, percent_encoding::NON_ALPHANUMERIC);
         info.kind = if ext == "pdf" {
             "pdf"
-        } else if VIDEO_EXT.contains(&ext.as_str()) {
-            "video"
         } else {
-            "image"
+            "video"
         }
         .to_string();
         info.url = Some(format!(
@@ -876,6 +892,31 @@ fn render_image(path: &str, max_width: u32, bg: u32) -> Result<Vec<u8>, ApiError
         Ok(bgra_to_bmp(target_w, target_h, &pixels, stride, Some(bg)))
     }
 }
+fn probe_image_dimensions(path: &str) -> Option<(u32, u32)> {
+    unsafe {
+        let factory: IWICImagingFactory =
+            CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
+        let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        let decoder = factory
+            .CreateDecoderFromFilename(
+                PCWSTR(wide.as_ptr()),
+                None,
+                GENERIC_READ,
+                WICDecodeMetadataCacheOnDemand,
+            )
+            .ok()?;
+        let frame = decoder.GetFrame(0).ok()?;
+        let mut width = 0u32;
+        let mut height = 0u32;
+        frame.GetSize(&mut width, &mut height).ok()?;
+        if width > 0 && height > 0 {
+            Some((width, height))
+        } else {
+            None
+        }
+    }
+}
+
 
 /// Scales any WIC source down to `max_width` and converts it to top-down BGRA.
 fn scale_to_bgra(
@@ -1454,7 +1495,7 @@ mod tests {
         let bin = dir.join("flowdir_test.bin");
         std::fs::write(&md, "# Hello\nworld").unwrap();
         std::fs::write(&json, r#"{"a": 1}"#).unwrap();
-        std::fs::write(&bin, &[0x00, 0x01, 0x02, 0x03, 0x80, 0xff]).unwrap();
+        std::fs::write(&bin, [0x00, 0x01, 0x02, 0x03, 0x80, 0xff]).unwrap();
 
         let md_info = info(
             md.to_string_lossy().into_owned(),
