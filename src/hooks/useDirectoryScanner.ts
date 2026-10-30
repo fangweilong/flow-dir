@@ -33,6 +33,7 @@ const sameEntries = (a: Entry[], b: Entry[]): boolean => {
 }
 
 export interface UseDirectoryScannerOptions {
+  ws: Workspace | null
   wsRef: MutableRefObject<Workspace | null>
   setWs: React.Dispatch<React.SetStateAction<Workspace | null>>
   settingsRef: MutableRefObject<Settings>
@@ -43,6 +44,7 @@ export interface UseDirectoryScannerOptions {
 }
 
 export function useDirectoryScanner({
+  ws,
   wsRef,
   setWs,
   settingsRef,
@@ -78,8 +80,15 @@ export function useDirectoryScanner({
     (tabId: string, path: string, sort: SortState, hidden: boolean, keep = false) => {
       if (!path) {
         gens.current[tabId] = (gens.current[tabId] ?? 0) + 1
+        lastScan.current.set(tabId, Date.now())
         void cancelDir(tabId).catch(() => undefined)
-        setListData((prev) => ({ ...prev, [tabId]: { ...emptyList(), loading: false } }))
+        setListData((prev) => {
+          const old = prev[tabId]
+          if (old && !old.loading && old.entries.length === 0 && !old.error && !old.truncated) {
+            return prev
+          }
+          return { ...prev, [tabId]: { ...emptyList(), loading: false } }
+        })
         return
       }
       const gen = (gens.current[tabId] ?? 0) + 1
@@ -222,7 +231,7 @@ export function useDirectoryScanner({
         prev ? { ...prev, panes: { ...prev.panes, [paneId]: { ...prev.panes[paneId], sort } } } : prev,
       )
       if (!tab) return
-      const source = listData[tab.id]?.entries ?? []
+      const source = listDataRef.current[tab.id]?.entries ?? []
       if (!source.length) {
         startScan(tab.id, tab.path, sort, pane.hidden, true)
         return
@@ -249,7 +258,7 @@ export function useDirectoryScanner({
           startScan(tab.id, tab.path, sort, pane.hidden, true)
         })
     },
-    [listData, setWs, startScan, wsRef],
+    [setWs, startScan, wsRef],
   )
 
   const toggleHidden = useCallback(
@@ -289,7 +298,6 @@ export function useDirectoryScanner({
 
   // Watch directories of active tabs
   useEffect(() => {
-    const ws = wsRef.current
     if (!ws) return
     const current = new Map<string, string>()
     for (const pane of Object.values(ws.panes)) {
@@ -307,7 +315,7 @@ export function useDirectoryScanner({
         invalidateGit(path)
         void watchSet(paneId, path).catch(() => undefined)
       }
-      if (switched && listData[tab.id] && lastScan.current.has(tab.id)) {
+      if (switched && listDataRef.current[tab.id] && lastScan.current.has(tab.id)) {
         startScan(tab.id, path, pane.sort, pane.hidden, true)
       }
     }
@@ -315,7 +323,7 @@ export function useDirectoryScanner({
       if (!current.has(paneId)) void watchClear(paneId).catch(() => undefined)
     }
     watched.current = current
-  }, [wsRef.current, listData, invalidateGit, startScan])
+  }, [ws, invalidateGit, startScan])
 
   // Directory changes event listener
   useEffect(() => {
@@ -414,23 +422,26 @@ export function useDirectoryScanner({
 
   // Eviction of inactive tabs
   const evictInactiveTabs = useCallback(
-    (ws: Workspace | null) => {
-      if (!ws) return
+    (wsState: Workspace | null) => {
+      if (!wsState) return
       const visible = new Set<string>()
       const now = Date.now()
-      for (const pane of Object.values(ws.panes)) {
-        const tab = ws.tabs[pane.activeTabId]
+      for (const pane of Object.values(wsState.panes)) {
+        const tab = wsState.tabs[pane.activeTabId]
         if (!tab) continue
         visible.add(tab.id)
         tabUsed.current.set(tab.id, now)
         const cached = listDataRef.current[tab.id]
         if (!cached) {
-          startScan(tab.id, tab.path, pane.sort, pane.hidden)
-          continue
-        }
-        const scannedAt = lastScan.current.get(tab.id) ?? 0
-        if (!cached.loading && !cached.error && now - scannedAt > 1_500) {
-          startScan(tab.id, tab.path, pane.sort, pane.hidden, true)
+          if (tab.path) {
+            startScan(tab.id, tab.path, pane.sort, pane.hidden)
+          } else {
+            lastScan.current.set(tab.id, now)
+            setListData((prev) => {
+              if (prev[tab.id] && !prev[tab.id].loading) return prev
+              return { ...prev, [tab.id]: { ...emptyList(), loading: false } }
+            })
+          }
         }
       }
       setListData((prev) => {

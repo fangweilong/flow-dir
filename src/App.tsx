@@ -176,6 +176,7 @@ export default function App() {
 
   // Hook: directory scanner
   const scanner = useDirectoryScanner({
+    ws,
     wsRef,
     setWs,
     settingsRef,
@@ -209,8 +210,7 @@ export default function App() {
   // Keep tabs rows in memory & evict inactive
   useEffect(() => {
     evictInactiveTabs(ws)
-  }, [ws, listData, evictInactiveTabs])
-
+  }, [ws, evictInactiveTabs])
   // Hook: launch & tray
   useLaunchAndTray({
     ws,
