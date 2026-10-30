@@ -16,6 +16,16 @@ use crate::error::ApiError;
 const DROPEFFECT_COPY: u32 = 1;
 const DROPEFFECT_MOVE: u32 = 2;
 
+
+fn open_clipboard_with_retry() -> windows::core::Result<()> {
+    for _ in 0..5 {
+        if unsafe { OpenClipboard(None) }.is_ok() {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    unsafe { OpenClipboard(None) }
+}
 /// Puts `paths` on the clipboard as `CF_HDROP` so Explorer can paste them.
 pub fn copy_paths(paths: &[String], cut: bool) -> Result<(), ApiError> {
     if paths.is_empty() {
@@ -32,7 +42,7 @@ pub fn copy_paths(paths: &[String], cut: bool) -> Result<(), ApiError> {
     let size = header + wide.len() * 2;
 
     unsafe {
-        OpenClipboard(None).map_err(|e| ApiError::new("CLIPBOARD", e.to_string()))?;
+        open_clipboard_with_retry().map_err(|e| ApiError::new("CLIPBOARD", e.to_string()))?;
         let result = (|| -> windows::core::Result<()> {
             EmptyClipboard()?;
             let hglobal = GlobalAlloc(GMEM_MOVEABLE, size)?;
@@ -104,7 +114,7 @@ pub fn read_paths() -> Result<Clip, ApiError> {
     use windows::Win32::UI::Shell::DragQueryFileW;
 
     unsafe {
-        OpenClipboard(None).map_err(|e| ApiError::new("CLIPBOARD", e.to_string()))?;
+        open_clipboard_with_retry().map_err(|e| ApiError::new("CLIPBOARD", e.to_string()))?;
         let result = (|| -> windows::core::Result<Clip> {
             let handle = GetClipboardData(CF_HDROP.0 as u32)?;
             let drop = windows::Win32::UI::Shell::HDROP(handle.0);

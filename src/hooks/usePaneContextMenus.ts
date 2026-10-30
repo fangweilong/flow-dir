@@ -330,7 +330,6 @@ export function usePaneContextMenus({
             { kind: 'sep' },
             ...(!inArchive
               ? [
-                  { kind: 'sep' as const },
                   {
                     kind: 'item' as const,
                     label: t('menu.openInExplorer'),

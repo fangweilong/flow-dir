@@ -221,6 +221,7 @@ export default function App() {
     newTab,
     navigate,
     startScan,
+    setSearchOpen,
   })
 
   // Hook: file operations

@@ -51,9 +51,11 @@ export function SplitView({
           const up = () => {
             window.removeEventListener('pointermove', move)
             window.removeEventListener('pointerup', up)
+            window.removeEventListener('pointercancel', up)
           }
           window.addEventListener('pointermove', move)
           window.addEventListener('pointerup', up)
+          window.addEventListener('pointercancel', up)
         }}
         className={`shrink-0 bg-line-strong hover:bg-blue-400 ${
           node.dir === 'row' ? 'w-0.5 cursor-col-resize' : 'h-0.5 cursor-row-resize'

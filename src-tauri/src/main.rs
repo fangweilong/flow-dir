@@ -1193,10 +1193,10 @@ fn open_path(path: String) -> Result<(), ApiError> {
 }
 fn parse_command_line(input: &str) -> (String, Option<String>) {
     let text = input.trim();
-    if text.starts_with('"') {
-        if let Some(end_quote) = text[1..].find('"') {
-            let program = &text[1..=end_quote];
-            let rest = text[end_quote + 2..].trim();
+    if let Some(unquoted) = text.strip_prefix('"') {
+        if let Some(end_quote) = unquoted.find('"') {
+            let program = &unquoted[..end_quote];
+            let rest = unquoted[end_quote + 1..].trim();
             let params = if rest.is_empty() { None } else { Some(rest.to_string()) };
             return (program.to_string(), params);
         }
@@ -1277,38 +1277,34 @@ async fn open_with(path: String) -> Result<(), ApiError> {
     } else {
         path
     };
-    let join = tauri::async_runtime::spawn_blocking(move || {
-        let wide: Vec<u16> = target_path.encode_utf16().chain(std::iter::once(0)).collect();
-        unsafe {
-            let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-            if hr.is_err() && hr.0 as u32 != 0x8001_0106 {
-                // S_FALSE means the apartment was already initialised on this thread; any
-                // other failure leaves no working COM, so the dialog cannot be shown.
-                return Err(ApiError::new("SHELL_FAILED", hr.message()));
-            }
-            let info = OPENASINFO {
-                pcszFile: PCWSTR(wide.as_ptr()),
-                pcszClass: PCWSTR::null(),
-                // Registration stays allowed so "always use this app" works, and
-                // OAIF_EXEC launches the chosen program immediately.
-                oaifInFlags: OAIF_ALLOW_REGISTRATION | OAIF_EXEC,
-            };
-            let result = SHOpenWithDialog(None, &info);
-            CoUninitialize();
-            result.map_err(|err| {
-                let raw = err.code().0 as u32;
-                if raw == 0x8007_04C7 {
-                    // The user dismissed the dialog; not a failure worth reporting.
-                    ApiError::new("CANCELED", "open-with dialog dismissed")
-                } else {
-                    ApiError::new("SHELL_FAILED", err.message())
+    tauri::async_runtime::spawn_blocking(move || {
+        shell_menu::run_offthread("flowdir-open-with", std::time::Duration::from_secs(600), move || {
+            let wide: Vec<u16> = target_path.encode_utf16().chain(std::iter::once(0)).collect();
+            unsafe {
+                let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+                if hr.is_err() {
+                    return Err(ApiError::new("SHELL_FAILED", hr.message()));
                 }
-            })
-        }
+                let info = OPENASINFO {
+                    pcszFile: PCWSTR(wide.as_ptr()),
+                    pcszClass: PCWSTR::null(),
+                    oaifInFlags: OAIF_ALLOW_REGISTRATION | OAIF_EXEC,
+                };
+                let result = SHOpenWithDialog(None, &info);
+                CoUninitialize();
+                result.map_err(|err| {
+                    let raw = err.code().0 as u32;
+                    if raw == 0x8007_04C7 {
+                        ApiError::new("CANCELED", "open-with dialog dismissed")
+                    } else {
+                        ApiError::new("SHELL_FAILED", err.message())
+                    }
+                })
+            }
+        })?
     })
     .await
-    .map_err(|err| ApiError::new("IO", err.to_string()))?;
-    join
+    .map_err(|err| ApiError::new("IO", err.to_string()))?
 }
 
 #[tauri::command]
@@ -1385,8 +1381,7 @@ fn init_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
     let menu = shell_integration::tray_menu(app, &[])?;
-    TrayIconBuilder::with_id("main")
-        .icon(app.default_window_icon().cloned().unwrap())
+    let mut builder = TrayIconBuilder::with_id("main")
         .tooltip(store::display_name(app))
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -1403,8 +1398,11 @@ fn init_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             {
                 show_main(tray.app_handle());
             }
-        })
-        .build(app)?;
+        });
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+    builder.build(app)?;
     Ok(())
 }
 
@@ -1613,4 +1611,29 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("FlowDir failed to start");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_command_line_splits_quoted_and_unquoted() {
+        assert_eq!(
+            parse_command_line(r#""C:\Program Files\App\app.exe" --arg 1"#),
+            ("C:\\Program Files\\App\\app.exe".to_string(), Some("--arg 1".to_string()))
+        );
+        assert_eq!(
+            parse_command_line(r#""notepad.exe""#),
+            ("notepad.exe".to_string(), None)
+        );
+        assert_eq!(
+            parse_command_line("cmd.exe /c dir"),
+            ("cmd.exe".to_string(), Some("/c dir".to_string()))
+        );
+        assert_eq!(
+            parse_command_line("calc"),
+            ("calc".to_string(), None)
+        );
+    }
 }

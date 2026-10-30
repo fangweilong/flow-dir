@@ -27,9 +27,13 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
   /** Enabled entries in DOM order; arrow keys walk this list, skips separators. */
   const entries = () =>
     Array.from(ref.current?.querySelectorAll<HTMLButtonElement>('[data-menu-item]:not(:disabled)') ?? [])
+  const cleanItems = items.filter((item, index, arr) => {
+    if (item.kind !== 'sep') return true
+    if (index === 0 || index === arr.length - 1) return false
+    return arr[index - 1]?.kind !== 'sep'
+  })
   /** Icons share one left gutter; labels without a mark keep the same indent. */
-  const hasIcons = items.some((item) => item.kind === 'item' && item.icon)
-
+  const hasIcons = cleanItems.some((item) => item.kind === 'item' && item.icon)
   useLayoutEffect(() => {
     const el = ref.current
     if (!el) return
@@ -87,7 +91,7 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
       style={{ left: pos.x, top: pos.y }}
       onContextMenu={(ev) => ev.preventDefault()}
     >
-      {items.map((item, index) =>
+      {cleanItems.map((item, index) =>
         item.kind === 'sep' ? (
           <div key={`sep-${index}`} role="separator" className="my-1 h-px bg-line" />
         ) : (

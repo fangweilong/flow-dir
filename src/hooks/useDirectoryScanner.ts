@@ -325,46 +325,71 @@ export function useDirectoryScanner({
     watched.current = current
   }, [ws, invalidateGit, startScan])
 
+  // Watcher cleanup on unmount
+  useEffect(() => {
+    return () => {
+      for (const paneId of watched.current.keys()) {
+        void watchClear(paneId).catch(() => undefined)
+      }
+      watched.current.clear()
+    }
+  }, [])
+
   // Directory changes event listener
   useEffect(() => {
     let disposed = false
-    let unlisten: (() => void) | undefined
-    void listen<{ paneId: string; structural: boolean }>('flowdir:dir-changed', (event) => {
-      const paneId = event.payload.paneId
-      pendingStructural.current.set(
-        paneId,
-        event.payload.structural || pendingStructural.current.get(paneId) === true,
-      )
-      const existing = rescanTimers.current.get(paneId)
-      if (existing) window.clearTimeout(existing)
-      rescanTimers.current.set(
-        paneId,
-        window.setTimeout(() => {
-          rescanTimers.current.delete(paneId)
-          const structural = pendingStructural.current.get(paneId) === true
-          pendingStructural.current.delete(paneId)
-          const current = wsRef.current
-          if (!current) return
-          const pane = current.panes[paneId]
-          const tab = pane ? current.tabs[pane.activeTabId] : undefined
-          if (!pane || !tab) return
-          if (watched.current.get(paneId) !== tab.path) return
-          if (!structural) {
-            if (gitByDirRef.current[pathKey(tab.path)]?.root) invalidateGit(tab.path)
-            return
-          }
-          startScan(tab.id, tab.path, pane.sort, pane.hidden, true)
-          invalidateTree(tab.path)
+    const unlistens: (() => void)[] = []
+    const register = async () => {
+      const u1 = await listen<{ paneId: string; structural: boolean }>('flowdir:dir-changed', (event) => {
+        const paneId = event.payload.paneId
+        pendingStructural.current.set(
+          paneId,
+          event.payload.structural || pendingStructural.current.get(paneId) === true,
+        )
+        const existing = rescanTimers.current.get(paneId)
+        if (existing) window.clearTimeout(existing)
+        rescanTimers.current.set(
+          paneId,
+          window.setTimeout(() => {
+            rescanTimers.current.delete(paneId)
+            const structural = pendingStructural.current.get(paneId) === true
+            pendingStructural.current.delete(paneId)
+            const current = wsRef.current
+            if (!current) return
+            const pane = current.panes[paneId]
+            const tab = pane ? current.tabs[pane.activeTabId] : undefined
+            if (!pane || !tab) return
+            if (watched.current.get(paneId) !== tab.path) return
+            if (!structural) {
+              if (gitByDirRef.current[pathKey(tab.path)]?.root) invalidateGit(tab.path)
+              return
+            }
+            startScan(tab.id, tab.path, pane.sort, pane.hidden, true)
+            invalidateTree(tab.path)
+            invalidateGit(tab.path)
+          }, 250),
+        )
+      })
+      if (disposed) u1()
+      else unlistens.push(u1)
+
+      const u2 = await listen<{ paneId: string }>('flowdir:git-changed', (event) => {
+        const paneId = event.payload.paneId
+        const current = wsRef.current
+        if (!current) return
+        const pane = current.panes[paneId]
+        const tab = pane ? current.tabs[pane.activeTabId] : undefined
+        if (tab?.path) {
           invalidateGit(tab.path)
-        }, 250),
-      )
-    }).then((fn) => {
-      if (disposed) fn()
-      else unlisten = fn
-    })
+        }
+      })
+      if (disposed) u2()
+      else unlistens.push(u2)
+    }
+    void register()
     return () => {
       disposed = true
-      unlisten?.()
+      for (const unlisten of unlistens) unlisten()
       for (const timer of rescanTimers.current.values()) window.clearTimeout(timer)
       rescanTimers.current.clear()
       pendingStructural.current.clear()

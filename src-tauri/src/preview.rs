@@ -27,7 +27,7 @@ use windows::Win32::Storage::FileSystem::{
     GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
 
 use crate::archive::{self, ArchiveEntry};
@@ -267,9 +267,24 @@ fn validate(path: &str, limits: Limits) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn ensure_com() {
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+struct ComMtaGuard(bool);
+
+impl ComMtaGuard {
+    fn new() -> Self {
+        unsafe {
+            let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
+            Self(hr.is_ok())
+        }
+    }
+}
+
+impl Drop for ComMtaGuard {
+    fn drop(&mut self) {
+        if self.0 {
+            unsafe {
+                CoUninitialize();
+            }
+        }
     }
 }
 
@@ -725,7 +740,7 @@ fn ansi_to_string(bytes: &[u8]) -> Option<String> {
 }
 
 fn render_image(path: &str, max_width: u32, bg: u32) -> Result<Vec<u8>, ApiError> {
-    ensure_com();
+    let _com = ComMtaGuard::new();
     let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
         let factory: IWICImagingFactory =
@@ -809,7 +824,7 @@ fn scale_to_bgra(
 
 /// First decodable video frame, grabbed ~1s in to skip black intros.
 fn render_video(path: &str, max_width: u32, bg: u32) -> Result<Vec<u8>, ApiError> {
-    ensure_com();
+    let _com = ComMtaGuard::new();
     unsafe {
         MFStartup(MF_VERSION, MFSTARTUP_FULL).map_err(|e| ApiError::new("MF", e.to_string()))?;
         let result = video_frame(path, max_width, bg);
@@ -1003,7 +1018,7 @@ fn bgra_to_bmp(width: u32, height: u32, pixels: &[u8], stride: u32, bg: Option<u
 }
 
 fn render_pdf(path: &str, width: u32) -> Result<Vec<u8>, ApiError> {
-    ensure_com();
+    let _com = ComMtaGuard::new();
     let hpath = HSTRING::from(path);
     let file: StorageFile = StorageFile::GetFileFromPathAsync(&hpath)
         .and_then(|op| op.join())

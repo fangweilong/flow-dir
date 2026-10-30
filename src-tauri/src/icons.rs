@@ -22,7 +22,7 @@ use windows::Win32::Graphics::Imaging::{
     WICBitmapEncoderNoCache,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, IStream, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+    CoCreateInstance, CoInitializeEx, CoUninitialize, IStream, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
     STATFLAG_NONAME, STREAM_SEEK_SET,
 };
 use windows::Win32::UI::Shell::{
@@ -87,9 +87,30 @@ pub fn handle_request<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) ->
     }
 }
 
+struct ComMtaGuard(bool);
+
+impl ComMtaGuard {
+    fn new() -> Self {
+        unsafe {
+            let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
+            Self(hr.is_ok())
+        }
+    }
+}
+
+impl Drop for ComMtaGuard {
+    fn drop(&mut self) {
+        if self.0 {
+            unsafe {
+                CoUninitialize();
+            }
+        }
+    }
+}
+
 fn render(path: &str, size: i32) -> Result<Vec<u8>, windows::core::Error> {
+    let _com = ComMtaGuard::new();
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let factory: IShellItemImageFactory =
             SHCreateItemFromParsingName(&HSTRING::from(path), None)?;
         let flags = SIIGBF(SIIGBF_ICONONLY.0 | SIIGBF_BIGGERSIZEOK.0);

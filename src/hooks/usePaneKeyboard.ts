@@ -266,7 +266,9 @@ export function usePaneKeyboard({
       }
 
       if (ev.key === 'Escape') {
+        ev.preventDefault()
         update(tab.id, (d) => ({ ...d, selected: new Set(), anchor: '' }))
+        return
       }
 
       if (matchBinding(ev, keys.rename)) {

@@ -113,6 +113,7 @@ export function usePreviewController({
       ev.preventDefault()
       const startX = ev.clientX
       const startWidth = previewWidth
+      let finalWidth = startWidth
       const move = (e: PointerEvent) => {
         const next = Math.max(0, startWidth - (e.clientX - startX))
         if (next < previewMin) {
@@ -120,15 +121,18 @@ export function usePreviewController({
           return
         }
         if (!previewOpen) setPreviewOpen(true)
-        setPreviewWidth(Math.round(next))
+        finalWidth = Math.round(next)
+        setPreviewWidth(finalWidth)
       }
       const up = () => {
         window.removeEventListener('pointermove', move)
         window.removeEventListener('pointerup', up)
-        if (previewWidth >= previewMin) updateSettings({ ...settings, previewWidth })
+        window.removeEventListener('pointercancel', up)
+        if (finalWidth >= previewMin) updateSettings({ ...settings, previewWidth: finalWidth })
       }
       window.addEventListener('pointermove', move)
       window.addEventListener('pointerup', up)
+      window.addEventListener('pointercancel', up)
     },
     [previewMin, previewOpen, previewWidth, settings, updateSettings],
   )

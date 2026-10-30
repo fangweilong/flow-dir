@@ -14,6 +14,7 @@ export interface UseLaunchAndTrayOptions {
   newTab: (paneId: string) => void
   navigate: (tabId: string, path: string) => void
   startScan: (tabId: string, path: string, sort: SortState, hidden: boolean) => void
+  setSearchOpen?: (open: boolean) => void
 }
 
 export function useLaunchAndTray({
@@ -23,6 +24,7 @@ export function useLaunchAndTray({
   newTab,
   navigate,
   startScan,
+  setSearchOpen,
 }: UseLaunchAndTrayOptions) {
   const pendingSelect = useRef<{ tabId: string; name: string } | null>(null)
   const launchApplied = useRef(false)
@@ -73,16 +75,28 @@ export function useLaunchAndTray({
 
   useEffect(() => {
     let disposed = false
-    let unlisten: (() => void) | undefined
-    void listen<LaunchRequest>('flowdir:launch-request', (event) => openRequest(event.payload)).then((fn) => {
-      if (disposed) fn()
-      else unlisten = fn
-    })
+    const unlistens: (() => void)[] = []
+    const register = async () => {
+      const u1 = await listen<LaunchRequest>('flowdir:open-request', (event) => openRequest(event.payload))
+      if (disposed) u1()
+      else unlistens.push(u1)
+
+      const u2 = await listen<LaunchRequest>('flowdir:launch-request', (event) => openRequest(event.payload))
+      if (disposed) u2()
+      else unlistens.push(u2)
+
+      if (setSearchOpen) {
+        const u3 = await listen('flowdir:search', () => setSearchOpen(true))
+        if (disposed) u3()
+        else unlistens.push(u3)
+      }
+    }
+    void register()
     return () => {
       disposed = true
-      unlisten?.()
+      for (const unlisten of unlistens) unlisten()
     }
-  }, [openRequest])
+  }, [openRequest, setSearchOpen])
 
   useEffect(() => {
     if (!ws || launchApplied.current) return

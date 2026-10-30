@@ -5,6 +5,11 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::LazyLock;
+
+static RE_PERCENT: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"%([^%]+)%").unwrap());
+static RE_BRACED: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"\$\{([^}]+)\}").unwrap());
+static RE_BARE: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"\$([A-Za-z_][A-Za-z0-9_]*)").unwrap());
 
 use windows::core::{Interface, HSTRING, PCWSTR};
 use windows::Win32::Foundation::HANDLE;
@@ -820,8 +825,7 @@ pub fn expand_path(raw: &str) -> String {
         }
     }
     if s.contains('%') {
-        let re = regex::Regex::new(r"%([^%]+)%").unwrap();
-        s = re
+        s = RE_PERCENT
             .replace_all(&s, |caps: &regex::Captures| {
                 let var = &caps[1];
                 resolve_env_var(var).unwrap_or_else(|| format!("%{var}%"))
@@ -829,15 +833,13 @@ pub fn expand_path(raw: &str) -> String {
             .into_owned();
     }
     if s.contains('$') {
-        let re_braced = regex::Regex::new(r"\$\{([^}]+)\}").unwrap();
-        s = re_braced
+        s = RE_BRACED
             .replace_all(&s, |caps: &regex::Captures| {
                 let var = &caps[1];
                 resolve_env_var(var).unwrap_or_else(|| format!("${{{var}}}"))
             })
             .into_owned();
-        let re_bare = regex::Regex::new(r"\$([A-Za-z_][A-Za-z0-9_]*)").unwrap();
-        s = re_bare
+        s = RE_BARE
             .replace_all(&s, |caps: &regex::Captures| {
                 let var = &caps[1];
                 resolve_env_var(var).unwrap_or_else(|| format!("${var}"))

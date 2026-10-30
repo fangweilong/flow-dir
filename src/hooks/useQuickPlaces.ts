@@ -36,6 +36,7 @@ export function useQuickPlaces({
       ev.preventDefault()
       const startX = ev.clientX
       const startWidth = sidebarWidth
+      let finalWidth = startWidth
       const move = (e: PointerEvent) => {
         const next = Math.max(0, startWidth + (e.clientX - startX))
         if (next < sidebarMin) {
@@ -43,15 +44,18 @@ export function useQuickPlaces({
           return
         }
         if (!settings.sidebarOpen) updateSettings({ ...settings, sidebarOpen: true })
-        setSidebarWidth(Math.round(next))
+        finalWidth = Math.round(next)
+        setSidebarWidth(finalWidth)
       }
       const up = () => {
         window.removeEventListener('pointermove', move)
         window.removeEventListener('pointerup', up)
-        if (sidebarWidth >= sidebarMin) updateSettings({ ...settings, sidebarWidth })
+        window.removeEventListener('pointercancel', up)
+        if (finalWidth >= sidebarMin) updateSettings({ ...settings, sidebarWidth: finalWidth })
       }
       window.addEventListener('pointermove', move)
       window.addEventListener('pointerup', up)
+      window.addEventListener('pointercancel', up)
     },
     [sidebarMin, sidebarWidth, settings, updateSettings],
   )
