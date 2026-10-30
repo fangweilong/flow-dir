@@ -132,7 +132,7 @@ export const AddressBar = forwardRef<AddressBarHandle, AddressBarProps>(function
   }
 
   return (
-    <div className="flex items-center">
+    <div className="flex min-w-0 flex-1 items-center">
       <button
         type="button"
         title={`${t('nav.back')} (${formatBinding(keys.back)})`}
