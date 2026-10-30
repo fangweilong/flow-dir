@@ -633,9 +633,11 @@ mod tests {
         write(&left.join("skip.bin"), b"x");
         write(&right.join("skip.bin"), b"x");
 
-        let mut options = Options::default();
-        options.tolerance_ms = 1_000_000;
-        options.extensions = vec!["txt".into()];
+        let options = Options {
+            tolerance_ms: 1_000_000,
+            extensions: vec!["txt".into()],
+            ..Default::default()
+        };
         let result = level(
             left.to_str().unwrap(),
             right.to_str().unwrap(),
@@ -670,8 +672,10 @@ mod tests {
         write(&right.join("shared").join("nested").join("right.txt"), b"1");
         write(&left.join("shared").join("changed.txt"), b"longer");
         write(&right.join("shared").join("changed.txt"), b"x");
-        let mut options = Options::default();
-        options.tolerance_ms = 1_000_000;
+        let options = Options {
+            tolerance_ms: 1_000_000,
+            ..Default::default()
+        };
         let cancel = std::sync::atomic::AtomicBool::new(false);
         let mut scanned = 0;
         let counts = count_pair(

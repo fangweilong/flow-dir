@@ -680,7 +680,7 @@ mod tests {
             let dest = src.with_file_name(format!("{label}{extension}"));
             let progress = compress(&[src.to_string_lossy().into_owned()], &dest, format, 5, None);
             assert!(progress.error.is_none(), "{label}: {:?}", progress.error);
-            assert_eq!(progress.aborted, false);
+            assert!(!progress.aborted);
             assert!(dest.is_file(), "{label} must produce {extension}");
 
             let out = temp_dir(&format!("out-{label}"));

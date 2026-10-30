@@ -222,7 +222,7 @@ mod tests {
         assert_eq!(crate::ops::recycle_for_test(&path), 0, "recycle must succeed");
         assert!(!file.exists(), "the file must leave the folder");
 
-        let report = restore(&[path.clone()]).expect("restore call");
+        let report = restore(std::slice::from_ref(&path)).expect("restore call");
         assert!(report.missing.is_empty(), "report: {report:?}");
         assert_eq!(report.restored.len(), 1);
         assert!(file.exists(), "the file must be back at its original path");

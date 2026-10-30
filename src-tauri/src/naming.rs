@@ -114,7 +114,7 @@ mod tests {
     fn unique_keeps_free_paths_and_extensionless_names() {
         let dir = temp_dir("unique-free");
         let free = dir.join("free.txt").to_string_lossy().into_owned();
-        assert_eq!(unique(&[free.clone()]), vec![free]);
+        assert_eq!(unique(std::slice::from_ref(&free)), vec![free]);
         let bare = dir.join("notes");
         std::fs::write(&bare, b"x").unwrap();
         let next = unique(&[bare.to_string_lossy().into_owned()]);
