@@ -34,7 +34,7 @@ import {
   quitApp,
   titlebarMenu,
 } from './api'
-import type { Lang, ListData, Place } from './types'
+import type { Drive, Lang, ListData, Place } from './types'
 import { makeT } from './i18n'
 import { DEFAULT_SETTINGS } from './persist'
 import type { Settings } from './persist'
@@ -80,6 +80,7 @@ export default function App() {
   const readyRef = useRef(false)
   const listDataRef = useRef<Record<string, ListData>>({})
   const setListDataRef = useRef<React.Dispatch<React.SetStateAction<Record<string, ListData>>>>(() => undefined)
+  const setDriveListRef = useRef<React.Dispatch<React.SetStateAction<Drive[]>>>(() => undefined)
   const setPreviewOpenRef = useRef<React.Dispatch<React.SetStateAction<boolean>>>(() => undefined)
   const setSidebarWidthRef = useRef<React.Dispatch<React.SetStateAction<number>>>(() => undefined)
   const setPreviewWidthRef = useRef<React.Dispatch<React.SetStateAction<number>>>(() => undefined)
@@ -133,15 +134,15 @@ export default function App() {
     showToast,
     setWs,
     setPlaces,
-    setDriveList: (v) => scanner.setDriveList(v),
+    setDriveList: useCallback((v: React.SetStateAction<Drive[]>) => setDriveListRef.current(v), []),
     homeRef,
     readyRef,
     settingsRef,
     sidebarMin: SIDEBAR_MIN,
     previewMin: PREVIEW_MIN,
-    setPreviewOpen: (v) => setPreviewOpenRef.current(v),
-    setSidebarWidth: (v) => setSidebarWidthRef.current(v),
-    setPreviewWidth: (v) => setPreviewWidthRef.current(v),
+    setPreviewOpen: useCallback((v: React.SetStateAction<boolean>) => setPreviewOpenRef.current(v), []),
+    setSidebarWidth: useCallback((v: React.SetStateAction<number>) => setSidebarWidthRef.current(v), []),
+    setPreviewWidth: useCallback((v: React.SetStateAction<number>) => setPreviewWidthRef.current(v), []),
   })
 
   const {
@@ -206,6 +207,7 @@ export default function App() {
   setListDataRef.current = scanner.setListData
   listDataRef.current = listData
   cancelDirRef.current = (tabId) => void cancelDir(tabId).catch(() => undefined)
+  setDriveListRef.current = scanner.setDriveList
 
   // Keep tabs rows in memory & evict inactive
   useEffect(() => {

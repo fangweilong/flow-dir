@@ -68,7 +68,33 @@ export function useAppSettings({
   const lastSaveError = useRef(0)
   const [updateAvailable, setUpdateAvailable] = useState<string | null>(null)
   const notifiedUpdate = useRef<string | null>(null)
-
+  const bootstrappedRef = useRef(false)
+  const optionsRef = useRef({
+    showToast,
+    setWs,
+    setPlaces,
+    setDriveList,
+    homeRef,
+    readyRef,
+    sidebarMin,
+    previewMin,
+    setPreviewOpen,
+    setSidebarWidth,
+    setPreviewWidth,
+  })
+  optionsRef.current = {
+    showToast,
+    setWs,
+    setPlaces,
+    setDriveList,
+    homeRef,
+    readyRef,
+    sidebarMin,
+    previewMin,
+    setPreviewOpen,
+    setSidebarWidth,
+    setPreviewWidth,
+  }
   useEffect(() => {
     settingsRef.current = settings
   }, [settings])
@@ -126,8 +152,23 @@ export function useAppSettings({
 
   // Bootstrap initial settings & workspace
   useEffect(() => {
+    if (bootstrappedRef.current) return
+    bootstrappedRef.current = true
     let cancelled = false
     void (async () => {
+      const {
+        showToast: toast,
+        setWs: updateWs,
+        setPlaces: updatePlaces,
+        setDriveList: updateDrives,
+        homeRef: home,
+        readyRef: ready,
+        sidebarMin: sMin,
+        previewMin: pMin,
+        setPreviewOpen: updatePreviewOpen,
+        setSidebarWidth: updateSidebarWidth,
+        setPreviewWidth: updatePreviewWidth,
+      } = optionsRef.current
       const [savedSettings, placeList, driveListResult, saved, warnings] = await Promise.all([
         settingsLoad().catch(() => DEFAULT_SETTINGS),
         quickAccess().catch(() => [] as Place[]),
@@ -138,43 +179,31 @@ export function useAppSettings({
       if (cancelled) return
       const merged = { ...DEFAULT_SETTINGS, ...savedSettings }
       if (warnings.includes('SETTINGS_REJECTED')) {
-        showToast(makeT(merged.language)('toast.settingsRejected'))
+        toast(makeT(merged.language)('toast.settingsRejected'))
       }
       if (warnings.includes('LAYOUT_REJECTED')) {
-        showToast(makeT(merged.language)('toast.layoutRejected'))
+        toast(makeT(merged.language)('toast.layoutRejected'))
       }
       setSettings(merged)
-      setPreviewOpen(merged.previewOpen)
-      setSidebarWidth(merged.sidebarWidth >= sidebarMin ? merged.sidebarWidth : DEFAULT_SETTINGS.sidebarWidth)
-      setPreviewWidth(merged.previewWidth >= previewMin ? merged.previewWidth : DEFAULT_SETTINGS.previewWidth)
-      setPlaces(placeList)
-      setDriveList(driveListResult)
-      const home = placeList[0]?.path ?? 'C:\\'
-      homeRef.current = home
+      updatePreviewOpen(merged.previewOpen)
+      updateSidebarWidth(merged.sidebarWidth >= sMin ? merged.sidebarWidth : DEFAULT_SETTINGS.sidebarWidth)
+      updatePreviewWidth(merged.previewWidth >= pMin ? merged.previewWidth : DEFAULT_SETTINGS.previewWidth)
+      updatePlaces(placeList)
+      updateDrives(driveListResult)
+      const homeDir = placeList[0]?.path ?? 'C:\\'
+      home.current = homeDir
       const restored = fromSnapshot(saved)
       if (saved && !restored) void layoutPreserve().catch(() => undefined)
       const initial =
-        (merged.restoreTabsOnStart ? restored : null) ?? createWorkspace(home, merged.showHidden)
+        (merged.restoreTabsOnStart ? restored : null) ?? createWorkspace(homeDir, merged.showHidden)
       adoptIds(initial)
-      setWs(initial)
-      readyRef.current = true
+      updateWs(initial)
+      ready.current = true
     })()
     return () => {
       cancelled = true
     }
-  }, [
-    homeRef,
-    previewMin,
-    readyRef,
-    setDriveList,
-    setPlaces,
-    setPreviewOpen,
-    setPreviewWidth,
-    setSidebarWidth,
-    setWs,
-    showToast,
-    sidebarMin,
-  ])
+  }, [])
 
   // Font styling
   useEffect(() => {
