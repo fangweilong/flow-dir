@@ -27,6 +27,7 @@ import { PaneNodeRenderer } from './components/PaneNodeRenderer'
 import { PreviewPanel } from './PreviewPanel'
 import { SearchOverlay } from './SearchOverlay'
 import { refreshIconCache } from './icons'
+import { paneIds } from './workspace'
 import {
   openPath,
   openWith,
@@ -444,6 +445,16 @@ export default function App() {
       compareOpen ||
       quitBusy,
   )
+  const cyclePane = useCallback(() => {
+    const current = wsRef.current
+    if (!current) return
+    const ids = paneIds(current.root)
+    if (ids.length <= 1) return
+    const currentIndex = ids.indexOf(current.activePaneId)
+    const nextId = ids[(currentIndex + 1) % ids.length]
+    if (nextId) focusPane(nextId)
+  }, [focusPane, wsRef])
+
 
   useGlobalShortcuts({
     keys,
@@ -463,6 +474,7 @@ export default function App() {
     undoLast,
     redoLast,
     openExternalPreview,
+    cyclePane,
   })
   const openInApp = useCallback(
     (path: string) => {
@@ -618,6 +630,8 @@ export default function App() {
               startRename={startRename}
               startRenameMany={startRenameMany}
               deleteEntries={deleteEntries}
+              createFolder={createFolder}
+              cyclePane={cyclePane}
               pasteInto={pasteInto}
               manualRefresh={manualRefresh}
               retryTab={retryTab}

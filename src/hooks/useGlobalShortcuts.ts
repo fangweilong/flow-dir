@@ -23,6 +23,7 @@ export interface UseGlobalShortcutsOptions {
   undoLast: () => void
   redoLast: () => void
   openExternalPreview: (target: string) => void
+  cyclePane?: () => void
 }
 
 export function useGlobalShortcuts({
@@ -43,6 +44,7 @@ export function useGlobalShortcuts({
   undoLast,
   redoLast,
   openExternalPreview,
+  cyclePane,
 }: UseGlobalShortcutsOptions) {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -132,6 +134,11 @@ export function useGlobalShortcuts({
         event.preventDefault()
         openExternalPreview(joinPath(activeTab.path, previewName))
       }
+      if (matchBinding(event, keys.cyclePane)) {
+        event.preventDefault()
+        cyclePane?.()
+        return
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -153,5 +160,6 @@ export function useGlobalShortcuts({
     undoLast,
     redoLast,
     openExternalPreview,
+    cyclePane,
   ])
 }

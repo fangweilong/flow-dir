@@ -4,7 +4,7 @@ import type { TabState } from '../workspace'
 import type { ShortcutId } from '../shortcuts'
 import { matchBinding } from '../shortcuts'
 import { matchTypeAhead } from '../typeahead'
-import { isInsideArchive } from '../paths'
+import { isInsideArchive, joinPath } from '../paths'
 import type { MenuPoint } from '../PaneView'
 import type { AddressBarHandle } from '../components/AddressBar'
 
@@ -35,6 +35,9 @@ export interface UsePaneKeyboardOptions {
   onPaste: () => void
   onRowContextMenu: (entry: Entry, point: MenuPoint) => void
   onBlankContextMenu: (point: MenuPoint) => void
+  onNewFolder?: () => void
+  onCopyPath?: (path: string) => void
+  onCyclePane?: () => void
 }
 
 export function usePaneKeyboard({
@@ -62,6 +65,9 @@ export function usePaneKeyboard({
   onPaste,
   onRowContextMenu,
   onBlankContextMenu,
+  onNewFolder,
+  onCopyPath,
+  onCyclePane,
 }: UsePaneKeyboardOptions) {
   const [typed, setTyped] = useState('')
   const typeAheadRef = useRef<HTMLInputElement>(null)
@@ -334,6 +340,43 @@ export function usePaneKeyboard({
         }
         return
       }
+      if (matchBinding(ev, keys.newFolder)) {
+        if (isInsideArchive(tab.path)) return
+        ev.preventDefault()
+        onNewFolder?.()
+        return
+      }
+
+      if (matchBinding(ev, keys.copyPath)) {
+        ev.preventDefault()
+        if (visibleSelected.size > 0) {
+          const paths = Array.from(visibleSelected).map((name) => joinPath(tab.path, name))
+          onCopyPath?.(paths.join('\n'))
+        } else if (tab.path) {
+          onCopyPath?.(tab.path)
+        }
+        return
+      }
+
+      if (matchBinding(ev, keys.invertSelection)) {
+        ev.preventDefault()
+        const current = visibleSelected
+        const inverted = view
+          .map((e) => e.name)
+          .filter((name) => !current.has(name))
+        update(tab.id, (d) => ({
+          ...d,
+          selected: new Set(inverted),
+          anchor: inverted[0] ?? '',
+        }))
+        return
+      }
+
+      if (matchBinding(ev, keys.cyclePane) || (ev.key === 'Tab' && !ev.ctrlKey && !ev.altKey && !ev.metaKey)) {
+        ev.preventDefault()
+        onCyclePane?.()
+        return
+      }
     },
     [
       tab,
@@ -363,6 +406,9 @@ export function usePaneKeyboard({
       sectionRef,
       onRowContextMenu,
       onBlankContextMenu,
+      onNewFolder,
+      onCopyPath,
+      onCyclePane,
     ],
   )
 

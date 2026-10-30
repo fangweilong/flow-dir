@@ -138,6 +138,8 @@ type Props = {
   onRetry: (tabId: string) => void
   /** Resolved key combinations, so rebinding in settings reaches the pane commands. */
   keys: Record<ShortcutId, string>
+  onNewFolder?: () => void
+  onCyclePane?: () => void
   update: (tabId: string, fn: (d: ListData) => ListData) => void
 }
 
@@ -202,6 +204,8 @@ export function PaneView({
   onRefresh,
   onRetry,
   keys,
+  onNewFolder,
+  onCyclePane,
   update,
 }: Props) {
   const t = makeT(lang)
@@ -410,6 +414,9 @@ export function PaneView({
     onPaste,
     onRowContextMenu,
     onBlankContextMenu,
+    onNewFolder,
+    onCopyPath,
+    onCyclePane,
   })
 
   // Inside a location the first crumb is the location itself, never the WebDAV share root.

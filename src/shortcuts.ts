@@ -28,7 +28,10 @@ export type ShortcutId =
   | 'cut'
   | 'paste'
   | 'contextMenu'
-
+  | 'newFolder'
+  | 'copyPath'
+  | 'invertSelection'
+  | 'cyclePane'
 /** A rebound combination persisted in settings.toml; only changed ids are stored. */
 export type ShortcutOverride = { id: string; keys: string }
 
@@ -59,8 +62,11 @@ export const DEFAULT_BINDINGS: Record<ShortcutId, string> = {
   cut: 'ctrl+x',
   paste: 'ctrl+v',
   contextMenu: 'shift+f10',
+  newFolder: 'ctrl+shift+n',
+  copyPath: 'ctrl+shift+c',
+  invertSelection: 'ctrl+i',
+  cyclePane: 'f6',
 }
-
 export const SHORTCUTS: Shortcut[] = [
   { id: 'search', scope: 'app', label: 'shortcut.search' },
   { id: 'togglePreview', scope: 'app', label: 'shortcut.togglePreview' },
@@ -72,6 +78,7 @@ export const SHORTCUTS: Shortcut[] = [
   { id: 'openSettings', scope: 'app', label: 'shortcut.openSettings' },
   { id: 'undo', scope: 'app', label: 'shortcut.undo' },
   { id: 'redo', scope: 'app', label: 'shortcut.redo' },
+  { id: 'cyclePane', scope: 'app', label: 'shortcut.cyclePane' },
   { id: 'open', scope: 'pane', label: 'shortcut.open' },
   { id: 'rename', scope: 'pane', label: 'shortcut.rename' },
   { id: 'delete', scope: 'pane', label: 'shortcut.delete' },
@@ -86,6 +93,9 @@ export const SHORTCUTS: Shortcut[] = [
   { id: 'cut', scope: 'pane', label: 'shortcut.cut' },
   { id: 'paste', scope: 'pane', label: 'shortcut.paste' },
   { id: 'contextMenu', scope: 'pane', label: 'shortcut.contextMenu' },
+  { id: 'newFolder', scope: 'pane', label: 'shortcut.newFolder' },
+  { id: 'copyPath', scope: 'pane', label: 'shortcut.copyPath' },
+  { id: 'invertSelection', scope: 'pane', label: 'shortcut.invertSelection' },
 ]
 
 

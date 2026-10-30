@@ -48,6 +48,8 @@ export interface PaneNodeRendererProps {
   pasteInto: (paneId: string) => void
   manualRefresh: () => void
   retryTab: (tabId: string) => void
+  createFolder: (paneId: string) => void
+  cyclePane?: () => void
   update: (tabId: string, fn: (d: ListData) => ListData) => void
   setColWidths: (size: number, time: number, type: number, capacity: number, free: number) => void
   setNameWidth: (width: number) => void
@@ -119,6 +121,8 @@ export function PaneNodeRenderer(props: PaneNodeRendererProps) {
           onPaste={() => props.pasteInto(pane.id)}
           onRefresh={props.manualRefresh}
           onRetry={props.retryTab}
+          onNewFolder={() => props.createFolder(pane.id)}
+          onCyclePane={props.cyclePane}
           keys={keys}
           update={props.update}
         />
