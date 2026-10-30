@@ -194,9 +194,10 @@ export type ArchiveEntry = { name: string; size: number }
 export type MetaRow = { label: string; value: string }
 export type PreviewInfo = {
   /** `cloud` marks a placeholder whose bytes are still in the cloud; nothing was read. */
-  kind: 'image' | 'pdf' | 'video' | 'audio' | 'html' | 'text' | 'archive' | 'binary' | 'folder' | 'unsupported' | 'cloud'
+  kind: 'image' | 'pdf' | 'video' | 'audio' | 'html' | 'text' | 'archive' | 'binary' | 'folder' | 'unsupported' | 'cloud' | 'svg' | 'font' | 'csv' | 'markdown' | 'json'
   url?: string | null
   text?: string | null
+  hex?: string | null
   entries?: ArchiveEntry[] | null
   meta?: MetaRow[] | null
   reason?: string | null

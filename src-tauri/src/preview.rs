@@ -94,19 +94,24 @@ const VIDEO_EXT: &[&str] = &[
 ];
 
 const AUDIO_EXT: &[&str] = &[
-    "mp3", "wav", "flac", "ogg", "m4a", "aac", "wma",
+    "mp3", "wav", "flac", "ogg", "m4a", "aac", "wma", "opus",
 ];
+
+const FONT_EXT: &[&str] = &["ttf", "otf", "woff", "woff2"];
 
 /// Extensions always treated as text. Anything else is sniffed, so an unlisted or
 /// extension-less file still previews when its bytes look like text.
 const TEXT_EXT: &[&str] = &[
-    "txt", "md", "markdown", "json", "jsonc", "js", "jsx", "mjs", "cjs", "ts", "tsx", "css",
-    "scss", "sass", "less", "html", "htm", "xml", "yaml", "yml", "toml", "ini", "cfg", "conf",
-    "properties", "log", "csv", "tsv", "rs", "py", "go", "java", "kt", "kts", "c", "h", "cc",
-    "cpp", "cxx", "hpp", "hxx", "cs", "rb", "php", "pl", "lua", "swift", "dart", "scala", "r",
-    "sql", "sh", "zsh", "fish", "bat", "cmd", "ps1", "vue", "svelte", "astro", "tex", "proto",
-    "graphql", "gql", "gradle", "dockerfile", "makefile", "cmake", "diff", "patch", "srt", "vtt",
-    "reg", "inf", "gitignore", "gitattributes", "editorconfig", "env", "lock",
+    "txt", "md", "markdown", "json", "jsonc", "json5", "jsonl", "ndjson", "js", "jsx", "mjs",
+    "cjs", "ts", "tsx", "css", "scss", "sass", "less", "html", "htm", "xml", "yaml", "yml",
+    "toml", "ini", "cfg", "conf", "properties", "log", "csv", "tsv", "rs", "py", "go", "java",
+    "kt", "kts", "c", "h", "cc", "cpp", "cxx", "hpp", "hxx", "cs", "rb", "php", "pl", "lua",
+    "swift", "dart", "scala", "r", "sql", "sh", "zsh", "fish", "bat", "cmd", "ps1", "vue",
+    "svelte", "astro", "tex", "proto", "graphql", "gql", "gradle", "dockerfile", "makefile",
+    "cmake", "diff", "patch", "srt", "vtt", "reg", "inf", "gitignore", "gitattributes",
+    "editorconfig", "env", "lock", "zig", "nim", "v", "erl", "ex", "exs", "fs", "fsi", "fsx",
+    "clj", "cljs", "hs", "lhs", "jl", "m", "mm", "asm", "s", "vhd", "vhdl", "sv", "tf",
+    "tfvars", "hcl", "nix", "prisma", "rst", "adoc", "asciidoc", "dockerignore", "npmignore",
 ];
 
 #[derive(Default)]
@@ -169,6 +174,7 @@ pub struct PreviewInfo {
     pub kind: String,
     pub url: Option<String>,
     pub text: Option<String>,
+    pub hex: Option<String>,
     pub entries: Option<Vec<ArchiveEntry>>,
     pub meta: Option<Vec<MetaRow>>,
     pub reason: Option<String>,
@@ -322,17 +328,40 @@ pub fn handle_request<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) ->
     let cache = app.state::<PreviewCache>();
 
     if let Some(bytes) = cache.get(&key) {
-        return ok(
-            if extension(path) == "pdf" {
-                "image/png"
-            } else {
-                "image/bmp"
-            },
-            bytes,
-        );
+        let content_type = match extension(path).as_str() {
+            "pdf" => "image/png",
+            "svg" => "image/svg+xml",
+            "woff" => "font/woff",
+            "woff2" => "font/woff2",
+            "ttf" => "font/ttf",
+            "otf" => "font/otf",
+            _ => "image/bmp",
+        };
+        return ok(content_type, bytes);
     }
 
     match extension(path).as_str() {
+        "svg" => match std::fs::read(path) {
+            Ok(bytes) => {
+                cache.put(key, bytes.clone());
+                ok("image/svg+xml", bytes)
+            }
+            Err(err) => plain(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+        },
+        ext if FONT_EXT.contains(&ext) => match std::fs::read(path) {
+            Ok(bytes) => {
+                let mime = match ext {
+                    "woff" => "font/woff",
+                    "woff2" => "font/woff2",
+                    "ttf" => "font/ttf",
+                    "otf" => "font/otf",
+                    _ => "application/octet-stream",
+                };
+                cache.put(key, bytes.clone());
+                ok(mime, bytes)
+            }
+            Err(err) => plain(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+        },
         ext if IMAGE_EXT.contains(&ext) => match render_image(path, width, bg) {
             Ok(bytes) => {
                 cache.put(key, bytes.clone());
@@ -360,7 +389,7 @@ pub fn handle_request<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) ->
                     "mp3" => "audio/mpeg",
                     "wav" => "audio/wav",
                     "flac" => "audio/flac",
-                    "ogg" => "audio/ogg",
+                    "ogg" | "opus" => "audio/ogg",
                     "m4a" | "aac" => "audio/mp4",
                     _ => "audio/octet-stream",
                 };
@@ -470,6 +499,29 @@ pub fn info(
     };
 
     let width = limits.width(width);
+    if ext == "svg" {
+        let encoded =
+            percent_encoding::utf8_percent_encode(&path, percent_encoding::NON_ALPHANUMERIC);
+        info.kind = "svg".to_string();
+        info.url = Some(format!(
+            "http://fd.localhost/preview?path={encoded}&v={mtime}-{size}"
+        ));
+        if let Ok(bytes) = read_prefix(&path, limits.text_bytes) {
+            info.text = Some(decode_text(&bytes));
+        }
+        return Ok(info);
+    }
+
+    if FONT_EXT.contains(&ext.as_str()) {
+        let encoded =
+            percent_encoding::utf8_percent_encode(&path, percent_encoding::NON_ALPHANUMERIC);
+        info.kind = "font".to_string();
+        info.url = Some(format!(
+            "http://fd.localhost/preview?path={encoded}&v={mtime}-{size}"
+        ));
+        return Ok(info);
+    }
+
     if IMAGE_EXT.contains(&ext.as_str()) || ext == "pdf" || VIDEO_EXT.contains(&ext.as_str()) {
         let encoded =
             percent_encoding::utf8_percent_encode(&path, percent_encoding::NON_ALPHANUMERIC);
@@ -504,16 +556,33 @@ pub fn info(
         info.entries = Some(archive::preview_entries(&path, MAX_ARCHIVE_ENTRIES)?);
         return Ok(info);
     }
-
     match ext.as_str() {
         "html" | "htm" => {
             let bytes = read_prefix(&path, limits.text_bytes)?;
             info.kind = "html".to_string();
             info.text = Some(decode_text(&bytes));
         }
+        "md" | "markdown" => {
+            let bytes = read_prefix(&path, limits.text_bytes)?;
+            info.kind = "markdown".to_string();
+            info.text = Some(decode_text(&bytes));
+        }
+        "json" | "jsonc" | "jsonl" | "ndjson" => {
+            let bytes = read_prefix(&path, limits.text_bytes)?;
+            info.kind = "json".to_string();
+            info.text = Some(decode_text(&bytes));
+        }
+        "csv" | "tsv" => {
+            let bytes = read_prefix(&path, limits.text_bytes)?;
+            info.kind = "csv".to_string();
+            info.text = Some(decode_text(&bytes));
+        }
         "exe" | "dll" | "sys" | "msi" => {
             info.kind = "binary".to_string();
             info.meta = Some(version_rows(&path));
+            if let Ok(bytes) = read_prefix(&path, 4096) {
+                info.hex = Some(format_hex_dump(&bytes));
+            }
         }
         _ => {
             let known = TEXT_EXT.contains(&ext.as_str());
@@ -523,6 +592,16 @@ pub fn info(
                 Ok(bytes) if known || looks_like_text(&bytes) => {
                     info.kind = "text".to_string();
                     info.text = Some(decode_text(&bytes));
+                    info.hex = Some(format_hex_dump(&bytes[..bytes.len().min(4096)]));
+                }
+                Ok(bytes) => {
+                    if info.external.is_some() {
+                        info.kind = "unsupported".to_string();
+                        info.reason = Some("no-preview".to_string());
+                    } else {
+                        info.kind = "binary".to_string();
+                        info.hex = Some(format_hex_dump(&bytes[..bytes.len().min(4096)]));
+                    }
                 }
                 // A whitelisted text file must report why it could not be read; for an
                 // unknown binary the failed read simply means "no preview".
@@ -656,6 +735,41 @@ pub fn launch_external(path: &str, external: &[ExternalPreview]) -> Result<(), A
         .spawn()
         .map(|_| ())
         .map_err(|e| ApiError::new("LAUNCH", format!("{}: {e}", argv[0])))
+}
+
+fn format_hex_dump(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.len() * 5);
+    for (i, chunk) in bytes.chunks(16).enumerate() {
+        let offset = i * 16;
+        let _ = write!(out, "{offset:08x}  ");
+        for (j, b) in chunk.iter().enumerate() {
+            let _ = write!(out, "{b:02x} ");
+            if j == 7 {
+                out.push(' ');
+            }
+        }
+        if chunk.len() < 16 {
+            let missing = 16 - chunk.len();
+            for j in 0..missing {
+                out.push_str("   ");
+                if chunk.len() + j == 7 {
+                    out.push(' ');
+                }
+            }
+        }
+        out.push_str(" |");
+        for b in chunk {
+            let ch = if b.is_ascii_graphic() || *b == b' ' {
+                *b as char
+            } else {
+                '.'
+            };
+            out.push(ch);
+        }
+        out.push_str("|\n");
+    }
+    out
 }
 
 /// Decodes a text prefix: BOM (UTF-8/UTF-16) first, then strict UTF-8, then the
@@ -1278,5 +1392,109 @@ mod tests {
         assert_eq!(info.kind, "unsupported");
         assert_eq!(info.reason.as_deref(), Some("too-large"));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn svg_and_font_and_csv_report_correct_kinds() {
+        let dir = std::env::temp_dir();
+        let svg = dir.join("flowdir_test.svg");
+        let ttf = dir.join("flowdir_test.ttf");
+        let csv = dir.join("flowdir_test.csv");
+        std::fs::write(&svg, "<svg></svg>").unwrap();
+        std::fs::write(&ttf, b"\x00\x01\x00\x00").unwrap();
+        std::fs::write(&csv, "col1,col2\nval1,val2\n").unwrap();
+
+        let svg_info = info(
+            svg.to_string_lossy().into_owned(),
+            320,
+            0xffffff,
+            &[],
+            Limits::default(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(svg_info.kind, "svg");
+        assert!(svg_info.url.is_some());
+        assert_eq!(svg_info.text.as_deref(), Some("<svg></svg>"));
+
+        let ttf_info = info(
+            ttf.to_string_lossy().into_owned(),
+            320,
+            0xffffff,
+            &[],
+            Limits::default(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(ttf_info.kind, "font");
+        assert!(ttf_info.url.is_some());
+
+        let csv_info = info(
+            csv.to_string_lossy().into_owned(),
+            320,
+            0xffffff,
+            &[],
+            Limits::default(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(csv_info.kind, "csv");
+        assert_eq!(csv_info.text.as_deref(), Some("col1,col2\nval1,val2\n"));
+
+        let _ = std::fs::remove_file(&svg);
+        let _ = std::fs::remove_file(&ttf);
+        let _ = std::fs::remove_file(&csv);
+    }
+
+    #[test]
+    fn markdown_json_and_hex_preview() {
+        let dir = std::env::temp_dir();
+        let md = dir.join("flowdir_test.md");
+        let json = dir.join("flowdir_test.json");
+        let bin = dir.join("flowdir_test.bin");
+        std::fs::write(&md, "# Hello\nworld").unwrap();
+        std::fs::write(&json, r#"{"a": 1}"#).unwrap();
+        std::fs::write(&bin, &[0x00, 0x01, 0x02, 0x03, 0x80, 0xff]).unwrap();
+
+        let md_info = info(
+            md.to_string_lossy().into_owned(),
+            320,
+            0xffffff,
+            &[],
+            Limits::default(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(md_info.kind, "markdown");
+        assert_eq!(md_info.text.as_deref(), Some("# Hello\nworld"));
+
+        let json_info = info(
+            json.to_string_lossy().into_owned(),
+            320,
+            0xffffff,
+            &[],
+            Limits::default(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(json_info.kind, "json");
+        assert_eq!(json_info.text.as_deref(), Some(r#"{"a": 1}"#));
+
+        let bin_info = info(
+            bin.to_string_lossy().into_owned(),
+            320,
+            0xffffff,
+            &[],
+            Limits::default(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(bin_info.kind, "binary");
+        assert!(bin_info.hex.is_some());
+        assert!(bin_info.hex.unwrap().contains("00 01 02 03 80 ff"));
+
+        let _ = std::fs::remove_file(&md);
+        let _ = std::fs::remove_file(&json);
+        let _ = std::fs::remove_file(&bin);
     }
 }

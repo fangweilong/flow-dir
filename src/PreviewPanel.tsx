@@ -3,6 +3,12 @@ import { makeT } from './i18n'
 import type { Translate } from './i18n'
 import { formatSize, formatTime } from './paths'
 import type { ApiError, Lang, PreviewInfo } from './types'
+import { SvgPreview } from './components/preview/SvgPreview'
+import { FontPreview } from './components/preview/FontPreview'
+import { CsvPreview } from './components/preview/CsvPreview'
+import { MarkdownPreview } from './components/preview/MarkdownPreview'
+import { JsonPreview } from './components/preview/JsonPreview'
+import { HexPreview } from './components/preview/HexPreview'
 
 type Props = {
   info: PreviewInfo | null
@@ -58,7 +64,8 @@ export function PreviewPanel({
 }: Props) {
   const t = makeT(lang)
   const [htmlViewMode, setHtmlViewMode] = useState<'preview' | 'source'>('preview')
-
+  const [binaryMode, setBinaryMode] = useState<'meta' | 'hex'>('meta')
+  const [textViewMode, setTextViewMode] = useState<'text' | 'hex'>('text')
 
   return (
     <aside
@@ -162,6 +169,25 @@ export function PreviewPanel({
               </div>
             )}
 
+            {info.kind === 'svg' && (
+              <SvgPreview url={info.url} text={info.text} name={name} t={t} />
+            )}
+
+            {info.kind === 'font' && info.url && (
+              <FontPreview url={info.url} name={name} mtime={info.mtime} t={t} />
+            )}
+
+            {info.kind === 'csv' && (
+              <CsvPreview text={info.text} name={name} t={t} />
+            )}
+
+            {info.kind === 'markdown' && (
+              <MarkdownPreview text={info.text} name={name} t={t} />
+            )}
+
+            {info.kind === 'json' && (
+              <JsonPreview text={info.text} t={t} />
+            )}
 
             {info.kind === 'folder' && (
               <div className="grid h-full place-items-center px-4 text-center">
@@ -176,9 +202,41 @@ export function PreviewPanel({
             )}
 
             {info.kind === 'text' && (
-              <pre data-selectable className="whitespace-pre-wrap break-words font-mono text-[0.6875rem] leading-relaxed text-fg">
-                {info.text}
-              </pre>
+              <div className="flex h-full flex-col">
+                {info.hex && (
+                  <div className="flex shrink-0 items-center justify-end gap-1 pb-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setTextViewMode('text')}
+                      className={`rounded px-2 py-0.5 text-[0.625rem] ${
+                        textViewMode === 'text'
+                          ? 'bg-sel font-medium text-fg-strong'
+                          : 'text-muted hover:bg-surface-3'
+                      }`}
+                    >
+                      {t('preview.htmlSource')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTextViewMode('hex')}
+                      className={`rounded px-2 py-0.5 text-[0.625rem] ${
+                        textViewMode === 'hex'
+                          ? 'bg-sel font-medium text-fg-strong'
+                          : 'text-muted hover:bg-surface-3'
+                      }`}
+                    >
+                      {t('preview.hex')}
+                    </button>
+                  </div>
+                )}
+                {textViewMode === 'text' || !info.hex ? (
+                  <pre data-selectable className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words font-mono text-[0.6875rem] leading-relaxed text-fg">
+                    {info.text}
+                  </pre>
+                ) : (
+                  <HexPreview hex={info.hex} t={t} />
+                )}
+              </div>
             )}
 
             {info.kind === 'archive' && (
@@ -197,17 +255,51 @@ export function PreviewPanel({
             )}
 
             {info.kind === 'binary' && (
-              <div>
-                <div className="pb-1.5 text-[0.65625rem] text-muted-2">{t('preview.version')}</div>
-                <div className="space-y-1 text-[0.71875rem]">
-                  {(info.meta ?? []).map((row) => (
-                    <div key={row.label} className="flex justify-between gap-3">
-                      <span className="shrink-0 text-muted-2">{row.label}</span>
-                      <span className="min-w-0 truncate text-right text-fg">{row.value}</span>
+              <div className="flex h-full flex-col">
+                {info.meta && info.meta.length > 0 && info.hex && (
+                  <div className="flex shrink-0 items-center justify-end gap-1 pb-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setBinaryMode('meta')}
+                      className={`rounded px-2 py-0.5 text-[0.625rem] ${
+                        binaryMode === 'meta'
+                          ? 'bg-sel font-medium text-fg-strong'
+                          : 'text-muted hover:bg-surface-3'
+                      }`}
+                    >
+                      {t('preview.version')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setBinaryMode('hex')}
+                      className={`rounded px-2 py-0.5 text-[0.625rem] ${
+                        binaryMode === 'hex'
+                          ? 'bg-sel font-medium text-fg-strong'
+                          : 'text-muted hover:bg-surface-3'
+                      }`}
+                    >
+                      {t('preview.hex')}
+                    </button>
+                  </div>
+                )}
+
+                {info.meta && info.meta.length > 0 && binaryMode === 'meta' ? (
+                  <div>
+                    <div className="pb-1.5 text-[0.65625rem] text-muted-2">{t('preview.version')}</div>
+                    <div className="space-y-1 text-[0.71875rem]">
+                      {info.meta.map((row) => (
+                        <div key={row.label} className="flex justify-between gap-3">
+                          <span className="shrink-0 text-muted-2">{row.label}</span>
+                          <span className="min-w-0 truncate text-right text-fg">{row.value}</span>
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                  {!info.meta?.length && <div className="text-muted-2">—</div>}
-                </div>
+                  </div>
+                ) : info.hex ? (
+                  <HexPreview hex={info.hex} t={t} />
+                ) : (
+                  <div className="text-muted-2">—</div>
+                )}
               </div>
             )}
 

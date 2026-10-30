@@ -35,7 +35,7 @@ impl Format {
 }
 
 /// Suffixes in longest-first order so `.tar.gz` is tested before `.gz`.
-const SUFFIXES: [(&str, Format); 20] = [
+const SUFFIXES: [(&str, Format); 26] = [
     (".tar.bz2", Format::TarBz2),
     (".tar.zst", Format::TarZst),
     (".tar.gz", Format::TarGz),
@@ -46,6 +46,12 @@ const SUFFIXES: [(&str, Format); 20] = [
     (".txz", Format::TarXz),
     (".tar", Format::Tar),
     (".zip", Format::Zip),
+    (".jar", Format::Zip),
+    (".war", Format::Zip),
+    (".ear", Format::Zip),
+    (".apk", Format::Zip),
+    (".epub", Format::Zip),
+    (".xpi", Format::Zip),
     (".7z", Format::SevenZ),
     (".cab", Format::Cab),
     (".rar", Format::Rar),
