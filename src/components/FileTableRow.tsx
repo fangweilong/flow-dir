@@ -88,6 +88,7 @@ export function FileTableRow({
       }}
       onContextMenu={(e) => {
         e.preventDefault()
+        e.stopPropagation()
         if (!isRowSelected) selectRow(index, e)
         onRowContextMenu(entry, pointOf(e))
       }}

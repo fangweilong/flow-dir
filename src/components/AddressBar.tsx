@@ -6,7 +6,7 @@ import type { Translate } from '../i18n'
 import type { MenuPoint } from '../PaneView'
 import { formatBinding } from '../shortcuts'
 import { pathKey, resolveAddress } from '../paths'
-import { expandPath, pathIsDir } from '../api'
+import { executeAddressCommand, expandPath, pathIsDir } from '../api'
 
 export const driveRoot = (path: string | undefined): string => {
   if (!path) return 'C:\\'
@@ -58,19 +58,21 @@ export const AddressBar = forwardRef<AddressBarHandle, AddressBarProps>(function
   const addressRef = useRef<HTMLInputElement>(null)
   const addressSeq = useRef(0)
 
+  const isEditing = addressDraft !== null
+  const prevEditing = useRef(false)
   useEffect(() => {
-    if (addressDraft === null) return
-    const input = addressRef.current
-    if (!input) return
-    input.focus()
-    input.select()
-  }, [addressDraft])
+    if (isEditing && !prevEditing.current) {
+      addressRef.current?.focus()
+      addressRef.current?.select()
+    }
+    prevEditing.current = isEditing
+  }, [isEditing])
 
   const startAddressEdit = () => {
-    if (!tab?.path) return
+    if (!tab) return
     addressSeq.current += 1
     setAddressBad(false)
-    setAddressDraft(tab.path)
+    setAddressDraft(tab.path || '')
   }
 
   const closeAddressEdit = () => {
@@ -90,27 +92,37 @@ export const AddressBar = forwardRef<AddressBarHandle, AddressBarProps>(function
       closeAddressEdit()
       return
     }
+    if (raw.toLowerCase() === 'this pc' || raw === t('sidebar.thisPc')) {
+      closeAddressEdit()
+      if (tab.path) onNavigate(tab.id, '')
+      return
+    }
     const seq = ++addressSeq.current
     void expandPath(raw)
-      .then((expanded) => {
+      .then(async (expanded) => {
         if (seq !== addressSeq.current) return
         const next = resolveAddress(tab.path, expanded)
         if (pathKey(next) === pathKey(tab.path)) {
           closeAddressEdit()
           return
         }
-        void pathIsDir(next)
+        const isDir = await pathIsDir(next).catch(() => false)
+        if (seq !== addressSeq.current) return
+        if (isDir) {
+          closeAddressEdit()
+          onNavigate(tab.id, next)
+          return
+        }
+        const executed = await executeAddressCommand(expanded, tab.path || undefined)
+          .then(() => true)
           .catch(() => false)
-          .then((ok) => {
-            if (seq !== addressSeq.current) return
-            if (!ok) {
-              setAddressBad(true)
-              onPathInvalid(next)
-              return
-            }
-            closeAddressEdit()
-            onNavigate(tab.id, next)
-          })
+        if (seq !== addressSeq.current) return
+        if (executed) {
+          closeAddressEdit()
+          return
+        }
+        setAddressBad(true)
+        onPathInvalid(raw)
       })
       .catch(() => {
         if (seq !== addressSeq.current) return
@@ -205,6 +217,7 @@ export const AddressBar = forwardRef<AddressBarHandle, AddressBarProps>(function
               closeAddressEdit()
             }
           }}
+          placeholder={root ? t('sidebar.thisPc') : undefined}
           title={addressBad ? t('address.invalidPath') : undefined}
           style={navFieldStyle}
           className={`mx-0.5 min-w-0 flex-1 rounded border bg-surface px-1.5 outline-none ${
@@ -216,7 +229,7 @@ export const AddressBar = forwardRef<AddressBarHandle, AddressBarProps>(function
           style={navFieldStyle}
           className="mx-0.5 flex min-w-0 flex-1 items-center rounded border border-line bg-surface-2 leading-none"
           onClick={(ev) => {
-            if (!tab?.path || (ev.target as HTMLElement).closest('button')) return
+            if (!tab || (ev.target as HTMLElement).closest('button')) return
             startAddressEdit()
           }}
         >

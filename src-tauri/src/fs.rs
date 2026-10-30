@@ -728,7 +728,83 @@ pub fn quick_access() -> Vec<Place> {
     out
 }
 
-/// Expands environment variables like `%APPDATA%`, `%TEMP%` and leading `~` in a path.
+fn user_home_dir() -> Option<String> {
+    if let Ok(home) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
+        if !home.is_empty() {
+            return Some(home);
+        }
+    }
+    let drive = std::env::var("HOMEDRIVE").unwrap_or_default();
+    let path = std::env::var("HOMEPATH").unwrap_or_default();
+    if !drive.is_empty() && !path.is_empty() {
+        return Some(format!("{drive}{path}"));
+    }
+    None
+}
+
+fn registry_env_var(name: &str) -> Option<String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Registry::{
+        RegGetValueW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
+    };
+
+    let name_wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let read_key = |root, subkey: &[u16]| -> Option<String> {
+        let mut buf = vec![0u16; 1024];
+        let mut bytes = (buf.len() * 2) as u32;
+        let res = unsafe {
+            RegGetValueW(
+                root,
+                PCWSTR(subkey.as_ptr()),
+                PCWSTR(name_wide.as_ptr()),
+                RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ,
+                None,
+                Some(buf.as_mut_ptr() as *mut _),
+                Some(&mut bytes),
+            )
+        };
+        if res.is_ok() && bytes >= 2 {
+            let len = ((bytes / 2) as usize).saturating_sub(1);
+            let val = String::from_utf16_lossy(&buf[..len]);
+            if !val.trim().is_empty() {
+                return Some(val);
+            }
+        }
+        None
+    };
+
+    let user_sub: Vec<u16> = "Environment\0".encode_utf16().collect();
+    if let Some(val) = read_key(HKEY_CURRENT_USER, &user_sub) {
+        return Some(val);
+    }
+
+    let sys_sub: Vec<u16> = "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment\0"
+        .encode_utf16()
+        .collect();
+    read_key(HKEY_LOCAL_MACHINE, &sys_sub)
+}
+
+fn resolve_env_var(var: &str) -> Option<String> {
+    if let Ok(val) = std::env::var(var) {
+        if !val.is_empty() {
+            return Some(val);
+        }
+    }
+    for (k, v) in std::env::vars() {
+        if k.eq_ignore_ascii_case(var) && !v.is_empty() {
+            return Some(v);
+        }
+    }
+    if let Some(val) = registry_env_var(var) {
+        return Some(val);
+    }
+    if var.eq_ignore_ascii_case("USERHOME") || var.eq_ignore_ascii_case("HOME") {
+        return user_home_dir();
+    }
+    None
+}
+
+/// Expands environment variables like `%APPDATA%`, `%TEMP%`, `%USERHOME%`, `$HOME` and leading `~` in a path.
 pub fn expand_path(raw: &str) -> String {
     let mut text = raw.trim();
     if text.starts_with('"') && text.ends_with('"') && text.len() >= 2 {
@@ -739,7 +815,7 @@ pub fn expand_path(raw: &str) -> String {
     }
     let mut s = text.to_string();
     if s.starts_with('~') {
-        if let Ok(home) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
+        if let Some(home) = user_home_dir() {
             s = format!("{}{}", home, &s[1..]);
         }
     }
@@ -748,7 +824,23 @@ pub fn expand_path(raw: &str) -> String {
         s = re
             .replace_all(&s, |caps: &regex::Captures| {
                 let var = &caps[1];
-                std::env::var(var).unwrap_or_else(|_| format!("%{var}%"))
+                resolve_env_var(var).unwrap_or_else(|| format!("%{var}%"))
+            })
+            .into_owned();
+    }
+    if s.contains('$') {
+        let re_braced = regex::Regex::new(r"\$\{([^}]+)\}").unwrap();
+        s = re_braced
+            .replace_all(&s, |caps: &regex::Captures| {
+                let var = &caps[1];
+                resolve_env_var(var).unwrap_or_else(|| format!("${{{var}}}"))
+            })
+            .into_owned();
+        let re_bare = regex::Regex::new(r"\$([A-Za-z_][A-Za-z0-9_]*)").unwrap();
+        s = re_bare
+            .replace_all(&s, |caps: &regex::Captures| {
+                let var = &caps[1];
+                resolve_env_var(var).unwrap_or_else(|| format!("${var}"))
             })
             .into_owned();
     }
@@ -934,6 +1026,11 @@ mod tests {
         if !home.is_empty() {
             assert_eq!(expand_path("~"), home);
             assert_eq!(expand_path("~/Documents"), format!("{home}/Documents"));
+            assert_eq!(expand_path("%USERHOME%"), home);
+            assert_eq!(expand_path("%userhome%"), home);
+            assert_eq!(expand_path("$HOME"), home);
+            assert_eq!(expand_path("${HOME}"), home);
+            assert_eq!(expand_path("%USERHOME%\\Downloads"), format!("{home}\\Downloads"));
         }
         let temp = std::env::var("TEMP").unwrap_or_default();
         if !temp.is_empty() {

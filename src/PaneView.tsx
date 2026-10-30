@@ -49,6 +49,13 @@ const pointOf = (ev: { clientX: number; clientY: number; screenX: number; screen
   screenY: ev.screenY,
   shiftKey: ev.shiftKey,
 })
+const isBlankListClick = (e: React.MouseEvent<HTMLElement>): boolean => {
+  const rect = e.currentTarget.getBoundingClientRect()
+  const isScrollbar =
+    e.clientX >= rect.left + e.currentTarget.clientLeft + e.currentTarget.clientWidth ||
+    e.clientY >= rect.top + e.currentTarget.clientTop + e.currentTarget.clientHeight
+  return !isScrollbar && !(e.target instanceof Element && e.target.closest('[data-row], [data-drive], button, input, a'))
+}
 
 type Props = {
   pane: PaneState
@@ -240,8 +247,6 @@ export function PaneView({
     if (left < strip.scrollLeft) strip.scrollLeft = left
     else if (right > strip.scrollLeft + strip.clientWidth) strip.scrollLeft = right - strip.clientWidth
   }, [pane.activeTabId, pane.tabIds, stripOverflow])
-
-
 
   useEffect(() => {
     const el = sectionRef.current
@@ -630,13 +635,12 @@ export function PaneView({
           if (ev.target === scrollRef.current) typeAheadRef.current?.focus({ preventScroll: true })
         }}
         onClick={(e) => {
-          if (e.target === e.currentTarget && tab) {
-            update(tab.id, (d) => ({ ...d, selected: new Set(), anchor: '' }))
-          }
+          if (!isBlankListClick(e)) return
+          if (tab) update(tab.id, (d) => ({ ...d, selected: new Set(), anchor: '' }))
         }}
         onContextMenu={(e) => {
           e.preventDefault()
-          if (e.target !== e.currentTarget) return
+          if (!isBlankListClick(e)) return
           if (tab) update(tab.id, (d) => ({ ...d, selected: new Set(), anchor: '' }))
           onBlankContextMenu(pointOf(e))
         }}

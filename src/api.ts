@@ -30,6 +30,9 @@ export const expandPath = (raw: string) => invoke<string>('expand_path', { raw }
 export const gitStatus = (path: string) => invoke<GitStatus>('git_status', { path })
 export const quickAccess = () => invoke<Place[]>('quick_access')
 export const openPath = (path: string) => invoke<void>('open_path', { path })
+/** Executes a command typed in the address bar (e.g. `cmd`, `pwsh`, `powershell`, `wt`, `calc`) in `workingDir`. */
+export const executeAddressCommand = (command: string, workingDir?: string) =>
+  invoke<void>('execute_address_command', { command, workingDir })
 /** System "Open with" dialog, for a file with no default program. */
 export const openWith = (path: string) => invoke<void>('open_with', { path })
 /** Which of the paths already exist on disk; used before a rename overwrites one. */

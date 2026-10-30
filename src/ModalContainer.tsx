@@ -111,8 +111,6 @@ export interface ModalContainerProps {
 
   deleteConfirm: DeleteConfirmState | null
   setDeleteConfirm: (d: DeleteConfirmState | null) => void
-  confirmDetail: string
-
   quitBusy: number | null
   setQuitBusy: (q: number | null) => void
   quitApp: () => Promise<void>
@@ -172,8 +170,6 @@ export function ModalContainer({
 
   deleteConfirm,
   setDeleteConfirm,
-  confirmDetail,
-
   quitBusy,
   setQuitBusy,
   quitApp,
@@ -350,11 +346,14 @@ export function ModalContainer({
             deleteConfirm.permanent ? 'confirm.deletePermanent' : 'confirm.recycle',
             { count: deleteConfirm.names.length },
           )}
-          detail={confirmDetail}
+          items={deleteConfirm.names.map((name) => ({
+            name,
+            path: pathsFor(deleteConfirm.paneId, [name])[0],
+          }))}
           confirmLabel={t(
             deleteConfirm.permanent ? 'confirm.deletePermanentAction' : 'confirm.recycleAction',
           )}
-          danger
+          danger={deleteConfirm.permanent}
           onConfirm={() => {
             const pending = deleteConfirm
             setDeleteConfirm(null)

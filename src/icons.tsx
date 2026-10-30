@@ -84,13 +84,13 @@ export function FeatureIcon({ name }: { name: 'compare' | 'duplicate' }) {
 
 export function FileIcon({
   name,
-  dir,
+  dir = false,
   path,
   scale = 1,
   size,
 }: {
   name: string
-  dir: boolean
+  dir?: boolean
   path?: string
   /** Base-text multiplier used only for the requested raster size; CSS keeps the icon at 1.25em. */
   scale?: number

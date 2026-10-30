@@ -57,6 +57,7 @@ export function DrivesOverview({
             }
             onContextMenu={(ev) => {
               ev.preventDefault()
+              ev.stopPropagation()
               onDriveRowMenu(drive, pointOf(ev))
             }}
             title={drive.available ? drive.root : `${drive.root} · ${t('drive.unavailable')}`}

@@ -1191,6 +1191,70 @@ fn open_path(path: String) -> Result<(), ApiError> {
         _ => ApiError::new("SHELL_FAILED", format!("ShellExecuteW 返回 {code}")),
     })
 }
+fn parse_command_line(input: &str) -> (String, Option<String>) {
+    let text = input.trim();
+    if text.starts_with('"') {
+        if let Some(end_quote) = text[1..].find('"') {
+            let program = &text[1..=end_quote];
+            let rest = text[end_quote + 2..].trim();
+            let params = if rest.is_empty() { None } else { Some(rest.to_string()) };
+            return (program.to_string(), params);
+        }
+    }
+    if let Some((program, rest)) = text.split_once(|c: char| c.is_whitespace()) {
+        let rest = rest.trim();
+        let params = if rest.is_empty() { None } else { Some(rest.to_string()) };
+        (program.to_string(), params)
+    } else {
+        (text.to_string(), None)
+    }
+}
+
+/// Executes a command or application typed into the address bar with the given working directory.
+#[tauri::command]
+async fn execute_address_command(command: String, working_dir: Option<String>) -> Result<(), ApiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let trimmed = command.trim();
+        if trimmed.is_empty() {
+            return Err(ApiError::new("EMPTY_COMMAND", ""));
+        }
+
+        let (program, parameters) = parse_command_line(trimmed);
+        let dir = working_dir.filter(|d| !d.trim().is_empty());
+
+        let wide_prog: Vec<u16> = program.encode_utf16().chain(std::iter::once(0)).collect();
+        let wide_params: Option<Vec<u16>> = parameters
+            .as_ref()
+            .map(|p| p.encode_utf16().chain(std::iter::once(0)).collect());
+        let wide_dir: Option<Vec<u16>> = dir
+            .as_ref()
+            .map(|d| d.encode_utf16().chain(std::iter::once(0)).collect());
+
+        let ret = unsafe {
+            ShellExecuteW(
+                None,
+                PCWSTR::null(),
+                PCWSTR(wide_prog.as_ptr()),
+                wide_params.as_ref().map_or(PCWSTR::null(), |p| PCWSTR(p.as_ptr())),
+                wide_dir.as_ref().map_or(PCWSTR::null(), |d| PCWSTR(d.as_ptr())),
+                SW_SHOWNORMAL,
+            )
+        };
+        let code = ret.0 as isize;
+        if code > 32 {
+            Ok(())
+        } else {
+            Err(match code {
+                2 => ApiError::new("NOT_FOUND", program),
+                5 => ApiError::new("ACCESS_DENIED", program),
+                _ => ApiError::new("EXECUTE_FAILED", format!("ShellExecuteW error {code}")),
+            })
+        }
+    })
+    .await
+    .unwrap_or_else(|e| Err(ApiError::new("THREAD_PANIC", e.to_string())))
+}
+
 
 /// Shows the system "Open with" dialog for a file that has no default program.
 ///
@@ -1489,6 +1553,7 @@ fn main() {
             git_status,
             quick_access,
             open_path,
+            execute_address_command,
             open_with,
             explorer_open,
             reveal_path,

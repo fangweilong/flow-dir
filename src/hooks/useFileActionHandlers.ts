@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from 'react'
+import { useCallback } from 'react'
 import type { MutableRefObject } from 'react'
 import {
   archiveExtractItems,
@@ -101,12 +101,6 @@ export function useFileActionHandlers({
     setDeleteConfirm({ paneId, names, permanent })
   }, [setDeleteConfirm])
 
-  const confirmDetail = useMemo(() => {
-    if (!deleteConfirm) return ''
-    const names = deleteConfirm.names
-    const shown = names.slice(0, 3).join(', ')
-    return names.length > 3 ? t('confirm.more', { names: shown, count: names.length }) : shown
-  }, [deleteConfirm, t])
 
   const openProperties = useCallback(
     (paneId: string, names: string[]) => {
@@ -250,7 +244,6 @@ export function useFileActionHandlers({
     pathsFor,
     focusList,
     deleteEntries,
-    confirmDetail,
     openProperties,
     startRename,
     startRenameMany,

@@ -286,7 +286,6 @@ export default function App() {
     pathsFor,
     focusList,
     deleteEntries,
-    confirmDetail,
     openProperties,
     startRename,
     startRenameMany,
@@ -715,7 +714,6 @@ export default function App() {
         setCompareOpen={setCompareOpen}
         deleteConfirm={deleteConfirm}
         setDeleteConfirm={setDeleteConfirm}
-        confirmDetail={confirmDetail}
         quitBusy={quitBusy}
         setQuitBusy={setQuitBusy}
         quitApp={quitApp}

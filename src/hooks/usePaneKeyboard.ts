@@ -179,7 +179,7 @@ export function usePaneKeyboard({
         return
       }
 
-      if (matchBinding(ev, keys.addressBar)) {
+      if (matchBinding(ev, keys.addressBar) || (ev.altKey && (ev.key === 'd' || ev.key === 'D')) || ev.key === 'F4') {
         ev.preventDefault()
         addressBarRef.current?.startAddressEdit()
         return
