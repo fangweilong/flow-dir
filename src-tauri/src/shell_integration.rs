@@ -287,7 +287,6 @@ fn hotkey_loop(app: &AppHandle) {
         while GetMessageW(&mut message, None, 0, 0).as_bool() {
             if message.message == WM_HOTKEY && message.wParam.0 == HOTKEY_ID as usize {
                 crate::show_main(app);
-                let _ = app.emit("flowdir:hotkey", ());
             }
             let _ = TranslateMessage(&message);
             DispatchMessageW(&message);

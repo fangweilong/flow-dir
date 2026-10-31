@@ -13,7 +13,7 @@ import type { ShortcutId } from './shortcuts'
 import { usePaneKeyboard } from './hooks/usePaneKeyboard'
 import { EMPTY_LIST, filterList, filterMatches } from './types'
 import type { Drive, Entry, GitStatus, Lang, ListData, SortKey, SortState } from './types'
-import { makeT } from './i18n'
+import { errorKey, makeT } from './i18n'
 import {
   BASE_FONT_SIZE,
   DEFAULT_LIST_FONT_SIZE,
@@ -672,7 +672,7 @@ export function PaneView({
         />
         {list.error && !root && (
           <div className="m-3 flex items-start gap-2 rounded-md border border-red-300 bg-red-50 p-2 text-red-800 dark:border-red-900 dark:bg-red-950/50 dark:text-red-200">
-            <div className="font-mono text-[0.8em] font-semibold">{list.error.code}</div>
+            <div className="text-[0.8em] font-semibold">{t(errorKey(list.error.code))}</div>
             <div className="min-w-0 flex-1 break-words text-[0.88em]">
               {list.error.detail || t('list.readError')}
             </div>

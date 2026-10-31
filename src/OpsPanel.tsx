@@ -1,4 +1,4 @@
-import { makeT } from './i18n'
+import { errorKey, makeT } from './i18n'
 import type { Lang, OpProgress } from './types'
 
 type Props = {
@@ -110,7 +110,7 @@ export function OpsPanel({ ops, lang, onCancel, onDismiss, onRetryElevated, elev
                     title={failure.detail}
                     className="flex items-baseline gap-1 py-0.5"
                   >
-                    <span className="shrink-0 font-mono text-red-500">{failure.code}</span>
+                    <span className="shrink-0 text-red-500">{t(errorKey(failure.code))}</span>
                     <span className="truncate text-muted">{failure.path || failure.detail}</span>
                   </li>
                 ))}

@@ -9,8 +9,10 @@ import type { UndoEntry } from './undo'
 import type { SyncAction } from './ComparePanel'
 import { ContextMenu } from './ContextMenu'
 import type { MenuItem } from './ContextMenu'
-import { PromptDialog } from './PromptDialog'
-import { ConfirmDialog } from './ConfirmDialog'
+const PromptDialog = lazy(() => import('./PromptDialog').then((m) => ({ default: m.PromptDialog })))
+const ConfirmDialog = lazy(() =>
+  import('./ConfirmDialog').then((m) => ({ default: m.ConfirmDialog })),
+)
 import type { CompressValues } from './CompressDialog'
 import { baseName, joinPath } from './paths'
 import { COMPRESS_EXTENSIONS, uniquePaths, type CompressFormat } from './api'
@@ -196,23 +198,25 @@ export function ModalContainer({
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
 
       {passwordPrompt && (
-        <PromptDialog
-          title={t('archive.passwordTitle')}
-          initial=""
-          password
-          hint={
-            passwordPrompt.wrong
-              ? t('archive.passwordWrong')
-              : t('archive.passwordHint', { name: baseName(passwordPrompt.archive) })
-          }
-          lang={lang}
-          onConfirm={(value) => {
-            const pending = passwordPrompt
-            setPasswordPrompt(null)
-            extractArchive(pending.archive, pending.dest, value)
-          }}
-          onClose={() => setPasswordPrompt(null)}
-        />
+        <Suspense fallback={null}>
+          <PromptDialog
+            title={t('archive.passwordTitle')}
+            initial=""
+            password
+            hint={
+              passwordPrompt.wrong
+                ? t('archive.passwordWrong')
+                : t('archive.passwordHint', { name: baseName(passwordPrompt.archive) })
+            }
+            lang={lang}
+            onConfirm={(value) => {
+              const pending = passwordPrompt
+              setPasswordPrompt(null)
+              extractArchive(pending.archive, pending.dest, value)
+            }}
+            onClose={() => setPasswordPrompt(null)}
+          />
+        </Suspense>
       )}
 
       <Suspense fallback={null}>
@@ -232,22 +236,24 @@ export function ModalContainer({
       </Suspense>
 
       {prompt && (
-        <PromptDialog
-          title={prompt.title}
-          initial={prompt.initial}
-          lang={lang}
-          onConfirm={(value) => {
-            const pending = prompt
-            prompt.submit(value)
-            setPrompt(null)
-            focusList(pending.paneId)
-          }}
-          onClose={() => {
-            const pending = prompt
-            setPrompt(null)
-            if (pending) focusList(pending.paneId)
-          }}
-        />
+        <Suspense fallback={null}>
+          <PromptDialog
+            title={prompt.title}
+            initial={prompt.initial}
+            lang={lang}
+            onConfirm={(value) => {
+              const pending = prompt
+              prompt.submit(value)
+              setPrompt(null)
+              focusList(pending.paneId)
+            }}
+            onClose={() => {
+              const pending = prompt
+              setPrompt(null)
+              if (pending) focusList(pending.paneId)
+            }}
+          />
+        </Suspense>
       )}
 
       <Suspense fallback={null}>
@@ -339,48 +345,52 @@ export function ModalContainer({
       </Suspense>
 
       {deleteConfirm && (
-        <ConfirmDialog
-          lang={lang}
-          title={t(deleteConfirm.permanent ? 'confirm.deleteTitle' : 'confirm.recycleTitle')}
-          message={t(
-            deleteConfirm.permanent ? 'confirm.deletePermanent' : 'confirm.recycle',
-            { count: deleteConfirm.names.length },
-          )}
-          items={deleteConfirm.names.map((name) => ({
-            name,
-            path: pathsFor(deleteConfirm.paneId, [name])[0],
-          }))}
-          confirmLabel={t(
-            deleteConfirm.permanent ? 'confirm.deletePermanentAction' : 'confirm.recycleAction',
-          )}
-          danger={deleteConfirm.permanent}
-          onConfirm={() => {
-            const pending = deleteConfirm
-            setDeleteConfirm(null)
-            focusList(pending.paneId)
-            runOp('delete', pathsFor(pending.paneId, pending.names), { permanent: pending.permanent })
-          }}
-          onClose={() => {
-            const pending = deleteConfirm
-            setDeleteConfirm(null)
-            if (pending) focusList(pending.paneId)
-          }}
-        />
+        <Suspense fallback={null}>
+          <ConfirmDialog
+            lang={lang}
+            title={t(deleteConfirm.permanent ? 'confirm.deleteTitle' : 'confirm.recycleTitle')}
+            message={t(
+              deleteConfirm.permanent ? 'confirm.deletePermanent' : 'confirm.recycle',
+              { count: deleteConfirm.names.length },
+            )}
+            items={deleteConfirm.names.map((name) => ({
+              name,
+              path: pathsFor(deleteConfirm.paneId, [name])[0],
+            }))}
+            confirmLabel={t(
+              deleteConfirm.permanent ? 'confirm.deletePermanentAction' : 'confirm.recycleAction',
+            )}
+            danger={deleteConfirm.permanent}
+            onConfirm={() => {
+              const pending = deleteConfirm
+              setDeleteConfirm(null)
+              focusList(pending.paneId)
+              runOp('delete', pathsFor(pending.paneId, pending.names), { permanent: pending.permanent })
+            }}
+            onClose={() => {
+              const pending = deleteConfirm
+              setDeleteConfirm(null)
+              if (pending) focusList(pending.paneId)
+            }}
+          />
+        </Suspense>
       )}
 
       {quitBusy !== null && (
-        <ConfirmDialog
-          lang={lang}
-          title={t('confirm.quitTitle')}
-          message={t('confirm.quitBusy', { count: quitBusy })}
-          confirmLabel={t('confirm.quitAnyway')}
-          danger
-          onConfirm={() => {
-            setQuitBusy(null)
-            void quitApp()
-          }}
-          onClose={() => setQuitBusy(null)}
-        />
+        <Suspense fallback={null}>
+          <ConfirmDialog
+            lang={lang}
+            title={t('confirm.quitTitle')}
+            message={t('confirm.quitBusy', { count: quitBusy })}
+            confirmLabel={t('confirm.quitAnyway')}
+            danger
+            onConfirm={() => {
+              setQuitBusy(null)
+              void quitApp()
+            }}
+            onClose={() => setQuitBusy(null)}
+          />
+        </Suspense>
       )}
 
       <Suspense fallback={null}>

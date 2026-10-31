@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { revealPath, searchCancel, searchStart, sortOrder } from './api'
 import type { ContentOptions } from './api'
-import { makeT } from './i18n'
+import { errorKey, makeT } from './i18n'
 import { formatSize, parentPath, volumeRoot } from './paths'
 import { FileIcon } from './icons'
 import { BASE_FONT_SIZE, clampFontSize, clampIconSize } from './fonts'
@@ -601,7 +601,7 @@ export function SearchOverlay({
           )}
           {error && (
             <div className="m-3 rounded border border-red-300 bg-red-50 p-2 text-[0.6875rem] text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200">
-              {error.code} {error.detail}
+              {t(errorKey(error.code))} {error.detail}
             </div>
           )}
 

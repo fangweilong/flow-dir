@@ -81,10 +81,6 @@ export function useLaunchAndTray({
       if (disposed) u1()
       else unlistens.push(u1)
 
-      const u2 = await listen<LaunchRequest>('flowdir:launch-request', (event) => openRequest(event.payload))
-      if (disposed) u2()
-      else unlistens.push(u2)
-
       if (setSearchOpen) {
         const u3 = await listen('flowdir:search', () => setSearchOpen(true))
         if (disposed) u3()

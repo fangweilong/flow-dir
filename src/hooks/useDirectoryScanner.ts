@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { MutableRefObject } from 'react'
 import { listen } from '@tauri-apps/api/event'
+import { errorKey, makeT } from '../i18n'
 import {
   cancelDir,
   drives,
@@ -413,7 +414,9 @@ export function useDirectoryScanner({
         const last = warned.get(pane.id) ?? 0
         if (Date.now() - last < 60_000) return
         warned.set(pane.id, Date.now())
-        showToast(event.payload.detail || event.payload.code)
+        showToast(
+          event.payload.detail || makeT(settingsRef.current.language)(errorKey(event.payload.code)),
+        )
       },
     ).then((fn) => {
       if (disposed) fn()

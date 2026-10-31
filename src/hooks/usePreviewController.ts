@@ -3,6 +3,7 @@ import type { PointerEvent as ReactPointerEvent } from 'react'
 import { previewExternal, previewInfo } from '../api'
 import type { PreviewInfo } from '../types'
 import type { Settings } from '../persist'
+import { errorKey } from '../i18n'
 import type { Translate } from '../i18n'
 import type { TabState } from '../workspace'
 import { joinPath } from '../paths'
@@ -102,7 +103,7 @@ export function usePreviewController({
     (target: string) => {
       void previewExternal(target).catch((err: unknown) => {
         const code = errorCode(err)
-        showToast(t(code === 'NO_RULE' ? 'preview.externalMissing' : 'preview.externalFailed', { code }))
+        showToast(t(code === 'NO_RULE' ? 'preview.externalMissing' : 'preview.externalFailed', { code: t(errorKey(code)) }))
       })
     },
     [showToast, t],

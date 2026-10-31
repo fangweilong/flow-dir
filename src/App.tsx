@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { MenuItem } from './ContextMenu'
-import { OpsPanel } from './OpsPanel'
 import { ModalContainer } from './ModalContainer'
 import { useFileOperations } from './hooks/useFileOperations'
 import { useDragAndDrop } from './hooks/useDragAndDrop'
@@ -24,8 +23,6 @@ import { TitleBar } from './components/TitleBar'
 import { GUTTER, ResizeHandle } from './components/SplitView'
 import { SidebarPanel } from './components/SidebarPanel'
 import { PaneNodeRenderer } from './components/PaneNodeRenderer'
-import { PreviewPanel } from './PreviewPanel'
-import { SearchOverlay } from './SearchOverlay'
 import { refreshIconCache } from './icons'
 import { paneIds } from './workspace'
 import {
@@ -36,11 +33,20 @@ import {
   titlebarMenu,
 } from './api'
 import type { Drive, Lang, ListData, Place } from './types'
-import { makeT } from './i18n'
+import { errorKey, makeT } from './i18n'
 import { DEFAULT_SETTINGS } from './persist'
 import type { Settings } from './persist'
 import { isDir, isFsPath, isInsideArchive, joinPath } from './paths'
 import { formatBinding, resolveShortcuts } from './shortcuts'
+
+// Non-first-paint surfaces stay out of the main chunk: preview, search and the operation
+// stack are only mounted on demand (AGENTS: 低频面板按需加载).
+const PreviewPanel = lazy(() => import('./PreviewPanel').then((m) => ({ default: m.PreviewPanel })))
+const SearchOverlay = lazy(() =>
+  import('./SearchOverlay').then((m) => ({ default: m.SearchOverlay })),
+)
+const OpsPanel = lazy(() => import('./OpsPanel').then((m) => ({ default: m.OpsPanel })))
+
 const errorCode = (err: unknown): string =>
   err && typeof err === 'object' && 'code' in err && typeof err.code === 'string'
     ? err.code
@@ -370,7 +376,7 @@ export default function App() {
             })
             return
           }
-          showToast(t('op.failed', { code }))
+          showToast(t('op.failed', { code: t(errorKey(code)) }))
         })
     },
     [showToast, t],
@@ -647,43 +653,49 @@ export default function App() {
         {previewOpen && (
           <>
             <ResizeHandle onPointerDown={startPreviewResize} />
-            <PreviewPanel
-              info={preview.info}
-              loading={preview.loading}
-              error={preview.error}
-              name={previewName}
-              path={activeTab?.path && previewName ? joinPath(activeTab.path, previewName) : ''}
-              lang={lang}
-              width={previewWidth}
-              maxWidth={
-                settings.sidebarOpen
-                  ? `calc(50% - ${GUTTER * 2}px - ${sidebarWidth}px)`
-                  : `calc(50% - ${GUTTER}px)`
-              }
-              externalKey={formatBinding(keys.externalPreview)}
-              onClose={() => setPreviewOpen(false)}
-              onOpenExternal={openExternalPreview}
-              onDownload={downloadPreview}
-            />
+            <Suspense fallback={null}>
+              <PreviewPanel
+                info={preview.info}
+                loading={preview.loading}
+                error={preview.error}
+                name={previewName}
+                path={activeTab?.path && previewName ? joinPath(activeTab.path, previewName) : ''}
+                lang={lang}
+                width={previewWidth}
+                maxWidth={
+                  settings.sidebarOpen
+                    ? `calc(50% - ${GUTTER * 2}px - ${sidebarWidth}px)`
+                    : `calc(50% - ${GUTTER}px)`
+                }
+                externalKey={formatBinding(keys.externalPreview)}
+                onClose={() => setPreviewOpen(false)}
+                onOpenExternal={openExternalPreview}
+                onDownload={downloadPreview}
+              />
+            </Suspense>
           </>
         )}
       </div>
 
-      <OpsPanel
-        ops={Object.values(ops)}
-        lang={lang}
-        elevating={elevating}
-        onRetryElevated={retryElevated}
-        onCancel={(opId) => void opCancel(opId)}
-        onDismiss={(opId) => {
-          setOps((prev) => {
-            if (!(opId in prev)) return prev
-            const next = { ...prev }
-            delete next[opId]
-            return next
-          })
-        }}
-      />
+      {Object.keys(ops).length > 0 && (
+        <Suspense fallback={null}>
+          <OpsPanel
+            ops={Object.values(ops)}
+            lang={lang}
+            elevating={elevating}
+            onRetryElevated={retryElevated}
+            onCancel={(opId) => void opCancel(opId)}
+            onDismiss={(opId) => {
+              setOps((prev) => {
+                if (!(opId in prev)) return prev
+                const next = { ...prev }
+                delete next[opId]
+                return next
+              })
+            }}
+          />
+        </Suspense>
+      )}
 
       {toast && (
         <div className="pointer-events-none fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-md bg-fg px-3 py-1.5 text-[0.75rem] font-medium text-surface shadow-lg">
@@ -740,25 +752,27 @@ export default function App() {
       />
 
       {searchOpen && activeTab && (
-        <SearchOverlay
-          root={activeTab.path || homeRef.current}
-          openTabs={openTabsForSearch}
-          lang={lang}
-          fontSize={settings.fontSize}
-          iconSize={settings.iconSize}
-          preferEverything={settings.useEverything}
-          showHidden={settings.showHidden}
-          onClose={() => {
-            setSearchOpen(false)
-            if (activePane) focusList(activePane.id)
-          }}
-          onActivate={(item) => {
-            if (item.isDir) navigate(activeTab.id, item.path)
-            else openTarget(item.path)
-          }}
-          onOpen={(folder) => navigate(activeTab.id, folder)}
-          onDelete={(paths) => runOp('delete', paths)}
-        />
+        <Suspense fallback={null}>
+          <SearchOverlay
+            root={activeTab.path || homeRef.current}
+            openTabs={openTabsForSearch}
+            lang={lang}
+            fontSize={settings.fontSize}
+            iconSize={settings.iconSize}
+            preferEverything={settings.useEverything}
+            showHidden={settings.showHidden}
+            onClose={() => {
+              setSearchOpen(false)
+              if (activePane) focusList(activePane.id)
+            }}
+            onActivate={(item) => {
+              if (item.isDir) navigate(activeTab.id, item.path)
+              else openTarget(item.path)
+            }}
+            onOpen={(folder) => navigate(activeTab.id, folder)}
+            onDelete={(paths) => runOp('delete', paths)}
+          />
+        </Suspense>
       )}
     </div>
   )

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
+import { errorKey } from '../../i18n'
 import type { Translate } from '../../i18n'
 import type { Settings } from '../../persist'
 import type { AppInfo, Lang, UpdateProgress, UpdateStatus } from '../../types'
@@ -74,7 +75,7 @@ export function UpdatesSection({ settings, info, lang, onChange, t, visible }: U
   const updateMessage = checking
     ? t('settings.updateChecking')
     : update?.error
-      ? t('settings.updateFailed', { code: update.error.code })
+      ? t('settings.updateFailed', { code: t(errorKey(update.error.code)) })
       : update?.available
         ? t('settings.updateAvailable', { version: update.latest ?? '' })
         : update?.latest

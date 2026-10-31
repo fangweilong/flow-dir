@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { MutableRefObject } from 'react'
 import type { OpKind, OpProgress } from '../types'
 import type { Settings } from '../persist'
+import { errorKey } from '../i18n'
 import type { Translate } from '../i18n'
 import type { SyncAction } from '../ComparePanel'
 import {
@@ -183,7 +184,7 @@ export function useFileOperations({
             progress.error?.code === 'ACCESS_DENIED' ||
             progress.failed.some((failure) => failure.code === 'ACCESS_DENIED')
           if (progress.error) {
-            announce(t('op.failed', { code: progress.error.code }))
+            announce(t('op.failed', { code: t(errorKey(progress.error.code)) }))
             options?.onDone?.(false)
             if (!denied) drop(5000)
             return
@@ -219,7 +220,7 @@ export function useFileOperations({
           drop(800)
         },
       ).catch((e: unknown) => {
-        showToast(t('op.failed', { code: String(e) }))
+        showToast(t('op.failed', { code: t(errorKey(errorCode(e))) }))
         options?.onDone?.(false)
         drop(4000)
       })
@@ -237,7 +238,7 @@ export function useFileOperations({
         .then((report) => {
           refreshPanes()
           if (report.error) {
-            showToast(t('op.failed', { code: report.error.code }))
+            showToast(t('op.failed', { code: t(errorKey(report.error.code)) }))
           } else if (report.aborted) {
             showToast(t('op.canceled'))
           } else if (report.failedTotal > 0) {
@@ -260,7 +261,7 @@ export function useFileOperations({
         })
         .catch((err: unknown) => {
           const code = errorCode(err)
-          showToast(code === 'ELEVATION_CANCELED' ? t('op.canceled') : t('op.failed', { code }))
+          showToast(code === 'ELEVATION_CANCELED' ? t('op.canceled') : t('op.failed', { code: t(errorKey(code)) }))
         })
         .finally(() => setElevating(null))
     },
@@ -305,7 +306,7 @@ export function useFileOperations({
             drop(3000)
             return
           }
-          showToast(t('op.failed', { code }))
+          showToast(t('op.failed', { code: t(errorKey(code)) }))
           drop(5000)
           return
         }
@@ -329,7 +330,7 @@ export function useFileOperations({
         showToast(t('op.done'))
         drop(800)
       }).catch((e: unknown) => {
-        showToast(t('op.failed', { code: errorCode(e) }))
+        showToast(t('op.failed', { code: t(errorKey(errorCode(e))) }))
         drop(4000)
       })
     },
@@ -368,7 +369,7 @@ export function useFileOperations({
         setOps((prev) => (prev[opId] ? { ...prev, [opId]: progress } : prev))
         if (!progress.done) return
         if (progress.error) {
-          showToast(t('op.failed', { code: progress.error.code }))
+          showToast(t('op.failed', { code: t(errorKey(progress.error.code)) }))
           drop(5000)
           return
         }
@@ -381,7 +382,7 @@ export function useFileOperations({
         showToast(t('op.done'))
         drop(800)
       }).catch((e: unknown) => {
-        showToast(t('op.failed', { code: errorCode(e) }))
+        showToast(t('op.failed', { code: t(errorKey(errorCode(e))) }))
         drop(4000)
       })
     },
@@ -397,7 +398,7 @@ export function useFileOperations({
           if (auto) runCompress(paths, dest, format, 6, null)
           else setCompressTarget({ paths, dir, format, name: baseName(dest) })
         })
-        .catch((e: unknown) => showToast(t('op.failed', { code: errorCode(e) })))
+        .catch((e: unknown) => showToast(t('op.failed', { code: t(errorKey(errorCode(e))) })))
     },
     [runCompress, showToast, t],
   )
@@ -496,7 +497,7 @@ export function useFileOperations({
             refreshPanes()
             return report.restored.length > 0
           } catch (e: unknown) {
-            showToast(t('op.failed', { code: errorCode(e) }))
+            showToast(t('op.failed', { code: t(errorKey(errorCode(e))) }))
             return false
           }
         }

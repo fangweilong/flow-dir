@@ -13,7 +13,7 @@ import {
   updateCheck,
 } from '../api'
 import type { Drive, Place, UpdateStatus } from '../types'
-import { makeT } from '../i18n'
+import { errorKey, makeT } from '../i18n'
 import {
   DEFAULT_LIST_FONT_SIZE,
   DEFAULT_NAV_FONT_SIZE,
@@ -104,7 +104,8 @@ export function useAppSettings({
       const now = Date.now()
       if (now - lastSaveError.current < 10_000) return
       lastSaveError.current = now
-      showToast(makeT(settingsRef.current.language)('toast.saveFailed', { code: errorCode(err) }))
+      const tr = makeT(settingsRef.current.language)
+      showToast(tr('toast.saveFailed', { code: tr(errorKey(errorCode(err))) }))
     },
     [showToast],
   )

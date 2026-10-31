@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { dupStart, exportText, hashStart, pickFolder, toolCancel, toolPause } from './api'
-import { makeT, type Translate } from './i18n'
+import { errorKey, makeT, type Translate } from './i18n'
 import type { DupGroup, DupProgress, HashProgress } from './types'
 import type { Lang } from './types'
 
@@ -134,7 +134,11 @@ export function FileToolsPanel({
       }
     } catch (err) {
       setRunning(false)
-      setError(err && typeof err === 'object' && 'code' in err ? String((err as { code: string }).code) : String(err))
+      setError(
+        err && typeof err === 'object' && 'code' in err
+          ? t(errorKey(String((err as { code: string }).code)))
+          : String(err),
+      )
     }
   }
 
