@@ -119,7 +119,11 @@ export const AddressBar = forwardRef<AddressBarHandle, AddressBarProps>(function
           onNavigate(tab.id, next)
           return
         }
-        const executed = await executeAddressCommand(expanded, tab.path || undefined)
+        // `expandPath` strips the surrounding quotes, but the executor splits a command
+        // line on whitespace, so `"C:\Program Files\app.exe"` must be re-quoted.
+        const lookedQuoted = raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')
+        const command = lookedQuoted ? `"${expanded}"` : expanded
+        const executed = await executeAddressCommand(command, tab.path || undefined)
           .then(() => true)
           .catch(() => false)
         if (seq !== addressSeq.current) return
@@ -215,6 +219,7 @@ export const AddressBar = forwardRef<AddressBarHandle, AddressBarProps>(function
           }}
           onBlur={closeAddressEdit}
           onKeyDown={(ev) => {
+            if (ev.nativeEvent.isComposing) return
             if (ev.key === 'Enter') {
               ev.preventDefault()
               commitAddress()

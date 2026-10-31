@@ -12,6 +12,7 @@ import {
   opRetryElevated,
   opStart,
   pathIsDir,
+  pathsExist,
   restoreRecycle,
   taskbarProgress,
   uniquePaths,
@@ -233,11 +234,42 @@ export function useFileOperations({
     (opId: string) => {
       const request = opRequests.current[opId]
       if (!request || elevating) return
+      // Replay only the items that were denied. A rename keeps its full batch because its
+      // per-item names are positional.
+      const failedPaths = (ops[opId]?.failed ?? []).map((failure) => failure.path)
+      const canSubset = request.kind !== 'rename' && !request.newName && !request.newNames
+      const subsetSources = canSubset
+        ? request.sources.filter((source) => failedPaths.includes(source))
+        : request.sources
+      // Only the shell-level error carries no per-item paths; then the whole request is
+      // the right unit to retry.
+      const retry = subsetSources.length ? { ...request, sources: subsetSources } : request
       setElevating(opId)
       showToast(t('op.elevating'))
-      opRetryElevated(request)
+      opRetryElevated(retry)
         .then((report) => {
           refreshPanes()
+          const failed = new Set(report.failed.map((failure) => failure.path))
+          const succeeded = retry.sources.filter((source) => !failed.has(source))
+          // The elevated run does not go through `runOp`, so its history entry has to be
+          // recorded here or Ctrl+Z would skip over it.
+          if (!report.error && !report.aborted && succeeded.length) {
+            const dirs = Array.from(
+              new Set([
+                ...(retry.targetDir ? [retry.targetDir] : []),
+                ...succeeded.map((source) => parentPath(source)),
+              ]),
+            )
+            const entry = undoEntryFor(retry.kind, succeeded, {
+              targetDir: retry.targetDir,
+              newName: retry.newName,
+              newNames: retry.newNames,
+              permanent: retry.permanent,
+              skip: report.failed.map((failure) => failure.path),
+            })
+            if (entry) pushUndo(entry, retry, dirs)
+            else if (retry.kind === 'delete' && retry.permanent) lastIrreversible.current = true
+          }
           if (report.error) {
             showToast(t('op.failed', { code: t(errorKey(report.error.code)) }))
           } else if (report.aborted) {
@@ -245,7 +277,7 @@ export function useFileOperations({
           } else if (report.failedTotal > 0) {
             showToast(
               t('op.partial', {
-                ok: Math.max(0, request.sources.length - report.failedTotal),
+                ok: Math.max(0, retry.sources.length - report.failedTotal),
                 failed: report.failedTotal,
               }),
             )
@@ -266,7 +298,7 @@ export function useFileOperations({
         })
         .finally(() => setElevating(null))
     },
-    [elevating, refreshPanes, showToast, t],
+    [elevating, ops, pushUndo, refreshPanes, showToast, t],
   )
 
   const extractArchive = useCallback(
@@ -490,10 +522,19 @@ export function useFileOperations({
           )
           return results.every(Boolean)
         }
-        case 'copy':
-          return runStep('delete', entry.created, {
-            after: afterDirs(entry.created.map(parentPath)),
+        case 'copy': {
+          // A copy the user already removed is already undone; deleting nothing must not
+          // wedge the whole history.
+          const flags = await pathsExist(entry.created)
+          const existing = entry.created.filter((_, index) => flags[index])
+          if (!existing.length) {
+            showToast(t('undo.done'))
+            return true
+          }
+          return runStep('delete', existing, {
+            after: afterDirs(existing.map(parentPath)),
           })
+        }
         case 'delete': {
           try {
             const report = await restoreRecycle(entry.paths)
@@ -506,7 +547,9 @@ export function useFileOperations({
             }
             for (const path of report.restored) invalidateTree(parentPath(path))
             refreshPanes()
-            return report.restored.length > 0
+            // Entries that no longer exist in the Recycle Bin can never be restored;
+            // reporting failure would block every older entry behind this one.
+            return true
           } catch (e: unknown) {
             showToast(t('op.failed', { code: t(errorKey(errorCode(e))) }))
             return false
@@ -517,22 +560,33 @@ export function useFileOperations({
     [invalidateGit, invalidateTree, refreshPanes, runStep, showToast, t],
   )
 
+  // One reversal at a time: two overlapping runs would race on the same paths and could
+  // pop the wrong entry off the stack.
+  const undoBusy = useRef(false)
+
   const undoLast = useCallback(() => {
+    if (undoBusy.current) return
     const entry = undoStack.current[undoStack.current.length - 1]
     if (!entry) {
       showToast(t(lastIrreversible.current ? 'undo.irreversible' : 'undo.empty'))
       return
     }
-    void applyUndo(entry).then((ok) => {
-      if (!ok) return
-      undoStack.current.pop()
-      redoStack.current.push(entry)
-      while (redoStack.current.length > undoLimit()) redoStack.current.shift()
-      setHistoryEpoch((epoch) => epoch + 1)
-    })
+    undoBusy.current = true
+    void applyUndo(entry)
+      .then((ok) => {
+        if (!ok) return
+        undoStack.current.pop()
+        redoStack.current.push(entry)
+        while (redoStack.current.length > undoLimit()) redoStack.current.shift()
+        setHistoryEpoch((epoch) => epoch + 1)
+      })
+      .finally(() => {
+        undoBusy.current = false
+      })
   }, [applyUndo, showToast, t, undoLimit])
 
   const redoLast = useCallback(() => {
+    if (undoBusy.current) return
     const entry = redoStack.current[redoStack.current.length - 1]
     if (!entry) {
       showToast(t('redo.empty'))
@@ -545,37 +599,47 @@ export function useFileOperations({
         invalidateGit(dir)
       }
     }
+    undoBusy.current = true
     void runStep(request.kind, request.sources, {
       targetDir: request.targetDir,
       newName: request.newName,
       newNames: request.newNames,
       overwrite: request.overwrite,
-      permanent: request.permanent,
       after: afterDirs,
-    }).then((ok: boolean) => {
-      if (!ok) return
-      redoStack.current.pop()
-      undoStack.current.push(entry)
-      while (undoStack.current.length > undoLimit()) undoStack.current.shift()
-      setHistoryEpoch((epoch) => epoch + 1)
     })
+      .then((ok: boolean) => {
+        if (!ok) return
+        redoStack.current.pop()
+        undoStack.current.push(entry)
+        while (undoStack.current.length > undoLimit()) undoStack.current.shift()
+        setHistoryEpoch((epoch) => epoch + 1)
+      })
+      .finally(() => {
+        undoBusy.current = false
+      })
   }, [invalidateGit, invalidateTree, runStep, showToast, t, undoLimit])
 
   const undoTo = useCallback(
     async (targetId: number) => {
+      if (undoBusy.current) return
       const index = undoStack.current.findIndex((entry) => entry.id === targetId)
       if (index === -1) return
-      const count = undoStack.current.length - index
-      for (let i = 0; i < count; i += 1) {
-        const entry = undoStack.current[undoStack.current.length - 1]
-        if (!entry) break
-        const ok = await applyUndo(entry)
-        if (!ok) break
-        undoStack.current.pop()
-        redoStack.current.push(entry)
-        while (redoStack.current.length > undoLimit()) redoStack.current.shift()
+      undoBusy.current = true
+      try {
+        const count = undoStack.current.length - index
+        for (let i = 0; i < count; i += 1) {
+          const entry = undoStack.current[undoStack.current.length - 1]
+          if (!entry) break
+          const ok = await applyUndo(entry)
+          if (!ok) break
+          undoStack.current.pop()
+          redoStack.current.push(entry)
+          while (redoStack.current.length > undoLimit()) redoStack.current.shift()
+        }
+        setHistoryEpoch((epoch) => epoch + 1)
+      } finally {
+        undoBusy.current = false
       }
-      setHistoryEpoch((epoch) => epoch + 1)
     },
     [applyUndo, undoLimit],
   )

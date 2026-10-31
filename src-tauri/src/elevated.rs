@@ -174,13 +174,13 @@ fn run_worker(
     let budget = Instant::now() + Duration::from_millis(u64::from(WAIT_TIMEOUT_MS));
 
     let result = (|| {
-        connect(pipe.0, event.0, &cancel)?;
+        connect(pipe.0, event.0, &cancel, budget)?;
         let payload = serde_json::to_vec(&Payload {
             nonce: nonce.to_string(),
             request,
         })
         .map_err(|err| ApiError::new("ELEVATED", format!("request: {err}")))?;
-        write_message(pipe.0, event.0, &payload, &cancel)?;
+        write_message(pipe.0, event.0, &payload, &cancel, budget)?;
         let bytes = read_message(pipe.0, event.0, &cancel, budget)?;
         serde_json::from_slice(&bytes)
             .map_err(|err| ApiError::new("ELEVATED_NO_RESULT", err.to_string()))
@@ -238,7 +238,12 @@ fn open_client(name: &str) -> Result<OwnedHandle, ApiError> {
     Ok(OwnedHandle(handle))
 }
 
-fn connect(pipe: HANDLE, event: HANDLE, cancel: &AtomicBool) -> Result<(), ApiError> {
+fn connect(
+    pipe: HANDLE,
+    event: HANDLE,
+    cancel: &AtomicBool,
+    budget: Instant,
+) -> Result<(), ApiError> {
     unsafe {
         let mut overlap = OVERLAPPED {
             hEvent: event,
@@ -257,18 +262,20 @@ fn connect(pipe: HANDLE, event: HANDLE, cancel: &AtomicBool) -> Result<(), ApiEr
                         format!("ConnectNamedPipe: {}", code.0),
                     ));
                 }
-                wait_io(pipe, &mut overlap, event, cancel).map(|_| ())
+                wait_io(pipe, &mut overlap, event, cancel, budget).map(|_| ())
             }
         }
     }
 }
 
-/// Waits for an overlapped operation in short slices so cancellation stays responsive.
+/// Waits for an overlapped operation in short slices so cancellation and the overall
+/// deadline stay responsive.
 unsafe fn wait_io(
     handle: HANDLE,
     overlap: &mut OVERLAPPED,
     event: HANDLE,
     cancel: &AtomicBool,
+    budget: Instant,
 ) -> Result<u32, ApiError> {
     loop {
         if cancel.load(Ordering::Relaxed) {
@@ -282,7 +289,15 @@ unsafe fn wait_io(
                     .map_err(|err| ApiError::new("ELEVATED_IO", err.to_string()))?;
                 return Ok(bytes);
             }
-            WAIT_TIMEOUT => {}
+            WAIT_TIMEOUT => {
+                if Instant::now() >= budget {
+                    let _ = CancelIoEx(handle, Some(overlap));
+                    return Err(ApiError::new(
+                        "ELEVATED_TIMEOUT",
+                        "the elevated operation is still running",
+                    ));
+                }
+            }
             _ => return Err(ApiError::new("ELEVATED_IO", "wait failed")),
         }
     }
@@ -293,11 +308,12 @@ fn write_message(
     event: HANDLE,
     bytes: &[u8],
     cancel: &AtomicBool,
+    budget: Instant,
 ) -> Result<(), ApiError> {
     let len = u32::try_from(bytes.len())
         .map_err(|_| ApiError::new("ELEVATED", "request too large"))?;
-    write_all(pipe, event, &len.to_le_bytes(), cancel)?;
-    write_all(pipe, event, bytes, cancel)
+    write_all(pipe, event, &len.to_le_bytes(), cancel, budget)?;
+    write_all(pipe, event, bytes, cancel, budget)
 }
 
 fn write_all(
@@ -305,6 +321,7 @@ fn write_all(
     event: HANDLE,
     bytes: &[u8],
     cancel: &AtomicBool,
+    budget: Instant,
 ) -> Result<(), ApiError> {
     let mut offset = 0;
     while offset < bytes.len() {
@@ -321,7 +338,7 @@ fn write_all(
                     count
                 }
                 Err(_) if GetLastError() == ERROR_IO_PENDING => {
-                    wait_io(pipe, &mut overlap, event, cancel)?
+                    wait_io(pipe, &mut overlap, event, cancel, budget)?
                 }
                 Err(_) => {
                     let code = GetLastError();
@@ -385,7 +402,7 @@ fn read_exact(
                     count
                 }
                 Err(_) if GetLastError() == ERROR_IO_PENDING => {
-                    wait_io(pipe, &mut overlap, event, cancel)?
+                    wait_io(pipe, &mut overlap, event, cancel, budget)?
                 }
                 Err(_) => {
                     let code = GetLastError();

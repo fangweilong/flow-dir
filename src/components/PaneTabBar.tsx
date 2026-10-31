@@ -44,7 +44,9 @@ export function PaneTabBar({
     <div
       data-tabbar
       onDoubleClick={(ev) => {
-        if ((ev.target as HTMLElement).closest('[data-tab]')) return
+        // The + button and the scroll/overflow controls live in the same bar; a double
+        // click on them must not also create a tab.
+        if ((ev.target as HTMLElement).closest('[data-tab], button, [data-tab-list]')) return
         onNewTab()
       }}
       style={{ height: tabBarHeight }}

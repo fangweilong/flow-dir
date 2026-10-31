@@ -142,26 +142,43 @@ export function useWorkspaceLayout({
     )
   }, [])
 
+  /** Cancels in-flight scans and remembers the closed tabs; `closeOthers` needs the same. */
+  const dropTabs = useCallback(
+    (tabIds: string[]) => {
+      const current = wsRef.current
+      if (!current || !tabIds.length) return
+      for (const tabId of tabIds) {
+        const closing = current.tabs[tabId]
+        if (closing?.path) {
+          const limit = Math.max(1, settingsRef.current.closedTabLimit)
+          const stack = closedTabs.current
+          stack.push({ tab: closing, list: listDataRef.current[tabId] })
+          if (stack.length > limit) stack.splice(0, stack.length - limit)
+        }
+        onCancelDir?.(tabId)
+      }
+      setListData?.((prev) => {
+        const next = { ...prev }
+        let touched = false
+        for (const tabId of tabIds) {
+          if (tabId in next) {
+            delete next[tabId]
+            touched = true
+          }
+        }
+        return touched ? next : prev
+      })
+    },
+    [listDataRef, onCancelDir, setListData, settingsRef],
+  )
+
   const closeTab = useCallback(
     (paneId: string, tabId: string) => {
       const current = wsRef.current
       if (!current) return
       const pane = current.panes[paneId]
       if (!pane) return
-      const closing = current.tabs[tabId]
-      if (closing?.path) {
-        const limit = Math.max(1, settingsRef.current.closedTabLimit)
-        const stack = closedTabs.current
-        stack.push({ tab: closing, list: listDataRef.current[tabId] })
-        if (stack.length > limit) stack.splice(0, stack.length - limit)
-      }
-      onCancelDir?.(tabId)
-      setListData?.((prev) => {
-        if (!(tabId in prev)) return prev
-        const next = { ...prev }
-        delete next[tabId]
-        return next
-      })
+      dropTabs([tabId])
 
       const remaining = pane.tabIds.filter((id) => id !== tabId)
       const single = paneIds(current.root).length === 1
@@ -206,7 +223,7 @@ export function useWorkspaceLayout({
         return { ...prev, panes, tabs }
       })
     },
-    [listDataRef, onCancelDir, setListData, settingsRef],
+    [dropTabs],
   )
 
   const reopenTab = useCallback(() => {
@@ -258,30 +275,48 @@ export function useWorkspaceLayout({
   }, [])
 
   const closeOthers = useCallback((paneId: string, tabId: string) => {
+    const current = wsRef.current
+    if (!current) return
+    const pane = current.panes[paneId]
+    if (!pane) return
+    const keep = pane.tabIds.filter((id) => id === tabId || current.tabs[id]?.pinned)
+    dropTabs(pane.tabIds.filter((id) => !keep.includes(id)))
     setWs((prev) => {
       if (!prev) return prev
-      const pane = prev.panes[paneId]
-      if (!pane) return prev
-      const keep = pane.tabIds.filter((id) => id === tabId || prev.tabs[id]?.pinned)
+      const live = prev.panes[paneId]
+      if (!live) return prev
+      const liveKeep = live.tabIds.filter((id) => id === tabId || prev.tabs[id]?.pinned)
       const tabs: Record<string, TabState> = {}
-      for (const id of keep) tabs[id] = prev.tabs[id]
-      return { ...prev, tabs, panes: { ...prev.panes, [paneId]: { ...pane, tabIds: keep, activeTabId: tabId } } }
+      for (const id of liveKeep) tabs[id] = prev.tabs[id]
+      return {
+        ...prev,
+        tabs,
+        panes: { ...prev.panes, [paneId]: { ...live, tabIds: liveKeep, activeTabId: tabId } },
+      }
     })
-  }, [])
+  }, [dropTabs])
 
   const closeRight = useCallback((paneId: string, tabId: string) => {
+    const current = wsRef.current
+    if (!current) return
+    const pane = current.panes[paneId]
+    if (!pane) return
+    const index = pane.tabIds.indexOf(tabId)
+    if (index < 0) return
+    const keep = pane.tabIds.filter((id, at) => at <= index || current.tabs[id]?.pinned)
+    dropTabs(pane.tabIds.filter((id) => !keep.includes(id)))
     setWs((prev) => {
       if (!prev) return prev
-      const pane = prev.panes[paneId]
-      if (!pane) return prev
-      const index = pane.tabIds.indexOf(tabId)
-      if (index < 0) return prev
-      const keep = pane.tabIds.filter((id, at) => at <= index || prev.tabs[id]?.pinned)
+      const live = prev.panes[paneId]
+      if (!live) return prev
+      const at = live.tabIds.indexOf(tabId)
+      if (at < 0) return prev
+      const liveKeep = live.tabIds.filter((id, index) => index <= at || prev.tabs[id]?.pinned)
       const tabs: Record<string, TabState> = {}
-      for (const id of keep) tabs[id] = prev.tabs[id]
-      return { ...prev, tabs, panes: { ...prev.panes, [paneId]: { ...pane, tabIds: keep } } }
+      for (const id of liveKeep) tabs[id] = prev.tabs[id]
+      return { ...prev, tabs, panes: { ...prev.panes, [paneId]: { ...live, tabIds: liveKeep } } }
     })
-  }, [])
+  }, [dropTabs])
 
   const togglePin = useCallback((paneId: string, tabId: string) => {
     setWs((prev) => {

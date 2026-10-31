@@ -118,7 +118,7 @@ pub struct OpState {
 
 #[derive(Clone)]
 struct Denied {
-    fingerprint: String,
+    request: Request,
     at: Instant,
 }
 
@@ -180,23 +180,38 @@ impl OpState {
         denied.insert(
             request.op_id.clone(),
             Denied {
-                fingerprint: request.fingerprint(),
+                request: request.clone(),
                 at: Instant::now(),
             },
         );
     }
 
-    /// True exactly once for a request that matches a recorded `ACCESS_DENIED` run.
+    /// True exactly once for a retry of a recorded `ACCESS_DENIED` run. The retry may
+    /// carry a subset of the original sources (the items that actually failed) as long as
+    /// every other argument is identical.
     pub fn take_denied(&self, request: &Request) -> bool {
         let mut denied = self.denied.lock().unwrap();
         let Some(entry) = denied.get(&request.op_id) else {
             return false;
         };
-        if entry.fingerprint != request.fingerprint() {
-            return false;
-        }
         if entry.at.elapsed() >= std::time::Duration::from_secs(600) {
             denied.remove(&request.op_id);
+            return false;
+        }
+        let original = &entry.request;
+        let same_arguments = original.kind == request.kind
+            && original.target_dir == request.target_dir
+            && original.new_name == request.new_name
+            && original.new_names == request.new_names
+            && original.permanent == request.permanent
+            && original.overwrite == request.overwrite;
+        let subset = !request.sources.is_empty()
+            && request.sources.len() <= original.sources.len()
+            && request
+                .sources
+                .iter()
+                .all(|source| original.sources.contains(source));
+        if !same_arguments || !subset {
             return false;
         }
         denied.remove(&request.op_id);
@@ -236,7 +251,7 @@ pub struct ElevatedReport {
     pub error: Option<ApiError>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Request {
     pub op_id: String,
@@ -250,26 +265,6 @@ pub struct Request {
     /// Sync previews answer the shell's replace prompt up front; ordinary copies keep it.
     #[serde(default)]
     pub overwrite: bool,
-}
-
-impl Request {
-    /// Identifies the operation and its exact arguments, so an elevated retry cannot be
-    /// pointed at a different target than the run that was actually denied.
-    pub fn fingerprint(&self) -> String {
-        format!(
-            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
-            self.kind,
-            self.sources.join("\u{1f}"),
-            self.target_dir.as_deref().unwrap_or(""),
-            self.new_name.as_deref().unwrap_or(""),
-            self.new_names
-                .as_ref()
-                .map(|names| names.join("\u{1f}"))
-                .unwrap_or_default(),
-            self.permanent,
-            self.overwrite
-        )
-    }
 }
 
 /// Checks a request before it touches the shell; used by both the GUI path and the
@@ -407,7 +402,14 @@ pub fn start(
 }
 
 fn outcome_denied(outcome: &Outcome) -> bool {
-    outcome.failed.iter().any(|item| item.code == "ACCESS_DENIED")
+    outcome
+        .failed
+        .iter()
+        .any(|item| item.code == "ACCESS_DENIED")
+        || outcome
+            .error
+            .as_ref()
+            .is_some_and(|error| error.code == "ACCESS_DENIED")
 }
 
 /// Runs the operation body and turns a panic into a normal failure: `finish` still runs,
@@ -525,9 +527,11 @@ fn perform(
         // replace/overwrite prompts: copies and moves keep asking through IFileOperation.
         // Deletes are confirmed in the app first, so the permanent-delete prompt is redundant;
         // a Recycle Bin delete keeps FOF_WANTNUKEWARNING in case the shell has to nuke instead.
-        let mut flags = FOF_SILENT | FOF_WANTNUKEWARNING | FOF_NOERRORUI;
+        let mut flags = FOF_SILENT | FOF_NOERRORUI;
         if !request.permanent {
-            flags |= FOF_ALLOWUNDO;
+            // `FOF_WANTNUKEWARNING` overrides `FOF_NOCONFIRMATION`, so it must not be set
+            // for a Shift+Delete the app already confirmed.
+            flags |= FOF_ALLOWUNDO | FOF_WANTNUKEWARNING;
         }
         // A sync preview already showed every overwrite; asking per file would defeat it.
         if request.overwrite {
@@ -968,6 +972,36 @@ mod tests {
         assert_eq!(error.code, "PANIC");
         assert!(error.detail.contains("boom"), "{}", error.detail);
         assert!(!outcome.aborted);
+    }
+
+    #[test]
+    fn elevated_retry_accepts_the_denied_subset_only_once() {
+        let state = OpState::default();
+        let original = Request {
+            op_id: "op-denied".into(),
+            kind: "copy".into(),
+            sources: vec!["C:\\a.txt".into(), "C:\\b.txt".into()],
+            target_dir: Some("C:\\dest".into()),
+            new_name: None,
+            new_names: None,
+            permanent: false,
+            overwrite: false,
+        };
+        state.record_denied(&original);
+        let subset = Request {
+            sources: vec!["C:\\b.txt".into()],
+            ..original.clone()
+        };
+        assert!(state.take_denied(&subset));
+        assert!(!state.take_denied(&subset), "the record is consumed");
+
+        // A retry aimed at another destination must not be elevated.
+        state.record_denied(&original);
+        let retargeted = Request {
+            target_dir: Some("C:\\elsewhere".into()),
+            ..original
+        };
+        assert!(!state.take_denied(&retargeted));
     }
 
     #[test]

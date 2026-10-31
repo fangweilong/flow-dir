@@ -173,6 +173,7 @@ export const zh = {
   'settings.reclaimMemory': '最小化时挂起回收内存',
   'settings.reclaimMemoryHint': '后台时挂起渲染并释放工作集；若长期最小化唤醒偶发卡死建议保持关闭',
   'settings.gpuRestartHint': '修改后需重启生效',
+  'settings.saveFailed': '设置未保存，已取消重启',
   'settings.restartNow': '立即重启',
   'settings.quickAccess': '快速访问',
   'settings.quickAccessHint': '自带项与自定义项都可以删除',

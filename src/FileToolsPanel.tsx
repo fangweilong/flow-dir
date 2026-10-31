@@ -145,6 +145,11 @@ export function FileToolsPanel({
   // The scan needs a user-visible start so the knobs above it are not unreachable.
   useEffect(() => {
     void start()
+    // Closing the panel must stop the backend job; otherwise it keeps reading the disk
+    // and a second visit stacks another job on top of it.
+    return () => {
+      void toolCancel(jobId.current).catch(() => undefined)
+    }
     // The job is keyed to this panel instance; re-running on prop changes would fight the
     // controls the user is editing.
     // eslint-disable-next-line react-hooks/exhaustive-deps

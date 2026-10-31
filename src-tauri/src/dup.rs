@@ -104,20 +104,16 @@ fn mtime_ms(meta: &Metadata) -> u64 {
         .unwrap_or(0)
 }
 
-fn link_count(path: &Path) -> u32 {
+fn link_count(path: &Path) -> Option<u32> {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION};
-    let Ok(file) = File::open(path) else {
-        return 1;
-    };
+    // A file that cannot be opened (locked by another process, access denied) is unknown,
+    // not a single-link file: guessing `1` would offer a delete that frees nothing.
+    let file = File::open(path).ok()?;
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
     let okay = unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) };
-    if okay.is_ok() {
-        info.nNumberOfLinks
-    } else {
-        1
-    }
+    okay.ok().map(|_| info.nNumberOfLinks)
 }
 
 fn excluded_dir(name: &str, exclude: &[String]) -> bool {
@@ -420,10 +416,11 @@ pub fn start(
                 // offer a delete that frees nothing.
                 let mut linked = Vec::with_capacity(candidates.len());
                 for candidate in candidates {
-                    if link_count(&candidate.path) > 1 {
-                        stats.skipped_hardlink += 1;
-                    } else {
-                        linked.push(candidate);
+                    match link_count(&candidate.path) {
+                        Some(1) => linked.push(candidate),
+                        // Unknown count: treat like a link, since deleting it may free
+                        // nothing and the user would be told otherwise.
+                        Some(_) | None => stats.skipped_hardlink += 1,
                     }
                 }
                 candidates = linked;

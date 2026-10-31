@@ -95,6 +95,11 @@ unsafe fn restore_items(paths: &[String]) -> Result<RestoreReport, ApiError> {
             };
             let key = path_key(&original);
             if let Some(index) = wanted.iter().position(|path| *path == key) {
+                // The bin can hold several entries displaced from the same path; only the
+                // newest one should be restored for this request.
+                if found[index].is_some() {
+                    return true;
+                }
                 if restore_item(&folder, item).is_ok() {
                     report.restored.push(original);
                     found[index] = Some(key);

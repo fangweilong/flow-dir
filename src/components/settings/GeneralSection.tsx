@@ -33,6 +33,9 @@ export function GeneralSection({ settings, onChange, t, visible, everything }: G
   const [customDraft, setCustomDraft] = useState(
     FONT_FAMILIES.includes(settings.fontFamily) ? '' : settings.fontFamily,
   )
+  // The exclude list is edited as text: committing on every keystroke would drop a
+  // trailing comma and make the second entry impossible to type.
+  const [excludeDraft, setExcludeDraft] = useState<string | null>(null)
 
   const fontSize = clampFontSize(settings.fontSize)
   const tabFontSize = clampRegionFontSize(settings.tabFontSize, DEFAULT_TAB_FONT_SIZE)
@@ -349,16 +352,24 @@ export function GeneralSection({ settings, onChange, t, visible, everything }: G
             <div className="text-[0.71875rem] text-fg">{t('settings.dupExclude')}</div>
             <div className="text-[0.625rem] text-muted-2">{t('settings.dupExcludeHint')}</div>
             <input
-              value={settings.dupExclude.join(', ')}
-              onChange={(ev) =>
+              value={excludeDraft ?? settings.dupExclude.join(', ')}
+              onChange={(ev) => {
+                // Keep the raw text for the caret (a trailing comma survives), while the
+                // parsed list is committed immediately so closing without blur is safe.
+                const raw = ev.target.value
+                setExcludeDraft(raw)
                 onChange({
                   ...settings,
-                  dupExclude: ev.target.value
+                  dupExclude: raw
                     .split(',')
                     .map((name) => name.trim())
                     .filter(Boolean),
                 })
-              }
+              }}
+              onBlur={() => setExcludeDraft(null)}
+              onKeyDown={(ev) => {
+                if (ev.key === 'Enter') ev.currentTarget.blur()
+              }}
               className="h-6 w-full rounded border border-line bg-surface-2 px-1 text-[0.6875rem] text-fg outline-none focus:border-blue-400"
             />
           </div>

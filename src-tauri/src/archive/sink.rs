@@ -158,7 +158,19 @@ impl Sink {
         fs::create_dir_all(dest).map_err(|e| ApiError::from_io(&dest_text, &e))?;
         let dest = fs::canonicalize(dest).map_err(|e| ApiError::from_io(&dest_text, &e))?;
         let dest = verbatim(&dest);
-        let temp = dest.join(format!(".flowdir-extract-{job_id}"));
+        // The job id comes from the IPC caller; only path-safe characters may reach the
+        // temporary directory name, or a crafted value could point at a real folder.
+        let safe_job: String = job_id
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+            .take(64)
+            .collect();
+        let safe_job = if safe_job.is_empty() {
+            std::process::id().to_string()
+        } else {
+            safe_job
+        };
+        let temp = dest.join(format!(".flowdir-extract-{safe_job}"));
         let _ = fs::remove_dir_all(&temp);
         fs::create_dir(&temp).map_err(|e| ApiError::from_io(temp.to_string_lossy().as_ref(), &e))?;
         // A volume that refuses the query (some network shares do) must not block
@@ -434,7 +446,9 @@ impl Sink {
                     fs::create_dir_all(parent).map_err(|e| self.abort_io(parent, &e))?;
                 }
                 let target = if fs::symlink_metadata(&target).is_ok() {
-                    let unique = naming::unique(&[display(&target)]);
+                    // Keep the `\\?\` form: `display()` strips it, which would turn a UNC
+                    // target into a relative `UNC\server\share\...` path.
+                    let unique = naming::unique(&[target.to_string_lossy().into_owned()]);
                     PathBuf::from(unique.into_iter().next().unwrap_or_default())
                 } else {
                     target

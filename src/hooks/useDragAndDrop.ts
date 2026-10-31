@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, RefObject } from 'react'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import type { Entry, ListData, OpKind } from '../types'
@@ -58,6 +58,13 @@ export function useDragAndDrop({
 }: UseDragAndDropProps) {
   const [rowDrag, setRowDrag] = useState<RowDragState | null>(null)
   const [osDrag, setOsDrag] = useState<OsDragState | null>(null)
+  // The pointerdown handler runs in the same tick as the selection update, so the
+  // `listData` captured in that closure is one render behind. The drag payload is read
+  // from this ref once the gesture actually starts, after React has committed.
+  const listDataRef = useRef(listData)
+  useEffect(() => {
+    listDataRef.current = listData
+  }, [listData])
 
   const resolveDropTarget = useCallback((x: number, y: number): DropTarget | null => {
     const hit = document.elementFromPoint(x, y)
@@ -119,13 +126,16 @@ export function useDragAndDrop({
       const pane = current?.panes[paneId]
       const tab = pane && current ? current.tabs[pane.activeTabId] : undefined
       if (!current || !pane || !tab?.path) return
-      const data = listData[tab.id]
-      const names = data?.selected.has(entry.name) ? Array.from(data.selected) : [entry.name]
       const sourceDir = tab.path
       const startX = ev.clientX
       const startY = ev.clientY
       let started = false
       let userSelect = ''
+      // Selection as the user sees it once the pointerdown selection has been committed.
+      const selectedNames = () => {
+        const live = listDataRef.current[tab.id]
+        return live?.selected.has(entry.name) ? Array.from(live.selected) : [entry.name]
+      }
 
       const move = (e: PointerEvent) => {
         if (!started) {
@@ -142,7 +152,7 @@ export function useDragAndDrop({
         ) {
           detach()
           setRowDrag(null)
-          const rawPaths = names.map((name) => joinPath(sourceDir, name))
+          const rawPaths = selectedNames().map((name) => joinPath(sourceDir, name))
           void archivePrepareDrag(rawPaths)
             .then((paths) => dragOut(paths))
             .then((effect) => {
@@ -155,7 +165,7 @@ export function useDragAndDrop({
           return
         }
         setRowDrag({
-          names,
+          names: selectedNames(),
           sourceDir,
           x: e.clientX,
           y: e.clientY,
@@ -178,7 +188,7 @@ export function useDragAndDrop({
         if (!target) return
         const forced = e.ctrlKey || e.metaKey ? 'copy' : e.shiftKey ? 'move' : null
         dropPaths(
-          names.map((name) => joinPath(sourceDir, name)),
+          selectedNames().map((name) => joinPath(sourceDir, name)),
           target.dir,
           forced,
         )

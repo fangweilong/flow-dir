@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use crate::pathkey::path_key;
+use crate::pathkey::{path_key, strip_prefix_dir};
 
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -247,14 +247,9 @@ fn clean_entries(
     for path in tracked {
         let relative = match prefix {
             None => path.as_str(),
-            Some(prefix) => match path.get(..prefix.len()) {
-                Some(head)
-                    if head.eq_ignore_ascii_case(prefix)
-                        && path.as_bytes().get(prefix.len()) == Some(&b'\\') =>
-                {
-                    &path[prefix.len() + 1..]
-                }
-                _ => continue,
+            Some(prefix) => match strip_prefix_dir(path, prefix) {
+                Some(rest) => rest,
+                None => continue,
             },
         };
         if relative.is_empty() {
@@ -607,12 +602,7 @@ fn parse(bytes: &[u8], prefix: Option<&str>) -> Vec<GitFile> {
         }
         let relative = match prefix {
             None => Some(path),
-            Some(prefix) => match path.get(..prefix.len()) {
-                Some(head) if head.eq_ignore_ascii_case(prefix) && path.as_bytes().get(prefix.len()) == Some(&b'\\') => {
-                    Some(path[prefix.len() + 1..].to_string())
-                }
-                _ => None,
-            },
+            Some(prefix) => strip_prefix_dir(&path, prefix).map(str::to_string),
         };
         if let Some(path) = relative.filter(|path| !path.is_empty()) {
             files.push(GitFile {
@@ -665,6 +655,15 @@ mod tests {
                 ("dir\\nested.txt", "M"),
             ]
         );
+    }
+
+    #[test]
+    fn prefix_strip_handles_non_ascii_case() {
+        assert_eq!(strip_prefix_dir("Über\\x.txt", "über"), Some("x.txt"));
+        // `İ`.to_lowercase() is two chars; a byte-offset slice would split the original.
+        assert_eq!(strip_prefix_dir("İ\\İ.txt", "i\u{307}"), Some("İ.txt"));
+        assert_eq!(strip_prefix_dir("other\\x.txt", "über"), None);
+        assert_eq!(strip_prefix_dir("Über", "über"), None);
     }
 
     #[test]

@@ -901,8 +901,9 @@ pub fn load<R: Runtime>(app: &AppHandle<R>) -> Settings {
         return Settings::default();
     };
     let path = dir.join(FILE);
-    // `settings.toml` → `settings.bak.toml` → defaults. A parse failure never writes:
-    // overwriting a hand-edited file with the template loses the user's settings for good.
+    // `settings.toml` → `settings.toml.bak` → defaults. `store::write_atomic` keeps the
+    // previous file under `<name>.bak`. A parse failure never writes: overwriting a
+    // hand-edited file with the template loses the user's settings for good.
     match parse_file(&path) {
         Parse::Ok(settings) => return *settings,
         Parse::Invalid => {
@@ -911,7 +912,7 @@ pub fn load<R: Runtime>(app: &AppHandle<R>) -> Settings {
         }
         Parse::Missing => {}
     }
-    if let Parse::Ok(settings) = parse_file(&dir.join("settings.bak.toml")) {
+    if let Parse::Ok(settings) = parse_file(&dir.join("settings.toml.bak")) {
         return *settings;
     }
     // One-time conversion from the JSON file used before TOML support.
@@ -985,6 +986,8 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), A
         "update_interval_hours",
         Value::from(settings.update_interval_hours as i64),
     );
+    set_value(&mut doc, "notify_ops", Value::from(settings.notify_ops));
+    set_value(&mut doc, "log_level", Value::from(settings.log_level.as_str()));
     set_value(&mut doc, "font_family", Value::from(settings.font_family.as_str()));
     set_value(&mut doc, "font_size", Value::from(settings.font_size as i64));
     set_value(&mut doc, "tab_font_family", Value::from(settings.tab_font_family.as_str()));
@@ -1004,6 +1007,11 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), A
         &mut doc,
         "list_time_width",
         Value::from(settings.list_time_width as i64),
+    );
+    set_value(
+        &mut doc,
+        "list_name_width",
+        Value::from(settings.list_name_width as i64),
     );
     set_value(
         &mut doc,

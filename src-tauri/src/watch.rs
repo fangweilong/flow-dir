@@ -10,7 +10,13 @@ use tauri::{AppHandle, Emitter, Runtime};
 use crate::error::ApiError;
 
 #[derive(Default)]
-pub struct Watchers(pub Mutex<HashMap<String, RecommendedWatcher>>);
+pub struct Watchers {
+    map: Mutex<HashMap<String, RecommendedWatcher>>,
+    /// Newest request per pane. `set` and `clear` can run concurrently on the blocking
+    /// pool, so a slow `watch()` must not install a watcher that a later request replaced.
+    latest: Mutex<HashMap<String, u64>>,
+    next: std::sync::atomic::AtomicU64,
+}
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -38,6 +44,15 @@ pub fn set<R: Runtime>(
     pane_id: String,
     path: String,
 ) -> Result<(), ApiError> {
+    let epoch = watchers
+        .next
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        + 1;
+    watchers
+        .latest
+        .lock()
+        .unwrap()
+        .insert(pane_id.clone(), epoch);
     let mut folder = FsPath::new(&path);
     let resolved_parent;
     if !folder.is_dir() {
@@ -112,13 +127,28 @@ pub fn set<R: Runtime>(
         let _ = watcher.watch(dir, RecursiveMode::NonRecursive);
     }
 
-    let mut map = watchers.0.lock().unwrap();
+    {
+        let latest = watchers.latest.lock().unwrap();
+        if latest.get(&pane_id) != Some(&epoch) {
+            return Ok(());
+        }
+    }
+    let mut map = watchers.map.lock().unwrap();
     map.insert(pane_id, watcher);
     Ok(())
 }
 
 pub fn clear(watchers: &Watchers, pane_id: &str) {
-    watchers.0.lock().unwrap().remove(pane_id);
+    let epoch = watchers
+        .next
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        + 1;
+    watchers
+        .latest
+        .lock()
+        .unwrap()
+        .insert(pane_id.to_string(), epoch);
+    watchers.map.lock().unwrap().remove(pane_id);
 }
 
 /// A change that can add, remove or rename a top-level row. Everything else rewrites an

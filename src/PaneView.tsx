@@ -358,6 +358,21 @@ export function PaneView({
     virtualizer.measure()
   }, [rowHeight, virtualizer])
 
+  // A launch request asks for one row to be selected and shown. The id makes the request
+  // one-shot: later filtering or scrolling must not pull the list back.
+  const revealedId = useRef<number | undefined>(undefined)
+  const revealId = list.reveal?.id
+  const revealName = list.reveal?.name
+  useEffect(() => {
+    if (revealId === undefined || revealedId.current === revealId) return
+    revealedId.current = revealId
+    const index = view.findIndex((entry) => entry.name === revealName)
+    if (index >= 0) virtualizer.scrollToIndex(index, { align: 'center' })
+    // `view` comes from the render that delivered the request; depending on it would
+    // re-run on every filter change and fight the user's scrolling.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealId])
+
   /**
    * The list's vertical scrollbar eats into its content box while the header stays full
    * width. Reclaim that strip so the header columns sit exactly over the row columns.

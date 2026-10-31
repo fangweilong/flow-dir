@@ -36,6 +36,24 @@ pub fn path_key(path: &str) -> String {
     }
 }
 
+/// Drops `prefix` from `path` segment by segment, comparing case-insensitively and
+/// returning the remainder in `path`'s original spelling.
+///
+/// Segment-wise comparison keeps this correct for names whose lowercase form has a
+/// different UTF-8 length (`İ` → `i̇`), where slicing by a byte offset taken from the
+/// lowercased string would land inside a character.
+pub fn strip_prefix_dir<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    let mut rest = path;
+    for want in prefix.split('\\').filter(|segment| !segment.is_empty()) {
+        let (head, tail) = rest.split_once('\\')?;
+        if head.to_lowercase() != want.to_lowercase() {
+            return None;
+        }
+        rest = tail;
+    }
+    Some(rest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

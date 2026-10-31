@@ -236,7 +236,13 @@ impl VolumeFamily {
         let ext = ext.to_ascii_lowercase();
         match self {
             Self::Part(prefix) => {
-                if ext != "rar" || stem.len() < prefix.len() {
+                if ext != "rar" {
+                    return None;
+                }
+                // `prefix` comes from a different file name in the same folder, so its
+                // byte length is not guaranteed to be a character boundary here.
+                let head = stem.get(..prefix.len())?;
+                if !head.eq_ignore_ascii_case(prefix) {
                     return None;
                 }
                 let rest = stem[prefix.len()..].to_ascii_lowercase();
@@ -459,7 +465,8 @@ fn extract_cab(path: &str, sink: &mut Sink) -> Result<(), ApiError> {
     sink.progress_phase("extract");
 
     for (name, size, utf8) in entries {
-        let rel = match entry::decode(name.as_bytes(), utf8) {
+        // CAB stores path separators as `\` (MS-CAB, CFILE.szFile).
+        let rel = match entry::decode_rar(name.as_bytes(), utf8) {
             Ok(rel) => rel,
             Err(err) => {
                 sink.skip(&name, &err.code);
@@ -669,7 +676,7 @@ pub fn list(path: &str, limit: usize) -> Result<Vec<ArchiveEntry>, ApiError> {
                 if entries.len() >= limit {
                     return Ok(entries);
                 }
-                if let Ok(name) = entry::decode(item.name().as_bytes(), item.is_name_utf()) {
+                if let Ok(name) = entry::decode_rar(item.name().as_bytes(), item.is_name_utf()) {
                     entries.push(ArchiveEntry {
                         name,
                         size: item.uncompressed_size() as u64,
@@ -859,7 +866,7 @@ pub fn extract_single(
             let mut found_file = None;
             for folder in cabinet.folder_entries() {
                 for item in folder.file_entries() {
-                    if let Ok(name) = entry::decode(item.name().as_bytes(), item.is_name_utf()) {
+                    if let Ok(name) = entry::decode_rar(item.name().as_bytes(), item.is_name_utf()) {
                         if name.eq_ignore_ascii_case(inner_norm) {
                             found_file = Some(item.name().to_string());
                             break;
@@ -966,5 +973,15 @@ mod tests {
 
         assert!(VolumeFamily::of("单卷.rar").is_some());
         assert!(VolumeFamily::of("模糊文件").is_none());
+    }
+
+    #[test]
+    fn volume_key_does_not_slice_inside_a_character() {
+        // `İ` is two bytes and `中` starts with a different two-byte sequence; the prefix
+        // from the first name must not be used as a byte offset into the second.
+        let part = VolumeFamily::of("İ.part1.rar").unwrap();
+        assert_eq!(part.key("中文.rar"), None);
+        assert_eq!(part.key("İ.part2.rar"), Some(2));
+        assert_eq!(part.key("İ.part02.rar"), Some(2));
     }
 }

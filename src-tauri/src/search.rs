@@ -145,8 +145,58 @@ fn is_text_name(name: &str) -> bool {
     TEXT_EXTENSIONS.contains(&ext)
 }
 
-/// Reads at most `max_bytes`, rejects binary content by its first NUL byte, and returns
-/// the line around the first match. `None` means "no match or unreadable".
+fn utf16_units(bytes: &[u8], big_endian: bool) -> Vec<u16> {
+    let (chunks, _) = bytes.as_chunks::<2>();
+    chunks
+        .iter()
+        .map(|pair| {
+            if big_endian {
+                u16::from_be_bytes(*pair)
+            } else {
+                u16::from_le_bytes(*pair)
+            }
+        })
+        .collect()
+}
+
+/// Decodes a search candidate. UTF-16 (BOM or the typical alternating-NUL pattern of
+/// Notepad's "Unicode" encoding) is decoded instead of being dismissed as binary; any
+/// other NUL byte means binary.
+fn decode_for_search(bytes: &[u8]) -> Option<String> {
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        return Some(String::from_utf16_lossy(&utf16_units(&bytes[2..], false)));
+    }
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        return Some(String::from_utf16_lossy(&utf16_units(&bytes[2..], true)));
+    }
+    let probe = &bytes[..bytes.len().min(8192)];
+    let mut even_nul = 0usize;
+    let mut odd_nul = 0usize;
+    for (index, byte) in probe.iter().enumerate() {
+        if *byte == 0 {
+            if index % 2 == 0 {
+                even_nul += 1;
+            } else {
+                odd_nul += 1;
+            }
+        }
+    }
+    if probe.len() >= 4 && odd_nul > probe.len() / 8 && even_nul == 0 {
+        return Some(String::from_utf16_lossy(&utf16_units(probe, false)));
+    }
+    if probe.len() >= 4 && even_nul > probe.len() / 8 && odd_nul == 0 {
+        return Some(String::from_utf16_lossy(&utf16_units(probe, true)));
+    }
+    // Only the sampled window decides: a NUL deep inside a large text file is not a
+    // reason to hide it from content search.
+    if probe.contains(&0) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(bytes).into_owned())
+}
+
+/// Reads at most `max_bytes`, rejects binary content, and returns the line around the
+/// first match. `None` means "no match or unreadable".
 fn content_snippet(path: &Path, regex: &Regex, max_bytes: u64, cancel: &AtomicBool) -> Option<String> {
     let file = std::fs::File::open(path).ok()?;
     let mut bytes = Vec::new();
@@ -154,10 +204,7 @@ fn content_snippet(path: &Path, regex: &Regex, max_bytes: u64, cancel: &AtomicBo
     if cancel.load(Ordering::Relaxed) {
         return None;
     }
-    if bytes.iter().take(8192).any(|byte| *byte == 0) {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&bytes);
+    let text = decode_for_search(&bytes)?;
     let found = regex.find(&text)?;
     let start = text[..found.start()].rfind('\n').map(|i| i + 1).unwrap_or(0);
     let end = text[found.end()..]
@@ -255,9 +302,31 @@ pub fn run(
 
     let mut batch: Vec<SearchItem> = Vec::with_capacity(BATCH);
     let mut total = 0usize;
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    'outer: for root in &roots {
+    // Roots may overlap (a drive plus a folder inside it). Drop the nested ones up front
+    // instead of remembering every visited path for the whole walk.
+    let root_keys: Vec<String> = roots
+        .iter()
+        .map(|root| root.trim_end_matches(['\\', '/']).to_lowercase())
+        .collect();
+    let effective_roots: Vec<&String> = roots
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| {
+            !root_keys.iter().enumerate().any(|(other, key)| {
+                if other == *index {
+                    return false;
+                }
+                if key == &root_keys[*index] {
+                    return other < *index;
+                }
+                root_keys[*index].starts_with(&format!("{key}\\"))
+            })
+        })
+        .map(|(_, root)| root)
+        .collect();
+
+    'outer: for root in effective_roots.iter().copied() {
         let root_path = PathBuf::from(root);
         // jwalk's own `skip_hidden` only understands dot-prefixed names; Windows hides files
         // through file attributes, so the filter lives in `process_read_dir` and also prunes
@@ -290,10 +359,6 @@ pub fn run(
                 continue;
             };
             let item_path = entry.path().to_string_lossy().into_owned();
-            let key = item_path.to_lowercase();
-            if !seen.insert(key) {
-                continue;
-            }
         // Folders are search hits too: Everything returns them, so the built-in provider
         // must as well or the same query gives different results per provider.
         let is_dir = entry.file_type().is_dir();
@@ -610,6 +675,23 @@ mod tests {
         SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL,
         FILE_FLAGS_AND_ATTRIBUTES,
     };
+
+    #[test]
+    fn utf16_text_is_not_treated_as_binary() {
+        let le: Vec<u8> = "hello"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        // No BOM: the alternating-NUL pattern still identifies Notepad's "Unicode".
+        assert_eq!(decode_for_search(&le).as_deref(), Some("hello"));
+        let mut with_bom = vec![0xFF, 0xFE];
+        with_bom.extend_from_slice(&le);
+        assert_eq!(decode_for_search(&with_bom).as_deref(), Some("hello"));
+        let be: Vec<u8> = "hi".encode_utf16().flat_map(u16::to_be_bytes).collect();
+        assert_eq!(decode_for_search(&be).as_deref(), Some("hi"));
+        assert_eq!(decode_for_search(b"plain ascii"), Some("plain ascii".into()));
+        assert_eq!(decode_for_search(&[0x89, b'P', b'N', b'G', 0, 0]), None);
+    }
 
     fn collect(root: &str, query: &str, hidden: bool) -> Vec<SearchItem> {
         collect_with_limit(root, query, hidden, 500)

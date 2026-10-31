@@ -41,7 +41,7 @@ pub fn decode(raw: &[u8], utf8_flag: bool) -> Result<String, ApiError> {
     decode_with(raw, utf8_flag, false)
 }
 
-/// RAR stores path separators as `\`; every other backend in this crate uses `/`.
+/// RAR and CAB store path separators as `\`; every other backend in this crate uses `/`.
 pub fn decode_rar(raw: &[u8], utf8_flag: bool) -> Result<String, ApiError> {
     decode_with(raw, utf8_flag, true)
 }

@@ -79,11 +79,23 @@ impl State {
         let older = self.dir.join(format!("flowdir.{}.log", KEEP + 1));
         let _ = fs::remove_file(older);
         let current = self.dir.join(LOG_FILE);
-        let _ = fs::rename(&current, self.dir.join("flowdir.1.log"));
-        if let Ok(file) = OpenOptions::new().create(true).append(true).open(&current) {
-            self.file = file;
+        // A reader holding one of the rotated files (Notepad, a log tail) makes the
+        // rename fail; the counter must then keep the real size, or the cap silently
+        // stops working and the file grows without bound.
+        let rotated = fs::rename(&current, self.dir.join("flowdir.1.log")).is_ok();
+        match OpenOptions::new().create(true).append(true).open(&current) {
+            Ok(file) => {
+                self.file = file;
+                self.size = if rotated {
+                    0
+                } else {
+                    self.file.metadata().map(|meta| meta.len()).unwrap_or(0)
+                };
+            }
+            Err(_) => {
+                self.size = self.file.metadata().map(|meta| meta.len()).unwrap_or(self.size);
+            }
         }
-        self.size = 0;
     }
 }
 

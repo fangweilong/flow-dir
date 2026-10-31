@@ -73,17 +73,24 @@ export function useTreeAndGit({
         setTreeErrors(treeErrorsRef.current)
       })
       .finally(() => {
-        // `invalidateTree` bumps the generation to drop the in-flight reply, but the
-        // key must not stay in `treePending` or every later load (even forced) is
-        // refused until a showHidden reset clears the set.
-        treePending.current.delete(key)
+        // Only release the slot that belongs to this request: `invalidateTree` clears it
+        // so the reload can start at once, and a newer load may have claimed it since.
+        if (treeGeneration.current.get(key) === generation) {
+          treePending.current.delete(key)
+        }
       })
   }, [settingsRef])
 
   const invalidateTree = useCallback((path: string) => {
     const key = pathKey(path)
+    const wasPending = treePending.current.delete(key)
     treeGeneration.current.set(key, ++treeCounter.current)
-    if (!(key in treeNodesRef.current) && !treeErrorsRef.current[key]) return
+    if (!(key in treeNodesRef.current) && !treeErrorsRef.current[key]) {
+      // The node is open but its first listing is still in flight; that reply is now
+      // discarded, so start a fresh one instead of leaving the node blank.
+      if (wasPending && key in treeOpenRef.current) loadTree(path)
+      return
+    }
     if (key in treeNodesRef.current) {
       const next = { ...treeNodesRef.current }
       delete next[key]
@@ -102,7 +109,7 @@ export function useTreeAndGit({
       delete rest[key]
       return rest
     })
-  }, [])
+  }, [loadTree])
 
   const toggleTree = useCallback(
     (path: string) => {

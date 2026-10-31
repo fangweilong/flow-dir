@@ -86,13 +86,13 @@ export function useGlobalShortcuts({
         return
       }
       if (matchBinding(event, keys.undo)) {
-        if (isTextInput(event.target)) return
+        if (isTextInput(event.target) || event.repeat) return
         event.preventDefault()
         undoLast()
         return
       }
       if (matchBinding(event, keys.redo)) {
-        if (isTextInput(event.target)) return
+        if (isTextInput(event.target) || event.repeat) return
         event.preventDefault()
         redoLast()
         return

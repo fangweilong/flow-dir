@@ -70,9 +70,11 @@ export function BatchRenameDialog({ dir, names, lang, onConfirm, onClose }: Prop
             ? find
               ? stem.split(find).join(replace)
               : stem
-            : template
-                .replaceAll('{name}', stem)
-                .replaceAll('{n}', String(start + index).padStart(digits, '0'))
+            : template.replace(/\{name\}|\{n\}/g, (token) =>
+                token === '{name}'
+                  ? stem
+                  : String(start + index).padStart(digits, '0'),
+              )
         return { from: name, to: `${nextStem}${ext}` }
       }),
     [names, mode, find, replace, template, start, digits],
@@ -140,26 +142,41 @@ export function BatchRenameDialog({ dir, names, lang, onConfirm, onClose }: Prop
 
   const blocked = invalid.size > 0 || effective.length === 0
   const needsDecision = conflicts.size > 0 && policy === 'ask'
+  // `uniquePaths` resolves after the dialog may already be gone (Esc, backdrop, second
+  // Enter); a cancelled or repeated submit must not reach `onConfirm`.
+  const submitted = useRef(false)
+  const alive = useRef(true)
+  useEffect(
+    () => () => {
+      alive.current = false
+    },
+    [],
+  )
+  const confirm = (pairs: { from: string; to: string }[]) => {
+    if (!alive.current) return
+    onConfirm(pairs)
+  }
 
   const submit = () => {
-    if (blocked || needsDecision) return
+    if (blocked || needsDecision || submitted.current) return
+    submitted.current = true
     if (!conflicts.size) {
-      onConfirm(effective.map((item) => item.pair))
+      confirm(effective.map((item) => item.pair))
       return
     }
     if (policy === 'skip') {
-      onConfirm(effective.filter((item) => !conflicts.has(item.index)).map((item) => item.pair))
+      confirm(effective.filter((item) => !conflicts.has(item.index)).map((item) => item.pair))
       return
     }
     // `number`: ask the backend for the first free `name (n)` variant of every target,
     // including the ones that were already free.
     void uniquePaths(effective.map((item) => joinPath(dir, item.pair.to)))
       .then((resolved) => {
-        onConfirm(
+        confirm(
           effective.map((item, i) => ({ from: item.pair.from, to: baseName(resolved[i] ?? item.pair.to) })),
         )
       })
-      .catch(() => onConfirm(effective.filter((item) => !conflicts.has(item.index)).map((item) => item.pair)))
+      .catch(() => confirm(effective.filter((item) => !conflicts.has(item.index)).map((item) => item.pair)))
   }
 
   return (

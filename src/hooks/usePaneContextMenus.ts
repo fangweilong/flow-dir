@@ -115,6 +115,14 @@ export function usePaneContextMenus({
 
   useEffect(() => {
     if (!pendingNew) return
+    // A cancelled or failed shell "New" never adds an entry; without this the marker
+    // would hijack the next unrelated new file that appears in the folder.
+    const timer = window.setTimeout(() => setPendingNew(null), 5_000)
+    return () => window.clearTimeout(timer)
+  }, [pendingNew])
+
+  useEffect(() => {
+    if (!pendingNew) return
     const entries = listData[pendingNew.tabId]?.entries
     if (!entries) return
     const created = entries.find((entry) => !pendingNew.before.has(entry.name))

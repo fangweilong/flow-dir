@@ -56,6 +56,10 @@ pub struct Entry {
     pub name: String,
     pub left: Option<Meta>,
     pub right: Option<Meta>,
+    /// False when that side exists on disk but the current options hide it (hidden,
+    /// reparse point, excluded or outside the size/date filter).
+    pub left_compared: bool,
+    pub right_compared: bool,
     pub status: &'static str,
 }
 
@@ -117,6 +121,10 @@ pub struct HashEvent {
 struct SideEntry {
     name: String,
     meta: Meta,
+    /// False when the entry exists but the current options hide it (hidden, reparse
+    /// point, excluded or outside the size/date filter). Such an entry still counts as
+    /// "present" so its counterpart is never mistaken for an extra file.
+    compared: bool,
 }
 
 fn hidden_or_link(meta: &fs::Metadata) -> (bool, bool) {
@@ -209,7 +217,9 @@ fn meta_of(meta: &fs::Metadata, is_dir: bool) -> Meta {
 }
 
 /// One side of a level, keyed by the lowercased name so Windows' case-insensitive rules
-/// apply; the first spelling seen is the one shown.
+/// apply; the first spelling seen is the one shown. Every name is kept, including the
+/// ones the filters hide: pairing happens first, and a filtered entry must suppress its
+/// counterpart instead of making it look like a file that only exists on one side.
 fn read_side(dir: &Path, options: &Options) -> Result<HashMap<String, SideEntry>, ApiError> {
     let mut out = HashMap::new();
     let reader = fs::read_dir(dir).map_err(|e| ApiError::from_io(&dir.display().to_string(), &e))?;
@@ -217,15 +227,14 @@ fn read_side(dir: &Path, options: &Options) -> Result<HashMap<String, SideEntry>
         let name = entry.file_name().to_string_lossy().into_owned();
         let Ok(meta) = entry.metadata() else { continue };
         let (hidden, link) = hidden_or_link(&meta);
-        if (hidden && !options.include_hidden) || link || excluded(options, &name) {
-            continue;
-        }
         let is_dir = meta.is_dir();
         let item = meta_of(&meta, is_dir);
-        if !is_dir && !file_ok(options, &name, &item) {
-            continue;
-        }
-        out.entry(name.to_lowercase()).or_insert(SideEntry { name, meta: item });
+        let compared = !(hidden && !options.include_hidden)
+            && !link
+            && !excluded(options, &name)
+            && (is_dir || file_ok(options, &name, &item));
+        out.entry(name.to_lowercase())
+            .or_insert(SideEntry { name, meta: item, compared });
     }
     Ok(out)
 }
@@ -252,6 +261,15 @@ fn compare_maps(
         .filter_map(|key| {
             let l = left.get(key);
             let r = right.get(key);
+            let left_compared = l.is_some_and(|side| side.compared);
+            let right_compared = r.is_some_and(|side| side.compared);
+            // Both sides exist: show the pair when at least one side passes the filters,
+            // so a filtered-out copy cannot hide the other side's real difference. A
+            // one-sided row is only shown when the side itself passes, so "delete extras"
+            // never targets a file whose counterpart merely failed a filter.
+            if !left_compared && !right_compared {
+                return None;
+            }
             let name = l.map(|s| s.name.clone()).or_else(|| r.map(|s| s.name.clone()))?;
             let left_meta = l.map(|s| s.meta.clone());
             let right_meta = r.map(|s| s.meta.clone());
@@ -275,6 +293,8 @@ fn compare_maps(
                 name,
                 left: left_meta,
                 right: right_meta,
+                left_compared,
+                right_compared,
                 status,
             })
         })
@@ -433,7 +453,7 @@ pub fn start_counts(
             for key in keys {
                 let Some(l) = sides.0.get(key) else { continue };
                 let Some(r) = sides.1.get(key) else { continue };
-                if !l.meta.is_dir || !r.meta.is_dir {
+                if !l.meta.is_dir || !r.meta.is_dir || (!l.compared && !r.compared) {
                     continue;
                 }
                 if job.stopped() {
@@ -458,6 +478,23 @@ pub fn start_counts(
                     &job.cancel,
                     &mut scanned,
                 );
+                // A walk that stopped early reports zeros; publishing them would leave
+                // the folder showing 0/0/0/0 until a manual refresh.
+                if job.stopped() {
+                    finish(CountEvent {
+                        name: prefix.clone(),
+                        left_only: 0,
+                        right_only: 0,
+                        different: 0,
+                        same: 0,
+                        scanned,
+                        done: true,
+                        aborted: true,
+                        error: None,
+                    });
+                    state.finish(&job_id);
+                    return;
+                }
                 finish(CountEvent {
                     name: join_rel(&prefix, &l.name),
                     left_only: counts.left_only,
@@ -499,22 +536,43 @@ pub fn start_hash(
 ) -> Result<(), ApiError> {
     let job = state.begin(&job_id);
     let state = state.clone();
-    let total = pairs.len().min(10_000) as u32;
+    let total = pairs.len() as u32;
     std::thread::Builder::new()
         .name("flowdir-compare-hash".into())
         .spawn(move || {
             let throttle = Throttle::new(max_bytes_per_sec);
-            let bytes_total: u64 = pairs
-                .iter()
-                .take(total as usize)
-                .map(|pair| {
-                    fs::metadata(&pair.left).map(|m| m.len()).unwrap_or(0)
-                        + fs::metadata(&pair.right).map(|m| m.len()).unwrap_or(0)
-                })
-                .sum();
+            // Summing every pair costs two `metadata` calls per file; on a slow share it
+            // must honour cancellation instead of delaying it to the end of the walk.
+            let mut bytes_total: u64 = 0;
+            let mut cancelled_early = false;
+            for pair in &pairs {
+                if job.stopped() {
+                    cancelled_early = true;
+                    break;
+                }
+                bytes_total += fs::metadata(&pair.left).map(|m| m.len()).unwrap_or(0)
+                    + fs::metadata(&pair.right).map(|m| m.len()).unwrap_or(0);
+            }
+            if cancelled_early {
+                let _ = on_event.send(HashEvent {
+                    job_id: job_id.clone(),
+                    current: 0,
+                    total,
+                    name: None,
+                    bytes: job.bytes.load(Ordering::Relaxed),
+                    bytes_total,
+                    paused: false,
+                    done: true,
+                    aborted: true,
+                    error: None,
+                    results: Vec::new(),
+                });
+                state.finish(&job_id);
+                return;
+            }
             let mut results = Vec::new();
             let mut aborted = false;
-            for (index, pair) in pairs.into_iter().take(total as usize).enumerate() {
+            for (index, pair) in pairs.into_iter().enumerate() {
                 if job.stopped() {
                     aborted = true;
                     break;
@@ -658,6 +716,46 @@ mod tests {
         assert!(!by_name.contains_key("skip.bin"));
         // Folders sort ahead of files.
         assert!(result.entries.first().unwrap().left.as_ref().unwrap().is_dir);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn filtered_pair_stays_paired_and_one_sided_filtered_hidden() {
+        let dir = scratch("filtered-pair");
+        let left = dir.join("left");
+        let right = dir.join("right");
+        // The size filter hides the left copy only; the pair must stay visible (flagged)
+        // instead of turning the right copy into an "extra" the preview would delete.
+        write(&left.join("big.bin"), &[0u8; 16]);
+        write(&right.join("big.bin"), &[0u8; 64]);
+        let options = Options {
+            min_size: 32,
+            ..Default::default()
+        };
+        let result = level(
+            left.to_str().unwrap(),
+            right.to_str().unwrap(),
+            "",
+            &options,
+        )
+        .unwrap();
+        assert_eq!(result.entries.len(), 1);
+        let entry = &result.entries[0];
+        assert_eq!(entry.status, "different");
+        assert!(!entry.left_compared);
+        assert!(entry.right_compared);
+
+        // A file that fails the filter on the only side it exists on is not listed at all.
+        write(&left.join("small.bin"), &[0u8; 16]);
+        let filtered = level(
+            left.to_str().unwrap(),
+            right.to_str().unwrap(),
+            "",
+            &options,
+        )
+        .unwrap();
+        assert_eq!(filtered.entries.len(), 1);
+        assert_eq!(filtered.entries[0].name, "big.bin");
         let _ = fs::remove_dir_all(&dir);
     }
 

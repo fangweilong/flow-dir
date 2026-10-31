@@ -37,6 +37,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use error::ApiError;
+use pathkey::strip_prefix_dir;
 use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::{Emitter, Manager};
@@ -105,6 +106,8 @@ struct DirBatch {
     gen: u64,
     scanned: u32,
     done: bool,
+    /// The listing comes from inside an archive, not from the filesystem.
+    archive: bool,
     /// True on the final batch when the entry cap cut the listing short.
     truncated: bool,
     items: Vec<EntryDto>,
@@ -141,7 +144,23 @@ fn list_dir(
         // Progress-only batches go out while the directory is still being read, so a slow
         // share grows the counter instead of leaving the pane on a spinner.
         let mut reported = 0usize;
-        let outcome = if let Some((archive_path, inner_path)) = archive::resolve_archive_path(&path) {
+        let archive_target = archive::resolve_archive_path(&path);
+        let archive_dir = archive_target.is_some();
+        if archive_dir {
+            // Listing an archive means enumerating all of it before the first row is
+            // ready; announce it up front so the pane is guarded as "inside an archive"
+            // during that window.
+            let _ = on_batch.send(DirBatch {
+                gen,
+                scanned: 0,
+                done: false,
+                archive: true,
+                truncated: false,
+                items: Vec::new(),
+                error: None,
+            });
+        }
+        let outcome = if let Some((archive_path, inner_path)) = archive_target {
             archive::enumerate_virtual(&archive_path, &inner_path, &cancel)
         } else {
             fs::enumerate_reporting(&path, hidden, &cancel, &mut |count| {
@@ -153,6 +172,7 @@ fn list_dir(
                     gen,
                     scanned: count as u32,
                     done: false,
+                    archive: false,
                     truncated: false,
                     items: Vec::new(),
                     error: None,
@@ -176,6 +196,7 @@ fn list_dir(
                     gen,
                     scanned: 0,
                     done: true,
+                    archive: archive_dir,
                     truncated: false,
                     items: Vec::new(),
                     error: Some(err),
@@ -208,6 +229,7 @@ fn list_dir(
                         // Keep the readout at the enumeration total while rows stream in.
                         scanned: (reported as u32).max(scanned),
                         done: false,
+                        archive: archive_dir,
                         truncated: false,
                         items,
                         error: None,
@@ -231,6 +253,7 @@ fn list_dir(
             gen,
             scanned: (reported as u32).max(scanned),
             done: true,
+            archive: archive_dir,
             truncated,
             items: batch,
             error: None,
@@ -642,11 +665,10 @@ async fn archive_extract_items(
                     for entry in entries {
                         let norm = entry.name.replace('/', "\\");
                         let norm = norm.trim_matches('\\');
-                        if norm.len() > inner.len()
-                            && norm[..inner.len()].eq_ignore_ascii_case(&inner)
-                            && norm.chars().nth(inner.len()) == Some('\\')
-                        {
-                            let rel_suffix = &norm[inner.len()..].trim_start_matches('\\');
+                        if let Some(rel_suffix) = strip_prefix_dir(norm, &inner) {
+                            if rel_suffix.is_empty() {
+                                continue;
+                            }
                             let target_file = target_folder.join(rel_suffix);
                             if let Some(parent) = target_file.parent() {
                                 let _ = std::fs::create_dir_all(parent);
@@ -686,13 +708,17 @@ fn hash_start(
 /// Lists one level of the two compare roots; the frontend expands a folder by asking for
 /// that folder's level, so nothing below it is read until it is opened.
 #[tauri::command(rename_all = "camelCase")]
-fn compare_level(
+async fn compare_level(
     left: String,
     right: String,
     prefix: String,
     options: compare::Options,
 ) -> Result<compare::Level, ApiError> {
-    compare::level(&left, &right, &prefix, &options)
+    // Two `read_dir` passes plus a `metadata` call per entry: on a dead share this blocks
+    // for the SMB timeout, so it must not run on the IPC thread.
+    tauri::async_runtime::spawn_blocking(move || compare::level(&left, &right, &prefix, &options))
+        .await
+        .map_err(|e| ApiError::new("COMPARE_TASK", e.to_string()))?
 }
 
 /// Recursive difference counts for the shared child folders of one level; separately
@@ -1377,16 +1403,25 @@ fn shutdown<R: tauri::Runtime>(app: &tauri::AppHandle<R>, restart: bool) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.emit("flowdir:flush-layout", ());
     }
-    let ops = app.state::<ops::OpState>();
-    if !ops.active().is_empty() {
-        ops.cancel_all();
-        ops.wait_idle(std::time::Duration::from_secs(5));
-    }
-    if restart {
-        app.restart();
-    } else {
-        app.exit(0);
-    }
+    // The frontend debounces settings/layout writes; `exit`/`restart` are posted on the
+    // event loop, so the wait runs off the caller's thread (often the main one) instead
+    // of freezing the window for its duration.
+    let app = app.clone();
+    let _ = std::thread::Builder::new()
+        .name("flowdir-shutdown".into())
+        .spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(700));
+            let ops = app.state::<ops::OpState>();
+            if !ops.active().is_empty() {
+                ops.cancel_all();
+                ops.wait_idle(std::time::Duration::from_secs(5));
+            }
+            if restart {
+                app.restart();
+            } else {
+                app.exit(0);
+            }
+        });
 }
 
 /// Asks the frontend to confirm before quitting while a copy/move is still running.

@@ -13,7 +13,7 @@ mod sink;
 pub mod write;
 
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -23,6 +23,9 @@ use crate::error::ApiError;
 use crate::ops::{OpProgress, OpState};
 
 pub use sink::Sink;
+
+/// Distinguishes concurrent extractions of the same inner path within this process.
+static CACHE_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// One entry of an archive, as shown by the preview panel and virtual directory listing.
 #[derive(Serialize, Clone)]
@@ -153,20 +156,34 @@ pub fn enumerate_virtual(
         if norm.is_empty() {
             continue;
         }
-        let norm_lower = norm.to_lowercase();
-        let rel = if target_inner.is_empty() {
+        let rel_owned;
+        let rel: &str = if target_inner.is_empty() {
             norm
         } else {
-            let prefix = format!("{target_inner}\\");
-            if norm_lower.starts_with(&prefix) {
-                matched = true;
-                &norm[prefix.len()..]
-            } else if norm_lower == target_inner {
-                matched = true;
-                continue;
-            } else {
+            // Compare segment by segment instead of slicing with a byte offset taken from
+            // the lowercased string: lowercasing can change a character's UTF-8 length
+            // (`İ` → `i̇`), and that offset would land inside the original string.
+            let mut segments = norm.split('\\').filter(|segment| !segment.is_empty());
+            let mut is_target = true;
+            for target_segment in target_inner.split('\\') {
+                match segments.next() {
+                    Some(segment) if segment.to_lowercase() == target_segment => {}
+                    _ => {
+                        is_target = false;
+                        break;
+                    }
+                }
+            }
+            if !is_target {
                 continue;
             }
+            matched = true;
+            let rest: Vec<&str> = segments.collect();
+            if rest.is_empty() {
+                continue;
+            }
+            rel_owned = rest.join("\\");
+            rel_owned.as_str()
         };
         let rel = rel.trim_matches('\\');
         if rel.is_empty() {
@@ -239,7 +256,26 @@ pub fn extract_cached(archive_path: &Path, inner_path: &str) -> Result<std::path
         std::fs::create_dir_all(parent).map_err(|e| ApiError::from_io(&parent.to_string_lossy(), &e))?;
     }
 
-    backends::extract_single(&archive_path.to_string_lossy(), &inner_norm, &dest, None)?;
+    // Decode into a sibling temp file: a member that fails mid-write must not leave a
+    // truncated file behind that the mtime check above would keep serving.
+    let name = dest
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "entry".to_string());
+    let tmp = dest.with_file_name(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        CACHE_TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    if let Err(err) = backends::extract_single(&archive_path.to_string_lossy(), &inner_norm, &tmp, None) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    std::fs::rename(&tmp, &dest).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        ApiError::from_io(&dest.to_string_lossy(), &e)
+    })?;
     Ok(dest)
 }
 
@@ -422,6 +458,28 @@ mod tests {
         assert_eq!(progress.failed_count, 1);
         assert_eq!(progress.current, 4);
         assert_eq!(progress.total, 4);
+    }
+
+    #[test]
+    fn listing_a_folder_whose_lowercase_grows() {
+        let dir = temp_dir("lowercase");
+        let archive = dir.join("i.zip");
+        let file = std::fs::File::create(&archive).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        for name in ["İ/İ.txt", "İ/other.txt"] {
+            writer.start_file(name, options).unwrap();
+            writer.write_all(b"x").unwrap();
+        }
+        writer.finish().unwrap();
+
+        // `İ`.to_lowercase() is three bytes long, so a byte offset taken from the
+        // lowercased name used to slice inside the original name and panic.
+        let listing = enumerate_virtual(&archive, "İ", &Arc::new(AtomicBool::new(false))).unwrap();
+        let names: Vec<&str> = listing.entries.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&"İ.txt"));
+        assert!(names.contains(&"other.txt"));
     }
 
     #[test]

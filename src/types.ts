@@ -4,6 +4,8 @@ export type DirBatch = {
   gen: number
   scanned: number
   done: boolean
+  /** The rows come from inside an archive instead of the filesystem. */
+  archive: boolean
   /** The entry cap cut the listing short; only meaningful on the final batch. */
   truncated: boolean
   items: RawEntry[]
@@ -151,6 +153,8 @@ export type ListData = {
   selected: Set<string>
   /** Name of the row Shift-extends from; a name survives sorting and filtering, an index does not. */
   anchor: string
+  /** One-shot scroll request, used when a launch request asks for a specific row. */
+  reveal?: { name: string; id: number }
   filter: string
 }
 
@@ -281,6 +285,9 @@ export type CompareEntry = {
   name: string
   left: CompareMeta | null
   right: CompareMeta | null
+  /** False when that side exists but the current filters hide it. */
+  leftCompared?: boolean
+  rightCompared?: boolean
   status: CompareStatus
 }
 export type CompareLevel = { entries: CompareEntry[] }

@@ -221,7 +221,7 @@ export default function App() {
     evictInactiveTabs(ws)
   }, [ws, evictInactiveTabs])
   // Hook: launch & tray
-  useLaunchAndTray({
+  const { pendingSelect, pendingSelectTick } = useLaunchAndTray({
     ws,
     wsRef,
     setWs,
@@ -230,6 +230,25 @@ export default function App() {
     startScan,
     setSearchOpen,
   })
+
+  // "Open with FlowDir" and `flowdir <path>` ask for one row to be selected. The request
+  // is only usable once the folder has finished listing, so it waits here.
+  const revealSeq = useRef(0)
+  useEffect(() => {
+    const pending = pendingSelect.current
+    if (!pending) return
+    const data = listData[pending.tabId]
+    if (!data || data.loading) return
+    pendingSelect.current = null
+    if (!data.entries.some((entry) => entry.name === pending.name)) return
+    revealSeq.current += 1
+    update(pending.tabId, (d) => ({
+      ...d,
+      selected: new Set([pending.name]),
+      anchor: pending.name,
+      reveal: { name: pending.name, id: revealSeq.current },
+    }))
+  }, [listData, pendingSelect, pendingSelectTick, update])
 
   // Hook: file operations
   const {
@@ -451,6 +470,9 @@ export default function App() {
       menu ||
       fileTools ||
       compareOpen ||
+      passwordPrompt ||
+      extractTarget ||
+      compressTarget ||
       quitBusy,
   )
   const cyclePane = useCallback(() => {

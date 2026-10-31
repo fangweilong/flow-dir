@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { MutableRefObject } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { takeLaunchRequest, trayRecent } from '../api'
@@ -27,6 +27,9 @@ export function useLaunchAndTray({
   setSearchOpen,
 }: UseLaunchAndTrayOptions) {
   const pendingSelect = useRef<{ tabId: string; name: string } | null>(null)
+  // A ref alone cannot wake the consumer: opening a file from the folder already on
+  // screen changes no list state, so the request needs its own render signal.
+  const [pendingSelectTick, setPendingSelectTick] = useState(0)
   const launchApplied = useRef(false)
 
   const openRequest = useCallback(
@@ -44,7 +47,10 @@ export function useLaunchAndTray({
       const select = (req.select ?? '').trim()
       if (req.newWindow) {
         const tabId = uid('t')
-        if (select) pendingSelect.current = { tabId, name: select }
+        if (select) {
+          pendingSelect.current = { tabId, name: select }
+          setPendingSelectTick((tick) => tick + 1)
+        }
         setWs((prev) =>
           prev
             ? {
@@ -66,7 +72,10 @@ export function useLaunchAndTray({
       }
       const active = current.tabs[pane.activeTabId]
       if (active) {
-        if (select) pendingSelect.current = { tabId: active.id, name: select }
+        if (select) {
+          pendingSelect.current = { tabId: active.id, name: select }
+          setPendingSelectTick((tick) => tick + 1)
+        }
         navigate(active.id, path)
       }
     },
@@ -132,6 +141,7 @@ export function useLaunchAndTray({
 
   return {
     pendingSelect,
+    pendingSelectTick,
     openRequest,
     recentDirs,
   }

@@ -24,7 +24,7 @@ export function ShortcutsSection({ settings, keys, onChange, t, visible }: Short
   const [conflict, setConflict] = useState<string | null>(null)
 
   useEffect(() => {
-    if (!capturing) return
+    if (!capturing || !visible) return
     const onKey = (ev: KeyboardEvent) => {
       ev.preventDefault()
       ev.stopPropagation()
@@ -54,8 +54,18 @@ export function ShortcutsSection({ settings, keys, onChange, t, visible }: Short
       setConflict(null)
     }
     window.addEventListener('keydown', onKey, true)
-    return () => window.removeEventListener('keydown', onKey, true)
-  }, [capturing, keys, settings, onChange, t])
+    // Clicking anywhere else abandons the recording; otherwise the capture handler keeps
+    // swallowing keys typed into the settings search box.
+    const onDown = () => {
+      setCapturing(null)
+      setConflict(null)
+    }
+    window.addEventListener('pointerdown', onDown, true)
+    return () => {
+      window.removeEventListener('keydown', onKey, true)
+      window.removeEventListener('pointerdown', onDown, true)
+    }
+  }, [capturing, keys, settings, onChange, t, visible])
 
   if (!visible) return null
 

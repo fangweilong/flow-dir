@@ -158,12 +158,31 @@ export const isArchiveName = (name: string) => {
   return ARCHIVE_EXTS.some((ext) => lower.endsWith(`.${ext}`))
 }
 
-/** True when `path` is an archive file or points to a path inside an archive file. */
+/**
+ * Directories the backend reported as archive listings. A directory whose name merely
+ * looks like an archive (`C:\data\backup.zip\`) is a normal folder and must not be
+ * mistaken for one.
+ */
+const virtualRoots = new Set<string>()
+
+/** Records the scan result for `path`, so ancestor checks reflect what the backend did. */
+export function markVirtualRoot(path: string, virtual: boolean) {
+  const key = pathKey(path).replace(/\\+$/, '')
+  if (virtual) virtualRoots.add(key)
+  else virtualRoots.delete(key)
+}
+
+/** True when `path` is an archive file or lies inside a path the backend listed virtually. */
 export function isInsideArchive(path: string): boolean {
   if (!path) return false
-  const norm = path.replace(/\\+$/, '').replace(/\//g, '\\')
-  const segments = norm.split('\\')
-  return segments.some((segment) => isArchiveName(segment))
+  let cur = pathKey(path).replace(/\\+$/, '')
+  while (cur) {
+    if (virtualRoots.has(cur)) return true
+    const cut = cur.lastIndexOf('\\')
+    if (cut <= 0) return false
+    cur = cur.slice(0, cut)
+  }
+  return false
 }
 
 export const formatSize = (n: number, dir: boolean) => {

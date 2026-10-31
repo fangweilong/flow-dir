@@ -28,6 +28,7 @@ export function UpdatesSection({ settings, info, lang, onChange, t, visible }: U
   }, [])
 
   useEffect(() => {
+    let disposed = false
     let unlisten: (() => void) | undefined
     void listen<UpdateProgress>('flowdir:update-progress', (event) => {
       setUpdateProgress(event.payload)
@@ -38,9 +39,13 @@ export function UpdatesSection({ settings, info, lang, onChange, t, visible }: U
         void taskbarProgress('normal', event.payload.percent, 100).catch(() => undefined)
       }
     }).then((fn) => {
-      unlisten = fn
+      // The settings panel can close before `listen` resolves; the handler then keeps a
+      // dead component subscribed unless it is released here.
+      if (disposed) fn()
+      else unlisten = fn
     })
     return () => {
+      disposed = true
       if (unlisten) unlisten()
     }
   }, [])

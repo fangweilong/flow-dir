@@ -16,7 +16,7 @@ export function IntegrationSection({ settings, onChange, t, visible }: Integrati
   const [hotkeyError, setHotkeyError] = useState<string | null>(null)
 
   useEffect(() => {
-    if (!hotkeyCapturing) return
+    if (!hotkeyCapturing || !visible) return
     const onKey = (ev: KeyboardEvent) => {
       ev.preventDefault()
       ev.stopPropagation()
@@ -38,8 +38,16 @@ export function IntegrationSection({ settings, onChange, t, visible }: Integrati
       onChange({ ...settings, hotkeyEnabled: true, globalHotkey: binding })
     }
     window.addEventListener('keydown', onKey, true)
-    return () => window.removeEventListener('keydown', onKey, true)
-  }, [hotkeyCapturing, settings, onChange, t])
+    const onDown = () => {
+      setHotkeyCapturing(false)
+      setHotkeyError(null)
+    }
+    window.addEventListener('pointerdown', onDown, true)
+    return () => {
+      window.removeEventListener('keydown', onKey, true)
+      window.removeEventListener('pointerdown', onDown, true)
+    }
+  }, [hotkeyCapturing, settings, onChange, t, visible])
 
   if (!visible) return null
 

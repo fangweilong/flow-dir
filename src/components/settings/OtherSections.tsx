@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import type { Translate } from '../../i18n'
 import type { Settings } from '../../persist'
 import { restartApp, settingsSave } from '../../api'
@@ -52,6 +53,7 @@ export function GraphicsSection({
   t: Translate
   visible: boolean
 }) {
+  const [restartFailed, setRestartFailed] = useState(false)
   if (!visible) return null
 
   return (
@@ -69,15 +71,22 @@ export function GraphicsSection({
           <button
             type="button"
             onClick={() => {
+              setRestartFailed(false)
+              // Restarting after a failed write would silently drop the change.
               void settingsSave(settings)
-                .catch(() => undefined)
-                .then(() => restartApp().catch(() => undefined))
+                .then(() => restartApp())
+                .catch(() => setRestartFailed(true))
             }}
             className="shrink-0 rounded-md border border-line px-2 py-1 text-[0.6875rem] text-fg hover:bg-surface-3"
           >
             {t('settings.restartNow')}
           </button>
         </div>
+        {restartFailed && (
+          <div className="mt-1 text-[0.625rem] text-red-600 dark:text-red-400">
+            {t('settings.saveFailed')}
+          </div>
+        )}
         <div className="mt-3">
           <ToggleRow
             label={t('settings.reclaimMemory')}

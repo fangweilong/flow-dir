@@ -1080,19 +1080,30 @@ fn video_frame(path: &str, max_width: u32, bg: u32) -> Result<Vec<u8>, ApiError>
                 .Lock(&mut ptr, None, Some(&mut length))
                 .map_err(|e| ApiError::new("MF", e.to_string()))?;
             let available = length as usize;
-            let needed = (height as usize - 1) * abs_stride + row_bytes;
-            let mut pixels = Vec::with_capacity(height as usize * row_bytes);
-            if !ptr.is_null() && available >= needed {
-                let source = std::slice::from_raw_parts(ptr, available);
-                for row in 0..height as usize {
-                    let src_row = if stride < 0 {
-                        height as usize - 1 - row
-                    } else {
-                        row
-                    };
-                    let start = src_row * abs_stride;
-                    pixels.extend_from_slice(&source[start..start + row_bytes]);
-                }
+            let needed = (height as usize - 1)
+                .checked_mul(abs_stride)
+                .and_then(|rows| rows.checked_add(row_bytes));
+            let total = (height as usize).checked_mul(row_bytes);
+            // A forged container header can claim an arbitrary frame size; the buffer is
+            // filled straight from the decoder, so enforce the same ceiling as stills.
+            let (Some(needed), Some(total)) = (needed, total) else {
+                let _ = buffer.Unlock();
+                continue;
+            };
+            if ptr.is_null() || available < needed || total > MAX_RENDER_BYTES {
+                let _ = buffer.Unlock();
+                continue;
+            }
+            let source = std::slice::from_raw_parts(ptr, available);
+            let mut pixels = Vec::with_capacity(total);
+            for row in 0..height as usize {
+                let src_row = if stride < 0 {
+                    height as usize - 1 - row
+                } else {
+                    row
+                };
+                let start = src_row * abs_stride;
+                pixels.extend_from_slice(&source[start..start + row_bytes]);
             }
             let _ = buffer.Unlock();
             if !pixels.is_empty() {

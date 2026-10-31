@@ -15,7 +15,7 @@ import type { SortItem } from '../api'
 import { EMPTY_LIST, emptyList } from '../types'
 import type { Drive, Entry, GitStatus, ListData, SortState } from '../types'
 import type { Settings } from '../persist'
-import { isDir, pathKey } from '../paths'
+import { isDir, markVirtualRoot, pathKey } from '../paths'
 import { pushHistory, stepHistory } from '../workspace'
 import type { Workspace } from '../workspace'
 
@@ -105,6 +105,9 @@ export function useDirectoryScanner({
       void cancelDir(tabId).catch(() => undefined)
       listDir(path, tabId, gen, sort.key, sort.dir, hidden, (batch) => {
         if (gens.current[tabId] !== gen) return
+        // The backend knows whether this path really is an archive; the filename alone
+        // cannot tell `data.zip` (a folder) from an archive.
+        markVirtualRoot(path, batch.archive)
         if (batch.error) {
           setListData((prev) => ({
             ...prev,
@@ -443,7 +446,9 @@ export function useDirectoryScanner({
         // covered by the same window; comparing against `loading` alone would
         // rescan on every focus.
         const scannedAt = lastScan.current.get(tab.id) ?? 0
-        if (now - scannedAt > 3_000) {
+        // `lastScan` is stamped when a scan starts; a slow share can still be enumerating
+        // after three seconds, and rescanning it would cancel and restart the work.
+        if (now - scannedAt > 3_000 && !listDataRef.current[tab.id]?.loading) {
           startScan(tab.id, tab.path, pane.sort, pane.hidden, true)
         }
       }

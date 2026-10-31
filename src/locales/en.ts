@@ -175,6 +175,7 @@ export const en: Record<BaseKey, string> = {
   'settings.reclaimMemory': 'Reclaim memory on minimize',
   'settings.reclaimMemoryHint': 'Suspends rendering and trims the working set while minimized; keep off if long minimize causes hangs',
   'settings.gpuRestartHint': 'Takes effect after a restart',
+  'settings.saveFailed': 'Settings were not saved; restart cancelled',
   'settings.restartNow': 'Restart now',
   'settings.quickAccess': 'Quick access',
   'settings.quickAccessHint': 'Built-in and custom entries can both be removed',

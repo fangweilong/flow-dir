@@ -23,6 +23,19 @@ type Props = {
 /** Self-drawn menu for tabs, breadcrumbs, the drive overview and native-menu fallbacks. */
 export function ContextMenu({ x, y, items, onClose }: Props) {
   const ref = useRef<HTMLDivElement>(null)
+  // Captured during render, before the layout effect below moves focus into the menu.
+  const restoreFocus = useRef(document.activeElement instanceof HTMLElement ? document.activeElement : null)
+  useEffect(
+    () => () => {
+      const previous = restoreFocus.current
+      // A menu item may have opened a dialog and focused its input; only take focus back
+      // when the browser dropped it to the body.
+      const active = document.activeElement
+      if (!previous?.isConnected || (active && active !== document.body)) return
+      previous.focus()
+    },
+    [],
+  )
   const [pos, setPos] = useState({ x, y })
   /** Enabled entries in DOM order; arrow keys walk this list, skips separators. */
   const entries = () =>

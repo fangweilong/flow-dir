@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { compareCountsStart, compareHashStart, compareLevel, exportText, pickFolder, toolCancel } from './api'
 import type { CompareOptions } from './api'
-import { makeT } from './i18n'
+import { makeT, errorKey } from './i18n'
 import { joinPath } from './paths'
 import { BASE_FONT_SIZE, clampFontSize, clampIconSize } from './fonts'
 import { SyncPreviewModal } from './components/compare/SyncPreviewModal'
@@ -81,6 +81,14 @@ export function ComparePanel({
   onSync,
 }: Props) {
   const t = makeT(lang)
+  /** `invoke` rejects with `{ code, detail }`; `String(e)` would show `[object Object]`. */
+  const describeError = (err: unknown) => {
+    const code =
+      err && typeof err === 'object' && 'code' in err && typeof err.code === 'string'
+        ? err.code
+        : null
+    return code ? t(errorKey(code)) : String(err)
+  }
   const iconScale = clampFontSize(fontSize) / BASE_FONT_SIZE
   const iconPx = iconSize ? clampIconSize(iconSize) : undefined
   const [leftRoot, setLeftRoot] = useState(initialLeft)
@@ -112,6 +120,8 @@ export function ComparePanel({
   const countsJob = useRef<string | null>(null)
   const hashJob = useRef<string | null>(null)
   const seq = useRef(0)
+  /** Invalidates in-flight level replies and post-sync reloads of an older root pair. */
+  const sessionSeq = useRef(0)
   const levelRelRef = useRef('')
   levelRelRef.current = levelRel
 
@@ -240,6 +250,9 @@ export function ComparePanel({
 
   const loadLevel = useCallback(
     async (rel: string, active: Session, refresh: boolean) => {
+      // Bumped whenever the roots/options change: a reply from the previous session must
+      // not overwrite the new one's cache or counts.
+      const seq = sessionSeq.current
       cancelCounts()
       cancelHash()
       setLoading(true)
@@ -248,6 +261,7 @@ export function ComparePanel({
         const left = rel ? joinPath(active.left, rel) : active.left
         const right = rel ? joinPath(active.right, rel) : active.right
         const result = await compareLevel(left, right, rel, active.options)
+        if (seq !== sessionSeq.current) return
         const entries = result.entries
         setCache((prev) => {
           if (!refresh && prev.has(rel)) return prev
@@ -259,9 +273,10 @@ export function ComparePanel({
         startCounts(rel, entries, active)
         startHash(rel, entries, active)
       } catch (e: unknown) {
-        setError(String(e))
+        if (seq !== sessionSeq.current) return
+        setError(describeError(e))
       } finally {
-        setLoading(false)
+        if (seq === sessionSeq.current) setLoading(false)
       }
     },
     [cancelCounts, cancelHash, startCounts, startHash],
@@ -272,6 +287,7 @@ export function ComparePanel({
     const left = leftRoot.trim()
     const right = rightRoot.trim()
     if (!left || !right || left.toLowerCase() === right.toLowerCase()) return
+    sessionSeq.current += 1
     cancelCounts()
     cancelHash()
     setCache(new Map())
@@ -358,14 +374,23 @@ export function ComparePanel({
     }
     if (entry.left && entry.right) {
       if (entry.status === 'same') return null
-      if (strategy === 'l2r') return { kind: 'copy', source: leftPath, targetDir: targetRight }
-      if (strategy === 'r2l') return { kind: 'copy', source: rightPath, targetDir: targetLeft }
+      // A side the filters hide is only shown because the other side matched; copying
+      // from it would propagate a file the user scoped out.
+      const leftUsable = entry.leftCompared !== false
+      const rightUsable = entry.rightCompared !== false
+      if (strategy === 'l2r') {
+        return leftUsable ? { kind: 'copy', source: leftPath, targetDir: targetRight } : null
+      }
+      if (strategy === 'r2l') {
+        return rightUsable ? { kind: 'copy', source: rightPath, targetDir: targetLeft } : null
+      }
       const tolerance = session.options.toleranceMs
       const diff = entry.left.mtime - entry.right.mtime
       if (Math.abs(diff) <= tolerance) return 'conflict'
-      return diff > 0
-        ? { kind: 'copy', source: leftPath, targetDir: targetRight }
-        : { kind: 'copy', source: rightPath, targetDir: targetLeft }
+      if (diff > 0) {
+        return leftUsable ? { kind: 'copy', source: leftPath, targetDir: targetRight } : null
+      }
+      return rightUsable ? { kind: 'copy', source: rightPath, targetDir: targetLeft } : null
     }
     if (entry.left) {
       if (strategy === 'r2l') return deleteExtras ? { kind: 'delete', paths: [leftPath] } : null
@@ -404,10 +429,16 @@ export function ComparePanel({
       return
     }
     setExecuting(true)
+    // Captured before the run: `seq` is the count/hash job counter and must not be
+    // compared with the session generation.
+    const runSeq = sessionSeq.current
     try {
       await onSync(plan.actions)
       setPreviewOpen(false)
       setPlan(null)
+      // The preview can be dismissed mid-run and the roots changed; the new session owns
+      // the cache now, so do not clear it with results for the old pair.
+      if (runSeq !== sessionSeq.current) return
       setCounts({})
       setHashResults({})
       setCache(new Map())
@@ -446,7 +477,7 @@ export function ComparePanel({
       const written = await exportText(dir, `flowdir-compare-${stamp}.csv`, rows.join('\r\n'))
       onToast(t('tools.exported', { path: written }))
     } catch (e: unknown) {
-      onToast(String(e))
+      onToast(describeError(e))
     } finally {
       setExporting(false)
     }
@@ -489,7 +520,7 @@ export function ComparePanel({
       if (side === 'left') setLeftRoot(dir)
       else setRightRoot(dir)
     } catch (e: unknown) {
-      onToast(String(e))
+      onToast(describeError(e))
     }
   }
 

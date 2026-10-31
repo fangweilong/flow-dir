@@ -18,8 +18,8 @@ use windows::Win32::Storage::FileSystem::{
     FILE_ID_BOTH_DIR_INFO,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoTaskMemFree, IPersistFile, CLSCTX_INPROC_SERVER,
-    COINIT_MULTITHREADED, STGM_READ,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IPersistFile,
+    CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, STGM_READ,
 };
 use windows::Win32::UI::Shell::{
     IShellLinkW, SLGP_RAWPATH, ShellLink, StrCmpLogicalW, FOLDERID_Desktop, FOLDERID_Documents,
@@ -39,6 +39,8 @@ const HRESULT_MORE_DATA: i32 = 0x8007_00EAu32 as i32;
 const WINDOWS_TICKS_PER_MS: i64 = 10_000;
 const EPOCH_DIFF_MS: i64 = 11_644_473_600_000;
 const MAX_ENTRIES: usize = 500_000;
+/// Ceiling for the `FileIdBothDirectoryInfo` buffer (4 MiB of `u64` slots).
+const MAX_DIR_BUFFER: usize = 512 * 1024;
 
 #[derive(Clone)]
 pub struct Entry {
@@ -171,6 +173,15 @@ fn scan(
                 break;
             }
             if code == HRESULT_MORE_DATA {
+                // A misbehaving share can keep answering MORE_DATA; never grow without a
+                // ceiling. Past it, fall back to `read_dir`, which is bounded by the OS.
+                if buffer.len() >= MAX_DIR_BUFFER {
+                    log::warn!(
+                        target: "flowdir::fs",
+                        "FileIdBothDirectoryInfo kept asking for a larger buffer for {path}; using read_dir"
+                    );
+                    return scan_fallback(path, show_hidden, dirs_only, limit, cancel, progress);
+                }
                 buffer.resize(buffer.len() * 2, 0);
                 continue;
             }
@@ -605,6 +616,26 @@ fn apply_volume(drive: &mut Drive, info: &VolumeInfo) {
     drive.available = info.available;
 }
 
+/// Initialises COM as MTA for the current call and releases it on drop, so the pooled
+/// thread is left in the state it was found in.
+struct ComMtaGuard(bool);
+
+impl ComMtaGuard {
+    fn new() -> Self {
+        Self(unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok())
+    }
+}
+
+impl Drop for ComMtaGuard {
+    fn drop(&mut self) {
+        if self.0 {
+            unsafe {
+                CoUninitialize();
+            }
+        }
+    }
+}
+
 /// Shortcuts from `%APPDATA%\Microsoft\Windows\Network Shortcuts`, the per-user
 /// folder behind Explorer's "网络位置". Targets may be UNC shares or WebDAV URLs;
 /// the list passes both through and the UI opens non-path targets with the shell.
@@ -619,11 +650,10 @@ fn network_locations() -> Vec<Drive> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    // Runs on a blocking-pool thread now, which previews already initialise as MTA;
-    // ShellLink is a "Both" object, so the apartment model does not matter. S_FALSE
-    // (already initialised) is fine, and the missing CoUninitialize keeps the thread's
-    // apartment for later calls on the same thread — same as the icon cache.
-    let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    // These calls run on the shared blocking pool. Leaving the thread initialised as MTA
+    // breaks any later STA user of the same thread (the folder picker), so the apartment
+    // is released as soon as this function returns.
+    let _com = ComMtaGuard::new();
     let mut out: Vec<Drive> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
