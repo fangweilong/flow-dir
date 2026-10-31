@@ -11,6 +11,7 @@ import {
   notifyOp,
   opRetryElevated,
   opStart,
+  pathIsDir,
   restoreRecycle,
   taskbarProgress,
   uniquePaths,
@@ -390,17 +391,27 @@ export function useFileOperations({
   )
 
   const requestCompress = useCallback(
-    (paths: string[], dir: string, format: CompressFormat, auto: boolean) => {
-      const base = paths.length === 1 ? baseName(paths[0]) : baseName(dir) || 'archive'
+    (paths: string[], dir: string, format: CompressFormat) => {
       const extension = COMPRESS_EXTENSIONS[format]
-      void uniquePaths([joinPath(dir, `${base}${extension}`)])
-        .then(([dest]) => {
-          if (auto) runCompress(paths, dest, format, 6, null)
-          else setCompressTarget({ paths, dir, format, name: baseName(dest) })
-        })
-        .catch((e: unknown) => showToast(t('op.failed', { code: t(errorKey(errorCode(e))) })))
+      void (async () => {
+        let base = baseName(dir) || 'archive'
+        if (paths.length === 1) {
+          const full = baseName(paths[0])
+          // Files compress to `report.zip`, not `report.docx.zip`; a folder keeps its full
+          // name because dots are legitimate there.
+          const dot = full.lastIndexOf('.')
+          base =
+            dot > 0 && dot < full.length - 1 && !(await pathIsDir(paths[0]))
+              ? full.slice(0, dot)
+              : full
+        }
+        const [dest] = await uniquePaths([joinPath(dir, `${base}${extension}`)])
+        setCompressTarget({ paths, dir, format, name: baseName(dest) })
+      })().catch((e: unknown) =>
+        showToast(t('op.failed', { code: t(errorKey(errorCode(e))) })),
+      )
     },
-    [runCompress, showToast, t],
+    [showToast, t],
   )
 
   const runStep = useCallback(

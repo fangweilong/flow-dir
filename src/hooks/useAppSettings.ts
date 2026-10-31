@@ -25,6 +25,7 @@ import {
 import { DEFAULT_SETTINGS, fromSnapshot } from '../persist'
 import type { Settings } from '../persist'
 import { themeIsDark } from '../themes'
+import { applyIconTheme } from '../iconThemes'
 import { adoptIds, createWorkspace } from '../workspace'
 import type { Workspace } from '../workspace'
 
@@ -242,12 +243,13 @@ export function useAppSettings({
       else root.dataset.theme = settings.theme
       root.classList.toggle('dark', dark)
       root.style.colorScheme = dark ? 'dark' : 'light'
+      applyIconTheme(settings.iconTheme, dark)
     }
     apply()
     void setAppTheme(settings.theme).catch(() => undefined)
     media.addEventListener('change', apply)
     return () => media.removeEventListener('change', apply)
-  }, [settings.theme])
+  }, [settings.theme, settings.iconTheme])
 
   // Column width handlers
   const setColWidths = useCallback(

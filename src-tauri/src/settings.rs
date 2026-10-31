@@ -185,6 +185,8 @@ pub struct Settings {
     /// File and drive list icon size in px (14–32).
     #[serde(default, deserialize_with = "deserialize_lenient_u32")]
     pub icon_size: u32,
+    /// File/folder icon style: system | flat | material | catppuccin.
+    pub icon_theme: String,
     /// File-list name column width in px at the default font size; `0` fills the pane and
     /// leaves no gutter, any other value leaves the rest of the row blank.
     #[serde(default, deserialize_with = "deserialize_lenient_u32")]
@@ -446,6 +448,7 @@ impl Default for Settings {
             nav_font_family: String::new(),
             nav_font_size: default_nav_font_size(),
             icon_size: default_icon_size(),
+            icon_theme: "system".to_string(),
             list_name_width: default_list_name_width(),
             list_size_width: default_list_size_width(),
             list_time_width: default_list_time_width(),
@@ -515,6 +518,11 @@ impl Settings {
         self.nav_font_family = sanitize_region_font_family(&self.nav_font_family);
         self.nav_font_size = sanitize_region_font_size(self.nav_font_size, default_nav_font_size());
         self.icon_size = sanitize_icon_size(self.icon_size);
+        // Keep in sync with `src/iconThemes/catalog.ts`; an unknown id uses shell icons.
+        self.icon_theme = match self.icon_theme.as_str() {
+            "flat" | "material" | "catppuccin" => self.icon_theme,
+            _ => "system".to_string(),
+        };
         self.list_name_width = sanitize_name_col(self.list_name_width);
         self.list_size_width = sanitize_list_col(
             self.list_size_width,
@@ -583,6 +591,10 @@ nav_font_size = 12
 
 # 图标大小（像素，14–32）/ icon size in px
 icon_size = 20
+
+# 文件与文件夹图标风格：system / flat / material / catppuccin
+# file and folder icon style: system / flat / material / catppuccin
+icon_theme = "system"
 
 # 启动时展开预览面板 / show the preview panel on launch
 preview_open = true
@@ -733,6 +745,7 @@ struct FileSettings {
     nav_font_family: String,
     nav_font_size: u32,
     icon_size: u32,
+    icon_theme: String,
     list_name_width: u32,
     list_size_width: u32,
     list_time_width: u32,
@@ -790,6 +803,7 @@ impl Default for FileSettings {
             nav_font_family: base.nav_font_family,
             nav_font_size: base.nav_font_size,
             icon_size: base.icon_size,
+            icon_theme: base.icon_theme,
             list_name_width: base.list_name_width,
             list_size_width: base.list_size_width,
             list_time_width: base.list_time_width,
@@ -848,6 +862,7 @@ impl From<FileSettings> for Settings {
             nav_font_family: file.nav_font_family,
             nav_font_size: file.nav_font_size,
             icon_size: file.icon_size,
+            icon_theme: file.icon_theme,
             list_name_width: file.list_name_width,
             list_size_width: file.list_size_width,
             list_time_width: file.list_time_width,
@@ -973,6 +988,7 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), A
     set_value(&mut doc, "nav_font_family", Value::from(settings.nav_font_family.as_str()));
     set_value(&mut doc, "nav_font_size", Value::from(settings.nav_font_size as i64));
     set_value(&mut doc, "icon_size", Value::from(settings.icon_size as i64));
+    set_value(&mut doc, "icon_theme", Value::from(settings.icon_theme.as_str()));
     set_value(
         &mut doc,
         "list_size_width",
@@ -1183,6 +1199,7 @@ mod tests {
         let parsed = Settings {
             language: "fr".into(),
             theme: "purple".into(),
+            icon_theme: "emoji".into(),
             sidebar_width: 0,
             preview_width: 99_999,
             update_interval_hours: 48,
@@ -1191,6 +1208,7 @@ mod tests {
         .normalize();
         assert_eq!(parsed.language, "zh-CN");
         assert_eq!(parsed.theme, "system");
+        assert_eq!(parsed.icon_theme, "system");
         assert_eq!(parsed.sidebar_width, 140);
         assert_eq!(parsed.preview_width, 2000);
         assert_eq!(parsed.update_interval_hours, 24);
@@ -1323,6 +1341,7 @@ mod tests {
         assert_eq!(seed.list_font_size, 13);
         assert_eq!(seed.nav_font_size, 12);
         assert_eq!(seed.icon_size, 20);
+        assert_eq!(seed.icon_theme, "system");
         let legacy: FileSettings = toml_edit::de::from_str("language = \"en\"").unwrap();
         assert_eq!(legacy.list_size_width, 96);
         assert_eq!(legacy.list_time_width, 142);

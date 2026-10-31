@@ -1,4 +1,4 @@
-import { useCallback } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import type { MutableRefObject } from 'react'
 import type { MenuItem } from '../ContextMenu'
 import type { MenuPoint } from '../PaneView'
@@ -53,7 +53,7 @@ export interface UsePaneContextMenusOptions {
   deleteEntries: (paneId: string, names: string[], permanent: boolean) => void
   extractArchive: (archivePath: string, destDir: string) => void
   setExtractTarget: (val: { archive: string; initial: string } | null) => void
-  requestCompress: (paths: string[], dir: string, format: CompressFormat, auto: boolean) => void
+  requestCompress: (paths: string[], dir: string, format: CompressFormat) => void
   setFileTools: (val: { mode: 'hash'; paths: string[] } | { mode: 'dup'; root: string } | null) => void
   setCompareOpen: (open: boolean) => void
   closeTab: (paneId: string, tabId: string) => void
@@ -106,6 +106,28 @@ export function usePaneContextMenus({
   togglePinPlace,
   removePlace,
 }: UsePaneContextMenusOptions) {
+  /** A shell "New" command just ran; wait for the rescan that reveals the created item. */
+  const [pendingNew, setPendingNew] = useState<{
+    paneId: string
+    tabId: string
+    before: Set<string>
+  } | null>(null)
+
+  useEffect(() => {
+    if (!pendingNew) return
+    const entries = listData[pendingNew.tabId]?.entries
+    if (!entries) return
+    const created = entries.find((entry) => !pendingNew.before.has(entry.name))
+    if (!created) return
+    setPendingNew(null)
+    update(pendingNew.tabId, (data) => ({
+      ...data,
+      selected: new Set([created.name]),
+      anchor: created.name,
+    }))
+    startRename(pendingNew.paneId, created.name)
+  }, [listData, pendingNew, startRename, update])
+
   const rowFallback = useCallback(
     (paneId: string, entry: Entry, paths: string[]): MenuItem[] => {
       const dir = isDir(entry.attrs)
@@ -135,7 +157,7 @@ export function usePaneContextMenus({
               {
                 kind: 'item',
                 label: t('menu.compressTo'),
-                onSelect: () => requestCompress(paths, tabPath, 'zip', false),
+                onSelect: () => requestCompress(paths, tabPath, 'zip'),
               },
             ]
           : []
@@ -300,7 +322,7 @@ export function usePaneContextMenus({
           else if (outcome.action === 'extractTo') {
             setExtractTarget({ archive: paths[0], initial: tab.path })
           } else if (outcome.action === 'compress' && outcome.format) {
-            requestCompress(paths, tab.path, outcome.format as CompressFormat, true)
+            requestCompress(paths, tab.path, outcome.format as CompressFormat)
           } else if (outcome.invoked) refreshPanes()
         })
         .catch(() => {
@@ -423,6 +445,7 @@ export function usePaneContextMenus({
         return
       }
       const dpr = window.devicePixelRatio || 1
+      const before = new Set((listData[tab.id]?.entries ?? []).map((entry) => entry.name))
       void shellMenuBackgroundShow(
         tab.path,
         Math.round(point.screenX * dpr),
@@ -436,11 +459,14 @@ export function usePaneContextMenus({
           if (outcome.action === 'toggleHidden') toggleHidden(paneId)
           else if (outcome.action === 'findDuplicates') setFileTools({ mode: 'dup', root: tab.path })
           else if (outcome.action === 'compare') setCompareOpen(true)
-          else if (outcome.invoked) refreshPanes()
+          else if (outcome.action === 'newItem') {
+            setPendingNew({ paneId, tabId: tab.id, before })
+            refreshPanes()
+          } else if (outcome.invoked) refreshPanes()
         })
         .catch(() => blankFallbackMenu(paneId, point))
     },
-    [blankFallbackMenu, refreshPanes, setCompareOpen, setFileTools, t, toggleHidden, wsRef],
+    [blankFallbackMenu, listData, refreshPanes, setCompareOpen, setFileTools, t, toggleHidden, wsRef],
   )
 
   const openTabMenu = useCallback(

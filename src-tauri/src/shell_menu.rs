@@ -668,6 +668,22 @@ unsafe fn track(
             outcome.action = Some(extra.action.into());
         } else if (ID_CMD_FIRST..=ID_CMD_LAST).contains(&command) {
             let offset = command - ID_CMD_FIRST;
+            // New submenu entries carry canonical verbs such as `NewFolder`; remember the
+            // verb so the frontend can select and rename the item the shell just created.
+            let mut buffer = [0u16; 64];
+            let verb = match context.GetCommandString(
+                offset as usize,
+                GCS_VERBW,
+                None,
+                PSTR(buffer.as_mut_ptr() as *mut u8),
+                buffer.len() as u32,
+            ) {
+                Ok(()) => {
+                    let len = buffer.iter().position(|c| *c == 0).unwrap_or(buffer.len());
+                    String::from_utf16_lossy(&buffer[..len])
+                }
+                Err(_) => String::new(),
+            };
             let info = CMINVOKECOMMANDINFOEX {
                 cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
                 fMask: CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE,
@@ -686,6 +702,9 @@ unsafe fn track(
                 return Err(ApiError::new("SHELL_MENU", err.to_string()));
             }
             outcome.invoked = true;
+            if verb.to_ascii_lowercase().starts_with("new") {
+                outcome.action = Some("newItem".into());
+            }
         }
 
         CONTEXT.with(|cell| *cell.borrow_mut() = None);

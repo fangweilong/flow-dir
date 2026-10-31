@@ -4,6 +4,7 @@ import { makeT } from './i18n'
 import { SHORTCUTS, resolveShortcuts } from './shortcuts'
 import type { AppInfo, EverythingStatus, Lang } from './types'
 import { THEMES } from './themes'
+import { ICON_THEMES } from './iconThemes'
 import type { Settings } from './persist'
 import { SECTIONS, type SectionId } from './components/settings/SettingsShared'
 import { GeneralSection } from './components/settings/GeneralSection'
@@ -53,6 +54,8 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
       t('settings.fontSize'),
       t('settings.fontCustom'),
       t('settings.iconSize'),
+      t('settings.iconTheme'),
+      ...ICON_THEMES.map((entry) => `${t(entry.label)} ${t(entry.hint)}`),
       t('settings.fontRegionsHint'),
       t('settings.fontTab'),
       t('settings.fontList'),

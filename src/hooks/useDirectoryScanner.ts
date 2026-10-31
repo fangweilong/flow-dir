@@ -284,7 +284,9 @@ export function useDirectoryScanner({
       if (!tab) continue
       if (!tab.path) overview = true
       else {
-        startScan(tab.id, tab.path, pane.sort, pane.hidden)
+        // Keep the current rows on screen: replacing them would drop both the selection
+        // and the scroll offset right after an operation touches the directory.
+        startScan(tab.id, tab.path, pane.sort, pane.hidden, true)
         invalidateTree(tab.path)
         invalidateGit(tab.path)
       }

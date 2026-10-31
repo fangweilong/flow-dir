@@ -284,6 +284,7 @@ export default function App() {
     showToast,
     t,
     refreshPanes,
+    update,
     invalidateTree,
     invalidateGit,
     setPrompt,

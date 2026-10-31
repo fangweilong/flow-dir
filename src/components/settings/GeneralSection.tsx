@@ -18,6 +18,7 @@ import {
   clampRegionFontSize,
 } from '../../fonts'
 import { ActiveCheck, RegionFontRow, ThemeCard, ThemeSwatch, ToggleRow } from './SettingsShared'
+import { ICON_THEMES, type IconThemeId } from '../../iconThemes'
 
 export type GeneralSectionProps = {
   settings: Settings
@@ -183,6 +184,26 @@ export function GeneralSection({ settings, onChange, t, visible, everything }: G
               />
               <span className="tabular w-9 text-right text-[0.71875rem] text-muted">{iconSize} px</span>
             </div>
+          </div>
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-line px-3 py-2">
+            <div className="min-w-0">
+              <div className="text-[0.75rem] text-fg">{t('settings.iconTheme')}</div>
+              <div className="truncate text-[0.65625rem] text-muted-2">
+                {t(ICON_THEMES.find((entry) => entry.id === settings.iconTheme)?.hint ?? 'settings.iconThemeHint')}
+              </div>
+            </div>
+            <select
+              value={settings.iconTheme}
+              onChange={(ev) => onChange({ ...settings, iconTheme: ev.target.value as IconThemeId })}
+              aria-label={t('settings.iconTheme')}
+              className="h-7 shrink-0 rounded border border-line bg-surface-2 px-1.5 text-[0.71875rem] text-fg outline-none focus:border-blue-400"
+            >
+              {ICON_THEMES.map((entry) => (
+                <option key={entry.id} value={entry.id}>
+                  {t(entry.label)}
+                </option>
+              ))}
+            </select>
           </div>
           <div className="space-y-1.5 rounded-lg border border-line px-3 py-2">
             <div className="text-[0.65625rem] text-muted-2">{t('settings.fontRegionsHint')}</div>

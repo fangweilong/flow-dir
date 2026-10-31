@@ -5,11 +5,12 @@ import {
   clipboardCopy,
   clipboardPaste,
   shellProperties,
+  uniquePaths,
 } from '../api'
 import type { ListData } from '../types'
 import type { Translate } from '../i18n'
 import type { Workspace } from '../workspace'
-import { isInsideArchive, joinPath } from '../paths'
+import { baseName, isInsideArchive, joinPath } from '../paths'
 
 const errorCode = (err: unknown): string =>
   err && typeof err === 'object' && 'code' in err && typeof err.code === 'string'
@@ -48,11 +49,13 @@ export interface UseFileActionHandlersOptions {
       newNames?: string[]
       permanent?: boolean
       after?: () => void
+      onDone?: (ok: boolean) => void
     },
   ) => void
   showToast: (text: string) => void
   t: Translate
   refreshPanes: () => void
+  update: (tabId: string, fn: (d: ListData) => ListData) => void
   invalidateTree: (dir: string) => void
   invalidateGit: (dir: string) => void
   setPrompt: React.Dispatch<React.SetStateAction<PromptModalState | null>>
@@ -69,6 +72,7 @@ export function useFileActionHandlers({
   showToast,
   t,
   refreshPanes,
+  update,
   invalidateTree,
   invalidateGit,
   setPrompt,
@@ -157,14 +161,28 @@ export function useFileActionHandlers({
       const pane = current.panes[paneId]
       const tab = pane ? current.tabs[pane.activeTabId] : undefined
       if (!tab?.path) return
-      setPrompt({
-        paneId,
-        title: t('dialog.newFolderTitle'),
-        initial: '',
-        submit: (value) => runOp('newdir', [tab.path], { targetDir: tab.path, newName: value }),
-      })
+      void uniquePaths([joinPath(tab.path, t('dialog.newFolderName'))])
+        .then(([dest]) => {
+          const name = baseName(dest)
+          runOp('newdir', [tab.path], {
+            targetDir: tab.path,
+            newName: name,
+            // Explorer-style: the folder exists before the name editor opens, and Escape
+            // keeps the default name instead of leaving nothing behind.
+            onDone: (ok) => {
+              if (!ok) return
+              update(tab.id, (data) => ({
+                ...data,
+                selected: new Set([name]),
+                anchor: name,
+              }))
+              startRename(paneId, name)
+            },
+          })
+        })
+        .catch((e: unknown) => showToast(t('op.failed', { code: errorCode(e) })))
     },
-    [runOp, setPrompt, t, wsRef],
+    [runOp, showToast, startRename, t, update, wsRef],
   )
 
   const pasteInto = useCallback(

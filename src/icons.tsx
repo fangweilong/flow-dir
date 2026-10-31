@@ -1,4 +1,6 @@
 import { useState, useSyncExternalStore } from 'react'
+import { fileIconKey, folderIconKey } from './iconThemes/catalog'
+import { useIconTheme } from './iconThemes'
 
 /**
  * Icon URLs are cached by WebView2, so associations changed outside the app would stick
@@ -97,11 +99,29 @@ export function FileIcon({
   /** Explicit pixel size for the icon, overriding the default 1.25em. */
   size?: number
 }) {
-  const [failed, setFailed] = useState(false)
+  const theme = useIconTheme()
+  const [failed, setFailed] = useState<string | null>(null)
   const revision = useSyncExternalStore(subscribeIconRevision, iconRevisionSnapshot)
   const dim = size ? `${size}px` : '1.25em'
   const style = { width: dim, height: dim }
-  if (path && !failed) {
+  if (theme.assets) {
+    const key = dir ? folderIconKey(name) : fileIconKey(name)
+    const src = theme.assets[key] ?? theme.assets[dir ? 'folder' : 'file']
+    if (src && failed !== theme.id) {
+      return (
+        <img
+          src={src}
+          width={size ?? 16}
+          height={size ?? 16}
+          alt=""
+          draggable={false}
+          className="shrink-0"
+          style={style}
+          onError={() => setFailed(theme.id)}
+        />
+      )
+    }
+  } else if (theme.id === 'system' && path && failed !== 'system') {
     const px = Math.max(16, Math.round((size ?? 20 * scale) * (window.devicePixelRatio || 1)))
     return (
       <img
@@ -112,7 +132,7 @@ export function FileIcon({
         draggable={false}
         className="shrink-0"
         style={style}
-        onError={() => setFailed(true)}
+        onError={() => setFailed('system')}
       />
     )
   }

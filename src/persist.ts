@@ -1,4 +1,5 @@
 import type { Lang, Theme } from './types'
+import type { IconThemeId } from './iconThemes/catalog'
 import type { Node, PaneState, TabState, Workspace } from './workspace'
 import type { ShortcutOverride } from './shortcuts'
 
@@ -50,6 +51,8 @@ export type Settings = {
   navFontSize: number
   /** File and drive list icon size in px (14–32). */
   iconSize: number
+  /** Icon style for file and folder rows: Windows shell icons or a bundled theme. */
+  iconTheme: IconThemeId
   /** File-list "size" column visibility. */
   listColSize: boolean
   /** File-list "type" column visibility. */
@@ -132,6 +135,7 @@ export const DEFAULT_SETTINGS: Settings = {
   navFontFamily: '',
   navFontSize: 12,
   iconSize: 20,
+  iconTheme: 'system',
   listColSize: true,
   listColType: true,
   listColTime: true,
