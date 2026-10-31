@@ -32,6 +32,10 @@ export interface AddressBarProps {
   onDriveMenu: (point: MenuPoint) => void
   onCopyPath: (path: string) => void
   onPathInvalid: (path: string) => void
+  /** Middle-click a breadcrumb opens that folder in a background tab. */
+  onOpenInNewTab?: (path: string) => void
+  /** Whether middle-click opens a tab at all; off means the click navigates instead. */
+  newTabOnMiddleClick: boolean
 }
 
 export const AddressBar = forwardRef<AddressBarHandle, AddressBarProps>(function AddressBar(
@@ -50,6 +54,8 @@ export const AddressBar = forwardRef<AddressBarHandle, AddressBarProps>(function
     onDriveMenu,
     onCopyPath,
     onPathInvalid,
+    onOpenInNewTab,
+    newTabOnMiddleClick,
   },
   ref,
 ) {
@@ -247,6 +253,11 @@ export const AddressBar = forwardRef<AddressBarHandle, AddressBarProps>(function
                   data-crumb={part.path}
                   data-drop-dir={part.path}
                   onClick={() => tab && pathKey(part.path) !== pathKey(tab.path) && onNavigate(tab.id, part.path)}
+                  onAuxClick={(e) => {
+                    if (e.button !== 1 || !newTabOnMiddleClick || !onOpenInNewTab) return
+                    e.preventDefault()
+                    onOpenInNewTab(part.path)
+                  }}
                   title={part.path}
                   className={`max-w-[10rem] truncate rounded px-1 py-[0.25em] leading-none hover:bg-surface-3 ${
                     i === parts.length - 1 ? 'font-medium text-fg-strong' : 'text-muted'

@@ -38,6 +38,7 @@ export interface UsePaneContextMenusOptions {
   showToast: (msg: string) => void
   setMenu: (menu: { x: number; y: number; items: MenuItem[] } | null) => void
   navigate: (tabId: string, path: string) => void
+  openTabAt?: (paneId: string, path: string) => void
   openTarget: (path: string) => void
   update: (tabId: string, fn: (d: ListData) => ListData) => void
   refreshPanes: () => void
@@ -76,6 +77,7 @@ export function usePaneContextMenus({
   showToast,
   setMenu,
   navigate,
+  openTabAt,
   openTarget,
   update,
   refreshPanes,
@@ -152,6 +154,21 @@ export function usePaneContextMenus({
             else openTarget(target)
           },
         },
+        ...(dir || isArchive
+          ? [
+              {
+                kind: 'item' as const,
+                label: t('menu.openInNewTab'),
+                onSelect: () => {
+                  if (tabPath) {
+                    const target = joinPath(tabPath, entry.name)
+                    if (openTabAt) openTabAt(paneId, target)
+                    else if (pane) navigate(pane.activeTabId, target)
+                  }
+                },
+              },
+            ]
+          : []),
         {
           kind: 'item',
           label: t('menu.copy'),
@@ -233,8 +250,8 @@ export function usePaneContextMenus({
       isPinnedPlace,
       keys,
       navigate,
+      openTabAt,
       openTarget,
-      pasteInto,
       requestCompress,
       setExtractTarget,
       setFileTools,
@@ -516,7 +533,9 @@ export function usePaneContextMenus({
           label: t('menu.openInNewTab'),
           disabled: !pane,
           onSelect: () => {
-            if (pane) navigate(pane.activeTabId, place.path)
+            if (!pane) return
+            if (openTabAt) openTabAt(pane.id, place.path)
+            else navigate(pane.activeTabId, place.path)
           },
         },
         { kind: 'sep' },
@@ -526,7 +545,7 @@ export function usePaneContextMenus({
       ]
       setMenu({ x: point.clientX, y: point.clientY, items })
     },
-    [copyPaths, navigate, removePlace, setMenu, t, wsRef],
+    [copyPaths, navigate, openTabAt, removePlace, setMenu, t, wsRef],
   )
 
   const openTreeContextMenu = useCallback(
@@ -548,7 +567,9 @@ export function usePaneContextMenus({
           label: t('menu.openInNewTab'),
           disabled: !pane,
           onSelect: () => {
-            if (pane) navigate(pane.activeTabId, targetPath)
+            if (!pane) return
+            if (openTabAt) openTabAt(pane.id, targetPath)
+            else navigate(pane.activeTabId, targetPath)
           },
         },
         {
@@ -581,7 +602,7 @@ export function usePaneContextMenus({
       ]
       setMenu({ x: point.clientX, y: point.clientY, items })
     },
-    [copyPaths, isPinnedPlace, navigate, setMenu, showToast, t, togglePinPlace, wsRef],
+    [copyPaths, isPinnedPlace, navigate, openTabAt, setMenu, showToast, t, togglePinPlace, wsRef],
   )
 
   const openDriveRowMenu = useCallback(
@@ -600,6 +621,29 @@ export function usePaneContextMenus({
             else openTarget(drive.root)
           },
         },
+        ...(isFsPath(drive.root)
+          ? [
+              {
+                kind: 'item' as const,
+                label: t('menu.openInNewTab'),
+                disabled: !pane,
+                onSelect: () => {
+                  if (pane) {
+                    if (openTabAt) openTabAt(pane.id, drive.root)
+                    else navigate(pane.activeTabId, drive.root)
+                  }
+                },
+              },
+              {
+                kind: 'item' as const,
+                label: t('menu.openInExplorer'),
+                onSelect: () =>
+                  void explorerOpen(drive.root).catch((e: unknown) =>
+                    showToast(t('op.failed', { code: errorCode(e) })),
+                  ),
+              },
+            ]
+          : []),
         {
           kind: 'item',
           label: t('menu.properties'),
@@ -625,7 +669,7 @@ export function usePaneContextMenus({
       }
       setMenu({ x: point.clientX, y: point.clientY, items })
     },
-    [navigate, openTarget, refreshDrives, setMenu, showToast, t, wsRef],
+    [navigate, openTabAt, openTarget, refreshDrives, setMenu, showToast, t, wsRef],
   )
 
   const openDriveMenu = useCallback(

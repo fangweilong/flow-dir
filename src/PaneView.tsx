@@ -1,12 +1,12 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { crumbs, formatSize, isArchiveName, isDir, isInsideArchive, joinPath, parentPath, underPath } from './paths'
+import { crumbs, isArchiveName, isDir, isInsideArchive, joinPath, parentPath, underPath } from './paths'
 import { buildGitBadges } from './git'
-import { GitChip } from './components/GitBadges'
 import { HeaderCell, ColDivider } from './components/TableHeader'
 import { AddressBar, type AddressBarHandle } from './components/AddressBar'
 import { DrivesOverview } from './components/DrivesOverview'
 import { PaneTabBar } from './components/PaneTabBar'
+import { PaneStatusBar } from './components/PaneStatusBar'
 import { usePaneColumnResize } from './hooks/usePaneColumnResize'
 import { FileTableRow } from './components/FileTableRow'
 import type { ShortcutId } from './shortcuts'
@@ -22,16 +22,12 @@ import {
   clampIconSize,
   clampRegionFontSize,
 } from './fonts'
-// Translate type removed
 import type { DropMode, PaneState, TabState } from './workspace'
-
-// driveRoot is imported from AddressBar
 
 /** Metrics at the default 13 px text size; every pane scales them by the settings font size. */
 const ROW_H = 26
 /** List header row height at the default text size. */
 const HEADER_H = 24
-
 
 /** Screen/client coordinates for a context-menu request. */
 export type MenuPoint = {
@@ -479,6 +475,8 @@ export function PaneView({
           onDriveMenu={onDriveMenu}
           onCopyPath={onCopyPath}
           onPathInvalid={onPathInvalid}
+          onOpenInNewTab={onOpenInNewTab}
+          newTabOnMiddleClick={newTabOnMiddleClick}
         />
 
         {showFilter && !root && (
@@ -761,28 +759,20 @@ export function PaneView({
         )}
       </div>
 
-      <div
-        data-status
-        className="flex h-6 shrink-0 items-center justify-between border-t border-line bg-surface-2 px-2 text-[0.65625rem] text-muted"
-      >
-        <div className="flex min-w-0 items-center gap-2">
-          {git?.root && <GitChip git={git} t={t} />}
-          <span>{root ? t('list.drives', { count: drives.length }) : t('list.items', { count: view.length })}</span>
-          {list.filter && list.entries.length !== view.length && (
-            <span>{t('list.total', { count: list.entries.length })}</span>
-          )}
-          {visibleSelected.size > 0 && (
-            <span>
-              {t('list.selected', { count: visibleSelected.size })}
-              {selectedSize > 0 && ` · ${formatSize(selectedSize, false)}`}
-            </span>
-          )}
-          {list.loading && list.entries.length > 0 && (
-            <span>{t('list.scanning', { count: list.scanned })}</span>
-          )}
-        </div>
-        <span className="max-w-[45%] truncate font-mono text-[0.59375rem] text-muted-2">{tab?.path}</span>
-      </div>
+      <PaneStatusBar
+        git={git}
+        t={t}
+        root={root}
+        driveCount={drives.length}
+        visibleCount={view.length}
+        entryCount={list.entries.length}
+        filter={list.filter}
+        selectedCount={visibleSelected.size}
+        selectedSize={selectedSize}
+        loading={list.loading}
+        scanned={list.scanned}
+        path={tab?.path}
+      />
 
       {typed && (
         <div

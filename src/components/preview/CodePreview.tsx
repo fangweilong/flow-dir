@@ -62,12 +62,61 @@ const KEYWORDS_BY_EXT: Record<string, Record<string, true>> = {
     'and', 'or', 'not', 'null', 'is', 'in', 'between', 'like', 'create', 'table', 'drop',
     'alter', 'index', 'primary', 'key', 'foreign', 'references', 'distinct', 'union',
   ]),
+  c: toLookup([
+    'auto', 'break', 'case', 'char', 'const', 'continue', 'default', 'do', 'double', 'else',
+    'enum', 'extern', 'float', 'for', 'goto', 'if', 'inline', 'int', 'long', 'register',
+    'restrict', 'return', 'short', 'signed', 'sizeof', 'static', 'struct', 'switch', 'typedef',
+    'union', 'unsigned', 'void', 'volatile', 'while', 'true', 'false', 'NULL',
+  ]),
+  cpp: toLookup([
+    'alignas', 'alignof', 'auto', 'bool', 'break', 'case', 'catch', 'char', 'class', 'const',
+    'constexpr', 'continue', 'decltype', 'default', 'delete', 'do', 'double', 'else', 'enum',
+    'explicit', 'export', 'extern', 'false', 'float', 'for', 'friend', 'goto', 'if', 'inline',
+    'int', 'long', 'mutable', 'namespace', 'new', 'noexcept', 'nullptr', 'operator', 'override',
+    'private', 'protected', 'public', 'return', 'short', 'signed', 'sizeof', 'static', 'struct',
+    'switch', 'template', 'this', 'throw', 'true', 'try', 'typedef', 'typename', 'union',
+    'unsigned', 'using', 'virtual', 'void', 'volatile', 'while', 'final',
+  ]),
+  java: toLookup([
+    'abstract', 'assert', 'boolean', 'break', 'byte', 'case', 'catch', 'char', 'class',
+    'const', 'continue', 'default', 'do', 'double', 'else', 'enum', 'extends', 'final',
+    'finally', 'float', 'for', 'goto', 'if', 'implements', 'import', 'instanceof', 'int',
+    'interface', 'long', 'native', 'new', 'package', 'private', 'protected', 'public',
+    'return', 'short', 'static', 'strictfp', 'super', 'switch', 'synchronized', 'this',
+    'throw', 'throws', 'transient', 'try', 'void', 'volatile', 'while', 'true', 'false', 'null',
+    'record', 'sealed', 'permits', 'yield', 'var',
+  ]),
+  sh: toLookup([
+    'if', 'then', 'else', 'elif', 'fi', 'case', 'esac', 'for', 'while', 'until', 'do',
+    'done', 'in', 'function', 'select', 'time', 'return', 'exit', 'export', 'local',
+    'readonly', 'set', 'unset', 'echo', 'shift', 'trap',
+  ]),
+  css: toLookup([
+    'important', 'media', 'keyframes', 'font-face', 'supports', 'import', 'charset',
+    'inherit', 'initial', 'unset', 'auto', 'none', 'var', 'calc', 'rgb', 'rgba', 'hsl',
+  ]),
+  html: toLookup([
+    'doctype', 'html', 'head', 'body', 'div', 'span', 'p', 'a', 'img', 'script', 'style',
+    'link', 'meta', 'title', 'button', 'input', 'form', 'table', 'tr', 'td', 'th', 'ul',
+    'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'section', 'nav', 'header', 'footer',
+  ]),
 }
 // Aliases
 KEYWORDS_BY_EXT.tsx = KEYWORDS_BY_EXT.ts
 KEYWORDS_BY_EXT.jsx = KEYWORDS_BY_EXT.js
 KEYWORDS_BY_EXT.mjs = KEYWORDS_BY_EXT.js
 KEYWORDS_BY_EXT.cjs = KEYWORDS_BY_EXT.js
+KEYWORDS_BY_EXT.cc = KEYWORDS_BY_EXT.cpp
+KEYWORDS_BY_EXT.cxx = KEYWORDS_BY_EXT.cpp
+KEYWORDS_BY_EXT.h = KEYWORDS_BY_EXT.c
+KEYWORDS_BY_EXT.hpp = KEYWORDS_BY_EXT.cpp
+KEYWORDS_BY_EXT.kt = KEYWORDS_BY_EXT.java
+KEYWORDS_BY_EXT.bash = KEYWORDS_BY_EXT.sh
+KEYWORDS_BY_EXT.zsh = KEYWORDS_BY_EXT.sh
+KEYWORDS_BY_EXT.scss = KEYWORDS_BY_EXT.css
+KEYWORDS_BY_EXT.less = KEYWORDS_BY_EXT.css
+KEYWORDS_BY_EXT.htm = KEYWORDS_BY_EXT.html
+KEYWORDS_BY_EXT.xml = KEYWORDS_BY_EXT.html
 
 function tokenizeLine(line: string, ext: string): Token[] {
   const tokens: Token[] = []
@@ -81,13 +130,15 @@ function tokenizeLine(line: string, ext: string): Token[] {
   const indent = line.slice(0, line.length - trimmed.length)
 
   // Shell / Python / YAML comments: #
-  const isHashComment = (ext === 'py' || ext === 'sh' || ext === 'yaml' || ext === 'yml' || ext === 'toml') && trimmed.startsWith('#')
+  const isHashComment = (ext === 'py' || ext === 'sh' || ext === 'bash' || ext === 'zsh' || ext === 'yaml' || ext === 'yml' || ext === 'toml') && trimmed.startsWith('#')
   // C-style comments: //
   const isSlashComment = trimmed.startsWith('//')
   // SQL comments: --
   const isDashComment = (ext === 'sql') && trimmed.startsWith('--')
+  // HTML / XML comments: <!--
+  const isXmlComment = (ext === 'html' || ext === 'htm' || ext === 'xml' || ext === 'svg') && trimmed.startsWith('<!--')
 
-  if (isHashComment || isSlashComment || isDashComment) {
+  if (isHashComment || isSlashComment || isDashComment || isXmlComment) {
     if (indent) tokens.push({ kind: 'plain', text: indent })
     tokens.push({ kind: 'comment', text: trimmed })
     return tokens
@@ -99,7 +150,7 @@ function tokenizeLine(line: string, ext: string): Token[] {
     // Trailing comment
     if (
       (ch === '/' && line[i + 1] === '/') ||
-      ((ext === 'py' || ext === 'sh' || ext === 'toml' || ext === 'yaml' || ext === 'yml') && ch === '#') ||
+      ((ext === 'py' || ext === 'sh' || ext === 'bash' || ext === 'zsh' || ext === 'toml' || ext === 'yaml' || ext === 'yml') && ch === '#') ||
       (ext === 'sql' && ch === '-' && line[i + 1] === '-')
     ) {
       tokens.push({ kind: 'comment', text: line.slice(i) })
@@ -142,7 +193,7 @@ function tokenizeLine(line: string, ext: string): Token[] {
         tokens.push({ kind: 'boolean', text: word })
       } else if (isKw) {
         tokens.push({ kind: 'keyword', text: word })
-      } else if (isType && (ext === 'rs' || ext === 'ts' || ext === 'tsx' || ext === 'go' || ext === 'java')) {
+      } else if (isType && (ext === 'rs' || ext === 'ts' || ext === 'tsx' || ext === 'go' || ext === 'java' || ext === 'kt' || ext === 'c' || ext === 'cpp' || ext === 'h' || ext === 'hpp')) {
         tokens.push({ kind: 'type', text: word })
       } else {
         tokens.push({ kind: 'plain', text: word })

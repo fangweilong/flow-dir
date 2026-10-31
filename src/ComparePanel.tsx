@@ -2,9 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { compareCountsStart, compareHashStart, compareLevel, exportText, pickFolder, toolCancel } from './api'
 import type { CompareOptions } from './api'
 import { makeT } from './i18n'
-import { formatSize, joinPath } from './paths'
-import { FileIcon } from './icons'
+import { joinPath } from './paths'
 import { BASE_FONT_SIZE, clampFontSize, clampIconSize } from './fonts'
+import { SyncPreviewModal } from './components/compare/SyncPreviewModal'
+import { CompareOptionsBar } from './components/compare/CompareOptionsBar'
+import { CompareTableView } from './components/compare/CompareTableView'
 import type {
   CompareCount,
   CompareEntry,
@@ -20,8 +22,7 @@ export type SyncAction =
   | { kind: 'delete'; paths: string[] }
 
 type Session = { left: string; right: string; options: CompareOptions }
-
-type SyncPlan = {
+export type SyncPlan = {
   actions: SyncAction[]
   conflicts: number
   mismatches: number
@@ -495,72 +496,6 @@ export function ComparePanel({
   const fmtTime = (ms: number) =>
     ms ? new Date(ms).toLocaleString(lang === 'zh-CN' ? 'zh-CN' : 'en-US') : '—'
 
-  /**
-   * One half of the split diff. A side that lacks the entry keeps the row height with a
-   * muted blank so the two halves stay aligned, the way a side-by-side diff renders an
-   * absent line.
-   */
-  const sideCell = (entry: CompareEntry, side: 'left' | 'right') => {
-    const meta = entry[side]
-    if (!meta) {
-      return <div className="min-w-0 bg-surface-2/40 px-2 py-1 text-muted-2/40">—</div>
-    }
-    const root = side === 'left' ? session?.left ?? '' : session?.right ?? ''
-    const canEnter = !!entry.left?.isDir && !!entry.right?.isDir
-    const count = counts[entry.rel]
-    const hash = hashResults[entry.rel]
-    const tint =
-      entry.status === 'different'
-        ? 'bg-amber-50/60 dark:bg-amber-950/25'
-        : entry.status === 'left' && side === 'left'
-          ? 'bg-rose-50/60 dark:bg-rose-950/25'
-          : entry.status === 'right' && side === 'right'
-            ? 'bg-emerald-50/60 dark:bg-emerald-950/25'
-            : ''
-    return (
-      <div className={`flex min-w-0 items-center gap-1.5 px-2 py-1 ${tint}`}>
-        <FileIcon
-          name={entry.name}
-          dir={meta.isDir}
-          path={joinPath(root, entry.rel)}
-          scale={iconScale}
-          size={iconPx}
-        />
-        <span
-          className={`truncate ${entry.status === 'same' ? 'text-muted' : 'text-fg-strong'}`}
-          title={entry.rel}
-        >
-          {entry.name}
-        </span>
-        {side === 'left' && count && (
-          <span className="shrink-0 text-[0.625rem] text-muted-2" title={t('compare.countsHint')}>
-            {count.leftOnly}/{count.different}/{count.rightOnly}
-          </span>
-        )}
-        {side === 'left' && canEnter && (
-          <button
-            type="button"
-            onClick={() => session && void loadLevel(entry.rel, session, false)}
-            className="shrink-0 rounded border border-line px-1 text-[0.625rem] text-muted hover:text-fg"
-          >
-            {t('compare.enter')}
-          </button>
-        )}
-        {side === 'right' && hash && (
-          <span
-            title={`${hash.leftHash ?? ''} / ${hash.rightHash ?? ''}${hash.error ? ` — ${hash.error}` : ''}`}
-            className={`shrink-0 font-mono ${hash.equal ? 'text-emerald-500' : 'text-rose-500'}`}
-          >
-            {hash.equal ? '=' : '≠'}
-          </span>
-        )}
-        <span className="ml-auto shrink-0 font-mono text-[0.625rem] text-muted-2">
-          {formatSize(meta.size, meta.isDir) || '—'} · {fmtTime(meta.mtime)}
-        </span>
-      </div>
-    )
-  }
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-3 backdrop-blur-[1px]">
       <div className="flex max-h-[92vh] w-[86rem] max-w-full flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-2xl">
@@ -716,57 +651,19 @@ export function ComparePanel({
         </div>
 
         {showOptions && (
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-line px-3 py-1.5 text-[0.65625rem] text-muted-2">
-            <label className="flex items-center gap-1">
-              {t('search.exts')}
-              <input
-                value={exts}
-                onChange={(e) => setExts(e.target.value)}
-                placeholder=".log .md"
-                className="h-6 w-28 rounded border border-line bg-surface-2 px-1 text-fg outline-none"
-              />
-            </label>
-            <label className="flex items-center gap-1">
-              {t('search.minSize')}
-              <input
-                value={minMb}
-                onChange={(e) => setMinMb(e.target.value)}
-                inputMode="decimal"
-                className="h-6 w-12 rounded border border-line bg-surface-2 px-1 text-right text-fg outline-none"
-              />
-              MB
-            </label>
-            <label className="flex items-center gap-1">
-              {t('search.maxSize')}
-              <input
-                value={maxMb}
-                onChange={(e) => setMaxMb(e.target.value)}
-                inputMode="decimal"
-                className="h-6 w-12 rounded border border-line bg-surface-2 px-1 text-right text-fg outline-none"
-              />
-              MB
-            </label>
-            <label className="flex items-center gap-1">
-              {t('search.modified')}
-              <input
-                value={days}
-                onChange={(e) => setDays(e.target.value)}
-                inputMode="numeric"
-                className="h-6 w-12 rounded border border-line bg-surface-2 px-1 text-right text-fg outline-none"
-              />
-              {t('compare.days')}
-            </label>
-            <label className="flex min-w-[12rem] flex-1 items-center gap-1">
-              {t('compare.exclude')}
-              <input
-                value={exclude}
-                onChange={(e) => setExclude(e.target.value)}
-                placeholder="node_modules, *.tmp"
-                className="h-6 min-w-0 flex-1 rounded border border-line bg-surface-2 px-1 text-fg outline-none"
-              />
-            </label>
-            <span className="text-muted-2">{t('compare.filtersHint')}</span>
-          </div>
+          <CompareOptionsBar
+            exts={exts}
+            setExts={setExts}
+            minMb={minMb}
+            setMinMb={setMinMb}
+            maxMb={maxMb}
+            setMaxMb={setMaxMb}
+            days={days}
+            setDays={setDays}
+            exclude={exclude}
+            setExclude={setExclude}
+            t={t}
+          />
         )}
 
         <div className="flex items-center gap-1.5 border-b border-line px-3 py-1 text-[0.65625rem]">
@@ -816,36 +713,21 @@ export function ComparePanel({
             </div>
           )}
           {!loading && !error && (
-            <div className="min-w-[40rem] text-[0.6875rem]">
-              <div className="sticky top-0 z-10 grid grid-cols-[1fr_2.25rem_1fr] border-b border-line bg-surface-2 text-[0.625rem] text-muted-2">
-                <div className="truncate px-2 py-1" title={session?.left ?? ''}>
-                  {session?.left}
-                </div>
-                <div className="border-x border-line" />
-                <div className="truncate px-2 py-1" title={session?.right ?? ''}>
-                  {session?.right}
-                </div>
-              </div>
-              {visible.map((entry) => {
-                const canEnter = !!entry.left?.isDir && !!entry.right?.isDir
-                return (
-                  <div
-                    key={entry.rel}
-                    className="grid grid-cols-[1fr_2.25rem_1fr] border-b border-row-line hover:bg-surface-3"
-                    onDoubleClick={() => canEnter && session && void loadLevel(entry.rel, session, false)}
-                  >
-                    {sideCell(entry, 'left')}
-                    <div
-                      className={`grid place-items-center border-x border-row-line font-mono text-[0.8125rem] font-semibold ${statusClass(entry.status)}`}
-                      title={statusLabel(entry.status)}
-                    >
-                      {statusMark(entry.status)}
-                    </div>
-                    {sideCell(entry, 'right')}
-                  </div>
-                )
-              })}
-            </div>
+            <CompareTableView
+              visible={visible}
+              leftPath={session?.left ?? ''}
+              rightPath={session?.right ?? ''}
+              counts={counts}
+              hashResults={hashResults}
+              onEnter={(rel) => session && void loadLevel(rel, session, false)}
+              iconScale={iconScale}
+              iconPx={iconPx}
+              statusLabel={statusLabel}
+              statusClass={statusClass}
+              statusMark={statusMark}
+              fmtTime={fmtTime}
+              t={t}
+            />
           )}
           {!loading && !error && !visible.length && (
             <div className="px-3 py-8 text-center text-[0.71875rem] text-muted-2">
@@ -861,103 +743,25 @@ export function ComparePanel({
       </div>
 
       {previewOpen && plan && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/40 p-4">
-          <div className="flex max-h-[80vh] w-[46rem] flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-2xl">
-            <div className="flex items-center justify-between border-b border-line px-3 py-2">
-              <span className="text-[0.8125rem] font-semibold text-fg-strong">{t('compare.previewTitle')}</span>
-              <button
-                type="button"
-                onClick={() => setPreviewOpen(false)}
-                aria-label={t('compare.close')}
-                className="grid h-6 w-6 place-items-center rounded text-muted hover:bg-surface-3 hover:text-fg"
-              >
-                ✕
-              </button>
-            </div>
-            <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-1.5 text-[0.65625rem] text-muted-2">
-              <label className="flex items-center gap-1">
-                {t('compare.strategy')}
-                <select
-                  value={strategy}
-                  onChange={(e) => {
-                    setStrategy(e.target.value as 'l2r' | 'r2l' | 'both')
-                    setPlan(null)
-                    setPreviewOpen(false)
-                  }}
-                  className="h-6 rounded border border-line bg-surface-2 px-1 text-fg outline-none"
-                >
-                  <option value="l2r">{t('compare.strategyL2R')}</option>
-                  <option value="r2l">{t('compare.strategyR2L')}</option>
-                  <option value="both">{t('compare.strategyBoth')}</option>
-                </select>
-              </label>
-              <label className="flex items-center gap-1">
-                <input
-                  type="checkbox"
-                  checked={deleteExtras}
-                  onChange={(e) => {
-                    setDeleteExtras(e.target.checked)
-                    setPlan(null)
-                    setPreviewOpen(false)
-                  }}
-                />
-                {t('compare.deleteExtra')}
-              </label>
-              <span className="ml-auto">
-                {t('compare.actionCount', { count: plan.actions.length })}
-                {plan.conflicts ? ` · ${t('compare.conflicts', { count: plan.conflicts })}` : ''}
-                {plan.mismatches ? ` · ${t('compare.mismatches', { count: plan.mismatches })}` : ''}
-              </span>
-            </div>
-            <div className="min-h-0 flex-1 overflow-auto">
-              {plan.actions.length === 0 ? (
-                <div className="px-3 py-8 text-center text-[0.71875rem] text-muted-2">{t('compare.previewEmpty')}</div>
-              ) : (
-                <ul className="divide-y divide-row-line text-[0.6875rem]">
-                  {plan.actions.map((action, index) => (
-                    <li key={index} className="flex items-center gap-2 px-3 py-1">
-                      <span
-                        className={`w-16 shrink-0 rounded px-1 text-center text-[0.625rem] ${
-                          action.kind === 'delete'
-                            ? 'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300'
-                            : 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300'
-                        }`}
-                      >
-                        {action.kind === 'delete' ? t('compare.action.delete') : t('compare.action.copy')}
-                      </span>
-                      <span className="min-w-0 flex-1 truncate text-fg" title={action.kind === 'copy' ? action.source : action.paths[0]}>
-                        {action.kind === 'copy' ? action.source : action.paths.join(', ')}
-                      </span>
-                      <span className="shrink-0 text-muted-2">
-                        → {action.kind === 'copy' ? action.targetDir : t('compare.recycle')}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-            <div className="flex items-center justify-between gap-2 border-t border-line px-3 py-2 text-[0.65625rem] text-muted-2">
-              <span>{t('compare.loadedOnly')}</span>
-              <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  onClick={() => setPreviewOpen(false)}
-                  className="rounded border border-line px-2 py-1 hover:text-fg"
-                >
-                  {t('compare.close')}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void execute()}
-                  disabled={executing || !plan.actions.length}
-                  className="rounded bg-blue-600 px-2.5 py-1 text-white hover:bg-blue-500 disabled:opacity-40"
-                >
-                  {executing ? t('compare.executing') : t('compare.execute')}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
+        <SyncPreviewModal
+          plan={plan}
+          strategy={strategy}
+          setStrategy={(next) => {
+            setStrategy(next)
+            setPlan(null)
+            setPreviewOpen(false)
+          }}
+          deleteExtras={deleteExtras}
+          setDeleteExtras={(next) => {
+            setDeleteExtras(next)
+            setPlan(null)
+            setPreviewOpen(false)
+          }}
+          onClose={() => setPreviewOpen(false)}
+          onExecute={() => void execute()}
+          executing={executing}
+          t={t}
+        />
       )}
     </div>
   )

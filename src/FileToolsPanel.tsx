@@ -90,7 +90,7 @@ export function FileToolsPanel({
     }
   }, [activeProgress])
 
-  const start = async () => {
+  const start = async (algo = algorithm) => {
     jobId.current = `tool-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     setError(null)
     setRunning(true)
@@ -104,7 +104,7 @@ export function FileToolsPanel({
           setRunning(false)
           return
         }
-        await hashStart(jobId.current, paths, algorithm, (next) => {
+        await hashStart(jobId.current, paths, algo, (next) => {
           if (next.done) {
             setRunning(false)
             aborted.current = next.aborted
@@ -297,13 +297,29 @@ export function FileToolsPanel({
                 <span>{t('tools.algorithm')}</span>
                 <select
                   value={algorithm}
-                  onChange={(ev) => setAlgorithm(ev.target.value)}
+                  onChange={(ev) => {
+                    const next = ev.target.value
+                    setAlgorithm(next)
+                    if (running) {
+                      void toolCancel(jobId.current).catch(() => undefined)
+                    }
+                    void start(next)
+                  }}
                   className="h-6 rounded border border-line bg-surface-2 px-1 text-fg outline-none"
                 >
                   <option value="sha256">SHA-256</option>
                   <option value="sha1">SHA-1</option>
                   <option value="md5">MD5</option>
                 </select>
+                <button
+                  type="button"
+                  onClick={() => void start(algorithm)}
+                  disabled={running}
+                  className="rounded border border-line px-2 py-0.5 text-fg hover:bg-surface-3 disabled:opacity-40"
+                  title={t('menu.refresh')}
+                >
+                  ↻
+                </button>
                 <span className="ml-auto text-muted-2">{t('tools.elapsed', { time: formatDuration(Date.now() - started.current) })}</span>
               </div>
               <div className="flex items-center gap-2 text-[0.6875rem]">
@@ -404,6 +420,7 @@ export function FileToolsPanel({
             <HashTable
               progress={hashProgress}
               compareHash={compareHash}
+              algorithm={algorithm}
               onCopyHash={(h) => {
                 void navigator.clipboard?.writeText(h).then(() => onToast(t('tools.copyDone')))
               }}
@@ -464,11 +481,13 @@ export function FileToolsPanel({
 function HashTable({
   progress,
   compareHash,
+  algorithm,
   onCopyHash,
   t,
 }: {
   progress: HashProgress | null
   compareHash: string
+  algorithm: string
   onCopyHash: (hash: string) => void
   t: Translate
 }) {
@@ -479,7 +498,7 @@ function HashTable({
     <table className="w-full text-left text-[0.65625rem]">
       <thead className="sticky top-0 bg-surface text-muted-2">
         <tr>
-          <th className="py-1 pr-2 font-normal">SHA</th>
+          <th className="py-1 pr-2 font-normal uppercase">{algorithm}</th>
           <th className="py-1 pr-2 font-normal">Size</th>
           <th className="py-1 font-normal">Path</th>
         </tr>

@@ -189,9 +189,9 @@ export function PreviewPanel({
                     className="min-h-0 flex-1 w-full rounded border border-line bg-white"
                   />
                 ) : (
-                  <pre data-selectable className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words font-mono text-[0.6875rem] leading-relaxed text-fg">
-                    {info.text}
-                  </pre>
+                  <div className="min-h-0 flex-1">
+                    <CodePreview text={info.text} name={name} t={t} />
+                  </div>
                 )}
               </div>
             )}

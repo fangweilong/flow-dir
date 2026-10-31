@@ -395,6 +395,7 @@ export default function App() {
     showToast,
     setMenu,
     navigate,
+    openTabAt,
     openTarget,
     update,
     refreshPanes,
