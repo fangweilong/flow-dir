@@ -260,7 +260,7 @@ export function useFileOperations({
                 ...succeeded.map((source) => parentPath(source)),
               ]),
             )
-            const entry = undoEntryFor(retry.kind, succeeded, {
+            const entry = undoEntryFor(retry.kind, retry.sources, {
               targetDir: retry.targetDir,
               newName: retry.newName,
               newNames: retry.newNames,

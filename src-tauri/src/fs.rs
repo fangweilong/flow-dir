@@ -198,13 +198,26 @@ fn scan(
         }
 
         let base = buffer.as_ptr().cast::<u8>();
+        let record_size = std::mem::size_of::<FILE_ID_BOTH_DIR_INFO>();
+        let name_offset = offset_of!(FILE_ID_BOTH_DIR_INFO, FileName);
         let mut offset = 0usize;
         loop {
-            let info = unsafe { &*(base.add(offset).cast::<FILE_ID_BOTH_DIR_INFO>()) };
+            // Offsets come from the server (SMB) and were never validated, so every read is
+            // bounded: a record that claims to extend past the buffer ends the batch instead
+            // of reading heap memory beyond it.
+            let available = buffer.len().saturating_sub(offset);
+            if available < record_size {
+                break;
+            }
+            let info = unsafe {
+                std::ptr::read_unaligned(base.add(offset).cast::<FILE_ID_BOTH_DIR_INFO>())
+            };
             let name_len = info.FileNameLength as usize;
+            if !name_len.is_multiple_of(2) || name_len > available - name_offset {
+                break;
+            }
             let name_ptr =
-                unsafe { base.add(offset + offset_of!(FILE_ID_BOTH_DIR_INFO, FileName)) }
-                    .cast::<u16>();
+                unsafe { base.add(offset + name_offset) }.cast::<u16>();
             let name_slice = unsafe { std::slice::from_raw_parts(name_ptr, name_len / 2) };
             let is_dot = (name_slice.len() == 1 && name_slice[0] == 0x2E)
                 || (name_slice.len() == 2 && name_slice[0] == 0x2E && name_slice[1] == 0x2E);
@@ -236,10 +249,16 @@ fn scan(
                 }
             }
 
-            if info.NextEntryOffset == 0 {
+            let next = info.NextEntryOffset as usize;
+            if next == 0 {
                 break;
             }
-            offset += info.NextEntryOffset as usize;
+            // A record must at least contain its own name, and the next one must start
+            // inside the buffer; anything else would loop or read out of bounds.
+            if next < name_offset + name_len || next >= available {
+                break;
+            }
+            offset += next;
         }
         // One call per buffer chunk: enough for a progress readout without flooding IPC.
         progress(entries.len());

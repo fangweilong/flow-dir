@@ -12,6 +12,7 @@
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -29,7 +30,10 @@ use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
-use windows::Win32::System::Threading::{CreateEventW, TerminateProcess, WaitForSingleObject};
+use windows::Win32::System::Threading::{
+    CreateEventW, OpenEventW, SetEvent, TerminateProcess, WaitForSingleObject, INFINITE,
+    SYNCHRONIZATION_SYNCHRONIZE,
+};
 use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
 use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
@@ -56,23 +60,27 @@ impl Drop for OwnedHandle {
 }
 
 /// Parses the helper arguments from the process command line, skipping `argv[0]`.
-pub fn helper_args() -> Option<(String, String)> {
+pub fn helper_args() -> Option<(String, String, Option<String>)> {
     parse_helper_args(std::env::args_os().skip(1))
 }
 
 fn parse_helper_args<I: Iterator<Item = std::ffi::OsString>>(
     mut args: I,
-) -> Option<(String, String)> {
+) -> Option<(String, String, Option<String>)> {
     let mut pipe = None;
     let mut nonce = None;
+    let mut cancel = None;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--elevated-op") => pipe = args.next().and_then(|v| v.to_str().map(str::to_string)),
             Some("--nonce") => nonce = args.next().and_then(|v| v.to_str().map(str::to_string)),
+            Some("--cancel-event") => {
+                cancel = args.next().and_then(|v| v.to_str().map(str::to_string))
+            }
             _ => {}
         }
     }
-    Some((pipe?, nonce?))
+    Some((pipe?, nonce?, cancel))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -83,8 +91,8 @@ struct Payload {
 
 /// Helper-process body: receives the request from the GUI pipe, runs it synchronously and
 /// writes the report back over the same connection.
-pub fn run_helper(pipe_name: &str, nonce: &str) -> i32 {
-    let report = helper_body(pipe_name, nonce);
+pub fn run_helper(pipe_name: &str, nonce: &str, cancel_event: Option<&str>) -> i32 {
+    let report = helper_body(pipe_name, nonce, cancel_event);
     match report {
         Ok(report) => {
             if report.error.is_none() && report.failed_total == 0 {
@@ -97,23 +105,61 @@ pub fn run_helper(pipe_name: &str, nonce: &str) -> i32 {
     }
 }
 
-fn helper_body(pipe_name: &str, nonce: &str) -> Result<ops::ElevatedReport, ApiError> {
+fn helper_body(
+    pipe_name: &str,
+    nonce: &str,
+    cancel_event: Option<&str>,
+) -> Result<ops::ElevatedReport, ApiError> {
     let pipe = open_client(pipe_name)?;
     let payload: Payload = serde_json::from_slice(&read_message_sync(pipe.0)?)
         .map_err(|err| ApiError::new("BAD_ARGS", format!("elevated request: {err}")))?;
     if payload.nonce != nonce {
         return Err(ApiError::new("BAD_ARGS", "elevated nonce mismatch"));
     }
-    let report = ops::run_headless(payload.request);
+    let cancel = Arc::new(AtomicBool::new(false));
+    if let Some(name) = cancel_event {
+        watch_cancel(name, cancel.clone());
+    }
+    let report = ops::run_headless(payload.request, cancel);
     let bytes = serde_json::to_vec(&report)
         .map_err(|err| ApiError::new("BAD_ARGS", format!("elevated report: {err}")))?;
     write_message_sync(pipe.0, &bytes)?;
     Ok(report)
 }
 
+/// Watches the GUI's named event and flips the helper's cancel flag when it fires.
+///
+/// The medium-integrity GUI cannot always `TerminateProcess` a high-integrity helper, so
+/// cancellation has to be cooperative: the helper is the only side that can stop the shell
+/// operation, and it polls the same flag the in-process operations use.
+fn watch_cancel(name: &str, cancel: Arc<AtomicBool>) {
+    let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+    let Ok(handle) =
+        (unsafe { OpenEventW(SYNCHRONIZATION_SYNCHRONIZE, false, PCWSTR(wide.as_ptr())) })
+    else {
+        return;
+    };
+    let event = OwnedHandle(handle);
+    let _ = std::thread::Builder::new()
+        .name("flowdir-elevated-cancel".into())
+        .spawn(move || {
+            wait_event(&event);
+            cancel.store(true, Ordering::Relaxed);
+        });
+}
+
+/// Blocks until the event is signalled. Takes the wrapper whole so the closure moves the
+/// `Send` handle type instead of the raw pointer inside it.
+fn wait_event(event: &OwnedHandle) {
+    unsafe {
+        let _ = WaitForSingleObject(event.0, INFINITE);
+    }
+}
+
 /// GUI side: elevates, sends the request over a fresh pipe and returns what the helper
-/// reported. Cancel or timeout terminates the helper so it cannot keep copying in the
-/// background after the UI gave up.
+/// reported. Cancel or timeout signals the helper's cancel event and only then falls back
+/// to terminating it, because a medium-integrity process may be denied that on a
+/// high-integrity child.
 pub fn request_elevated(
     app: &AppHandle,
     request: ops::Request,
@@ -122,12 +168,24 @@ pub fn request_elevated(
     let _ = app;
     let nonce = random_hex();
     let pipe_name = format!(r"\\.\pipe\flowdir-elevated-{nonce}");
+    let cancel_name = format!(r"flowdir-elevated-cancel-{nonce}");
+    let cancel_event = create_event(&cancel_name)?;
     let exe = std::env::current_exe()
         .map_err(|err| ApiError::new("ELEVATED", format!("current exe: {err}")))?;
-    let params = params_for(&pipe_name, &nonce);
+    let params = params_for(&pipe_name, &nonce, &cancel_name);
     std::thread::Builder::new()
         .name("flowdir-elevate".into())
-        .spawn(move || run_worker(&exe, &params, &pipe_name, &nonce, request, cancel))
+        .spawn(move || {
+            run_worker(
+                &exe,
+                &params,
+                &pipe_name,
+                &nonce,
+                request,
+                cancel,
+                cancel_event,
+            )
+        })
         .map_err(|err| ApiError::new("ELEVATED", err.to_string()))?
         .join()
         .map_err(|_| ApiError::new("ELEVATED", "elevation thread panicked"))?
@@ -145,12 +203,15 @@ fn random_hex() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// `--elevated-op "<pipe>" --nonce "<nonce>"` as a NUL-terminated UTF-16 command line.
-fn params_for(pipe_name: &str, nonce: &str) -> Vec<u16> {
+/// `--elevated-op "<pipe>" --nonce "<nonce>" --cancel-event "<event>"` as a NUL-terminated
+/// UTF-16 command line.
+fn params_for(pipe_name: &str, nonce: &str, cancel_name: &str) -> Vec<u16> {
     let mut params: Vec<u16> = "--elevated-op \"".encode_utf16().collect();
     params.extend(pipe_name.encode_utf16());
     params.extend("\" --nonce \"".encode_utf16());
     params.extend(nonce.encode_utf16());
+    params.extend("\" --cancel-event \"".encode_utf16());
+    params.extend(cancel_name.encode_utf16());
     params.push(u16::from(b'"'));
     params.push(0);
     params
@@ -163,6 +224,7 @@ fn run_worker(
     nonce: &str,
     request: ops::Request,
     cancel: std::sync::Arc<AtomicBool>,
+    cancel_event: OwnedHandle,
 ) -> Result<ops::ElevatedReport, ApiError> {
     let pipe = create_server(pipe_name)?;
     let event = unsafe { CreateEventW(None, false, false, PCWSTR::null()) }
@@ -194,11 +256,24 @@ fn run_worker(
             }
         }
         Err(_) => unsafe {
+            // Cooperative stop first: `TerminateProcess` may be refused across integrity
+            // levels, and the helper polls this event during the operation.
+            let _ = SetEvent(cancel_event.0);
+            let _ = WaitForSingleObject(fork.0, 10_000);
             let _ = TerminateProcess(fork.0, 1);
             let _ = WaitForSingleObject(fork.0, 5_000);
         },
     }
     result
+}
+
+/// Named event the GUI sets when it gives up; the helper opens the same name and turns it
+/// into the cooperative cancel flag.
+fn create_event(name: &str) -> Result<OwnedHandle, ApiError> {
+    let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+    let handle = unsafe { CreateEventW(None, false, false, PCWSTR(wide.as_ptr())) }
+        .map_err(|err| ApiError::new("ELEVATED", err.to_string()))?;
+    Ok(OwnedHandle(handle))
 }
 
 fn create_server(name: &str) -> Result<OwnedHandle, ApiError> {
@@ -519,12 +594,15 @@ mod tests {
             r"\\.\pipe\flowdir-elevated-abc",
             "--nonce",
             "abc",
+            "--cancel-event",
+            "flowdir-elevated-cancel-abc",
         ];
-        let (pipe, nonce) =
+        let (pipe, nonce, cancel) =
             parse_helper_args(args.into_iter().map(OsStr::new).map(|s| s.to_os_string()))
                 .expect("both flags are present");
         assert_eq!(pipe, r"\\.\pipe\flowdir-elevated-abc");
         assert_eq!(nonce, "abc");
+        assert_eq!(cancel.as_deref(), Some("flowdir-elevated-cancel-abc"));
     }
 
     #[test]

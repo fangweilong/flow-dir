@@ -7,6 +7,7 @@
 
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Read, Write};
+use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -255,7 +256,13 @@ fn collect(paths: &[String], dest: &Path, tmp: &Path) -> Result<Vec<Source>, Api
     let mut roots: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
     roots.sort();
     for root in roots {
-        let meta = fs::metadata(&root).map_err(|err| ApiError::from_io(&root.display().to_string(), &err))?;
+        // Junctions and symlinks are skipped, matching extraction and duplicate scanning:
+        // following one would embed files that are not part of the selection.
+        let meta = fs::symlink_metadata(&root)
+            .map_err(|err| ApiError::from_io(&root.display().to_string(), &err))?;
+        if is_link(&meta) {
+            continue;
+        }
         let name = root
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -283,8 +290,11 @@ fn collect(paths: &[String], dest: &Path, tmp: &Path) -> Result<Vec<Source>, Api
                     if skip.contains(&normal(&child)) {
                         continue;
                     }
-                    let meta = fs::metadata(&child)
+                    let meta = fs::symlink_metadata(&child)
                         .map_err(|err| ApiError::from_io(&child.display().to_string(), &err))?;
+                    if is_link(&meta) {
+                        continue;
+                    }
                     let child_name = format!("{}/{}", name, entry.file_name().to_string_lossy());
                     children.push((child, child_name, meta));
                 }
@@ -307,6 +317,12 @@ fn collect(paths: &[String], dest: &Path, tmp: &Path) -> Result<Vec<Source>, Api
         return Err(ApiError::new("TOO_MANY_ENTRIES", sources.len().to_string()));
     }
     Ok(sources)
+}
+
+/// Reparse points (junctions, symlinks, mount points) must not be followed: their target
+/// is outside the selection and may be unbounded.
+fn is_link(meta: &fs::Metadata) -> bool {
+    meta.file_attributes() & 0x400 != 0
 }
 
 /// Comparison key for paths that may not exist yet (the temporary file).

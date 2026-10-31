@@ -182,10 +182,12 @@ fn decode_for_search(bytes: &[u8]) -> Option<String> {
         }
     }
     if probe.len() >= 4 && odd_nul > probe.len() / 8 && even_nul == 0 {
-        return Some(String::from_utf16_lossy(&utf16_units(probe, false)));
+        let even = &bytes[..bytes.len() & !1];
+        return Some(String::from_utf16_lossy(&utf16_units(even, false)));
     }
     if probe.len() >= 4 && even_nul > probe.len() / 8 && odd_nul == 0 {
-        return Some(String::from_utf16_lossy(&utf16_units(probe, true)));
+        let even = &bytes[..bytes.len() & !1];
+        return Some(String::from_utf16_lossy(&utf16_units(even, true)));
     }
     // Only the sampled window decides: a NUL deep inside a large text file is not a
     // reason to hide it from content search.

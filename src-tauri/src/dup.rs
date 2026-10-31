@@ -372,8 +372,10 @@ pub fn start(
         }
     }
     let job = state.begin(&job_id);
+    let err_job = job_id.clone();
+    let err_state = state.clone();
     let state = state.clone();
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name(format!("flowdir-dup-{job_id}"))
         .spawn(move || {
             let started = Instant::now();
@@ -504,9 +506,11 @@ pub fn start(
                 elapsed_ms: started.elapsed().as_millis() as u64,
             });
             state.finish(&job_id);
-        })
-        .map(|_| ())
-        .map_err(|e| ApiError::new("THREAD", e.to_string()))
+        });
+    if spawned.is_err() {
+        err_state.finish(&err_job);
+    }
+    spawned.map(|_| ()).map_err(|e| ApiError::new("THREAD", e.to_string()))
 }
 
 #[cfg(test)]

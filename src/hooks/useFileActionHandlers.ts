@@ -61,7 +61,6 @@ export interface UseFileActionHandlersOptions {
   setPrompt: React.Dispatch<React.SetStateAction<PromptModalState | null>>
   setBatchRename: React.Dispatch<React.SetStateAction<BatchRenameModalState | null>>
   setDeleteConfirm: React.Dispatch<React.SetStateAction<DeleteConfirmModalState | null>>
-  deleteConfirm: DeleteConfirmModalState | null
 }
 
 export function useFileActionHandlers({
@@ -78,7 +77,6 @@ export function useFileActionHandlers({
   setPrompt,
   setBatchRename,
   setDeleteConfirm,
-  deleteConfirm,
 }: UseFileActionHandlersOptions) {
   const pathsFor = useCallback(
     (paneId: string, names: string[]): string[] => {

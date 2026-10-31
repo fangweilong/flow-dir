@@ -170,7 +170,7 @@ export function ComparePanel({
   }, [])
 
   const startHash = useCallback(
-    (rel: string, entries: CompareEntry[], active: Session) => {
+    (entries: CompareEntry[], active: Session) => {
       if (!hashOn) return
       const pairs = entries
         .filter(
@@ -271,7 +271,7 @@ export function ComparePanel({
         })
         setLevelRel(rel)
         startCounts(rel, entries, active)
-        startHash(rel, entries, active)
+        startHash(entries, active)
       } catch (e: unknown) {
         if (seq !== sessionSeq.current) return
         setError(describeError(e))
@@ -318,7 +318,7 @@ export function ComparePanel({
   // Toggling hashes on after a level is already open should start verifying it rather
   // than wait for a refresh.
   useEffect(() => {
-    if (hashOn && session) startHash(levelRel, cache.get(levelRel) ?? [], session)
+    if (hashOn && session) startHash(cache.get(levelRel) ?? [], session)
     // Only on the switch: `startHash` already skips pairs it verified before.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hashOn])

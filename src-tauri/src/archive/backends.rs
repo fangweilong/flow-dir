@@ -777,6 +777,51 @@ fn push_iso_entries(node: &isomage::TreeNode, prefix: &str, limit: usize, out: &
     }
 }
 
+/// Extracts the directory `inner` from `archive` under `dest`, creating the tree.
+///
+/// Directory members become folders; only file members are written, so an explicit
+/// `folder/sub` record can no longer turn into a zero-byte file that blocks its own
+/// children. With `uniquify`, an existing file of the same name is renamed instead of
+/// being truncated, matching the copy path's collision policy.
+pub fn extract_dir(
+    archive: &str,
+    inner: &str,
+    dest: &std::path::Path,
+    uniquify: bool,
+) -> Result<Vec<String>, ApiError> {
+    let mut written = Vec::new();
+    for entry in list(archive, 500_000)? {
+        let norm = entry.name.replace('/', "\\");
+        let norm = norm.trim_matches('\\');
+        let Some(rel) = crate::pathkey::strip_prefix_dir(norm, inner) else {
+            continue;
+        };
+        let rel = rel.trim_matches('\\');
+        if rel.is_empty() {
+            continue;
+        }
+        let target = dest.join(rel);
+        if entry.is_dir {
+            std::fs::create_dir_all(&target)
+                .map_err(|e| ApiError::from_io(&target.to_string_lossy(), &e))?;
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| ApiError::from_io(&parent.to_string_lossy(), &e))?;
+        }
+        let target = if uniquify {
+            let path = target.to_string_lossy().into_owned();
+            std::path::PathBuf::from(crate::naming::unique(std::slice::from_ref(&path)).remove(0))
+        } else {
+            target
+        };
+        extract_single(archive, norm, &target, None)?;
+        written.push(target.to_string_lossy().into_owned());
+    }
+    Ok(written)
+}
+
 /// Extracts a single entry from `archive` into `dest`.
 pub fn extract_single(
     archive: &str,
@@ -949,7 +994,40 @@ fn name_of(path: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::VolumeFamily;
+    use super::{extract_dir, VolumeFamily};
+    use std::io::Write;
+
+    #[test]
+    fn extract_dir_builds_folders_and_never_truncates() {
+        let dir = std::env::temp_dir().join(format!("flowdir-extract-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let archive = dir.join("tree.zip");
+        let file = std::fs::File::create(&archive).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        // Explicit directory records, as Explorer and 7-Zip write them: they used to be
+        // extracted as zero-byte files that then blocked their own children.
+        writer.add_directory("folder/sub/", options).unwrap();
+        writer.start_file("folder/sub/a.txt", options).unwrap();
+        writer.write_all(b"child").unwrap();
+        writer.start_file("folder/top.txt", options).unwrap();
+        writer.write_all(b"top").unwrap();
+        writer.finish().unwrap();
+
+        let dest = dir.join("out");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("top.txt"), b"keep").unwrap();
+
+        let written = extract_dir(&archive.to_string_lossy(), "folder", &dest, true).unwrap();
+        assert_eq!(written.len(), 2);
+        assert!(dest.join("sub").is_dir());
+        assert_eq!(std::fs::read(dest.join("sub").join("a.txt")).unwrap(), b"child");
+        // The existing file survives under its name; the archive copy is renamed.
+        assert_eq!(std::fs::read(dest.join("top.txt")).unwrap(), b"keep");
+        assert_eq!(std::fs::read(dest.join("top (1).txt")).unwrap(), b"top");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn volume_families_group_only_their_own_set() {

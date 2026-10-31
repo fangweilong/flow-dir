@@ -420,8 +420,10 @@ pub fn start_counts(
     on_event: Channel<CountEvent>,
 ) -> Result<(), ApiError> {
     let job: Arc<Job> = state.begin(&job_id);
+    let err_job = job_id.clone();
+    let err_state = state.clone();
     let state = state.clone();
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("flowdir-compare-counts".into())
         .spawn(move || {
             let root_left = Path::new(&left);
@@ -519,9 +521,11 @@ pub fn start_counts(
                 error: None,
             });
             state.finish(&job_id);
-        })
-        .map_err(|e| ApiError::new("THREAD", e.to_string()))?;
-    Ok(())
+        });
+    if spawned.is_err() {
+        err_state.finish(&err_job);
+    }
+    spawned.map(|_| ()).map_err(|e| ApiError::new("THREAD", e.to_string()))
 }
 
 /// SHA-256 for the pairs the caller selected (same size and close mtime). Reading is
@@ -535,9 +539,11 @@ pub fn start_hash(
     on_event: Channel<HashEvent>,
 ) -> Result<(), ApiError> {
     let job = state.begin(&job_id);
+    let err_job = job_id.clone();
+    let err_state = state.clone();
     let state = state.clone();
     let total = pairs.len() as u32;
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("flowdir-compare-hash".into())
         .spawn(move || {
             let throttle = Throttle::new(max_bytes_per_sec);
@@ -645,9 +651,11 @@ pub fn start_hash(
                 results: Vec::new(),
             });
             state.finish(&job_id);
-        })
-        .map_err(|e| ApiError::new("THREAD", e.to_string()))?;
-    Ok(())
+        });
+    if spawned.is_err() {
+        err_state.finish(&err_job);
+    }
+    spawned.map(|_| ()).map_err(|e| ApiError::new("THREAD", e.to_string()))
 }
 
 #[cfg(test)]

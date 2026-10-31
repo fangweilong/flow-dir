@@ -294,7 +294,7 @@ fn validate(request: &Request, kind: Kind) -> Result<(), ApiError> {
 /// Runs an operation to completion on the calling thread. This is the body of the
 /// elevated helper: it has no `AppHandle`, no window and no Channel back to a webview,
 /// so progress is discarded and only the final result matters.
-pub fn run_headless(request: Request) -> ElevatedReport {
+pub fn run_headless(request: Request, cancel: Arc<AtomicBool>) -> ElevatedReport {
     let report = |error: Option<ApiError>| ElevatedReport {
         aborted: false,
         failed: Vec::new(),
@@ -315,7 +315,7 @@ pub fn run_headless(request: Request) -> ElevatedReport {
     }
     let outcome = run_guarded(&request.kind, || {
         let sink = Channel::new(|_| Ok(()));
-        run(&request, kind, None, Arc::new(AtomicBool::new(false)), sink)
+        run(&request, kind, None, cancel, sink)
     });
     ElevatedReport {
         aborted: outcome.aborted,
@@ -1009,16 +1009,19 @@ mod tests {
         let dir = temp_dir("headless");
         let source = dir.join("before.txt");
         fs::write(&source, b"x").unwrap();
-        let report = run_headless(Request {
-            op_id: "headless".into(),
-            kind: "rename".into(),
-            sources: vec![source.to_string_lossy().into_owned()],
-            target_dir: None,
-            new_name: Some("after.txt".into()),
-            new_names: None,
-            permanent: false,
-            overwrite: false,
-        });
+        let report = run_headless(
+            Request {
+                op_id: "headless".into(),
+                kind: "rename".into(),
+                sources: vec![source.to_string_lossy().into_owned()],
+                target_dir: None,
+                new_name: Some("after.txt".into()),
+                new_names: None,
+                permanent: false,
+                overwrite: false,
+            },
+            Arc::new(AtomicBool::new(false)),
+        );
         assert!(report.error.is_none(), "{:?}", report.error);
         assert_eq!(report.failed_total, 0);
         assert!(!report.aborted);
@@ -1029,16 +1032,19 @@ mod tests {
 
     #[test]
     fn headless_rejects_an_unknown_kind() {
-        let report = run_headless(Request {
-            op_id: "headless".into(),
-            kind: "explode".into(),
-            sources: vec!["C:\\".into()],
-            target_dir: None,
-            new_name: None,
-            new_names: None,
-            permanent: false,
-            overwrite: false,
-        });
+        let report = run_headless(
+            Request {
+                op_id: "headless".into(),
+                kind: "explode".into(),
+                sources: vec!["C:\\".into()],
+                target_dir: None,
+                new_name: None,
+                new_names: None,
+                permanent: false,
+                overwrite: false,
+            },
+            Arc::new(AtomicBool::new(false)),
+        );
         assert_eq!(report.error.unwrap().code, "BAD_KIND");
     }
 

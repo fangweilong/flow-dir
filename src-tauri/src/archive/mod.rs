@@ -252,6 +252,23 @@ pub fn extract_cached(archive_path: &Path, inner_path: &str) -> Result<std::path
         return Ok(dest);
     }
 
+    // A directory entry must be materialized as a tree: `extract_single` would write a
+    // zero-byte file under the folder's name and every child would then fail.
+    if is_inner_dir(archive_path, inner_path).unwrap_or(false) {
+        if dest.is_dir() && dest_mtime >= arc_mtime && arc_mtime > 0 {
+            return Ok(dest);
+        }
+        let _ = if dest.is_dir() {
+            std::fs::remove_dir_all(&dest)
+        } else {
+            std::fs::remove_file(&dest)
+        };
+        std::fs::create_dir_all(&dest)
+            .map_err(|e| ApiError::from_io(&dest.to_string_lossy(), &e))?;
+        backends::extract_dir(&archive_path.to_string_lossy(), &inner_norm, &dest, false)?;
+        return Ok(dest);
+    }
+
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| ApiError::from_io(&parent.to_string_lossy(), &e))?;
     }

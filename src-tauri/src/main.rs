@@ -37,7 +37,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use error::ApiError;
-use pathkey::strip_prefix_dir;
 use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::{Emitter, Manager};
@@ -655,33 +654,31 @@ async fn archive_extract_items(
                 if inner.is_empty() {
                     continue;
                 }
+                let archive_str = arc.to_string_lossy().into_owned();
                 let is_dir = archive::is_inner_dir(&arc, &inner).unwrap_or(false);
                 if is_dir {
                     let folder_name = std::path::Path::new(&inner).file_name().unwrap_or_default();
-                    let target_folder = dest_path.join(folder_name);
+                    // Never merge into an existing folder: pick a free name, like the copy path.
+                    let folder = dest_path.join(folder_name).to_string_lossy().into_owned();
+                    let target_folder = std::path::PathBuf::from(
+                        naming::unique(std::slice::from_ref(&folder)).remove(0),
+                    );
                     std::fs::create_dir_all(&target_folder)
                         .map_err(|e| ApiError::from_io(&target_folder.to_string_lossy(), &e))?;
-                    let entries = archive::backends::list(&arc.to_string_lossy(), 500_000)?;
-                    for entry in entries {
-                        let norm = entry.name.replace('/', "\\");
-                        let norm = norm.trim_matches('\\');
-                        if let Some(rel_suffix) = strip_prefix_dir(norm, &inner) {
-                            if rel_suffix.is_empty() {
-                                continue;
-                            }
-                            let target_file = target_folder.join(rel_suffix);
-                            if let Some(parent) = target_file.parent() {
-                                let _ = std::fs::create_dir_all(parent);
-                            }
-                            if archive::backends::extract_single(&arc.to_string_lossy(), norm, &target_file, None).is_ok() {
-                                extracted.push(target_file.to_string_lossy().into_owned());
-                            }
-                        }
-                    }
+                    extracted.extend(archive::backends::extract_dir(
+                        &archive_str,
+                        &inner,
+                        &target_folder,
+                        true,
+                    )?);
                 } else {
                     let file_name = std::path::Path::new(&inner).file_name().unwrap_or_default();
-                    let target_file = dest_path.join(file_name);
-                    archive::backends::extract_single(&arc.to_string_lossy(), &inner, &target_file, None)?;
+                    // A same-named file in the destination must not be truncated silently.
+                    let file = dest_path.join(file_name).to_string_lossy().into_owned();
+                    let target_file = std::path::PathBuf::from(
+                        naming::unique(std::slice::from_ref(&file)).remove(0),
+                    );
+                    archive::backends::extract_single(&archive_str, &inner, &target_file, None)?;
                     extracted.push(target_file.to_string_lossy().into_owned());
                 }
             }
@@ -1477,8 +1474,8 @@ fn init_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 fn main() {
     // The elevated helper must not start Tauri: no window, no tray, no single-instance
     // mutex, and no second WebView2 process for a filesystem operation.
-    if let Some((pipe, nonce)) = elevated::helper_args() {
-        std::process::exit(elevated::run_helper(&pipe, &nonce));
+    if let Some((pipe, nonce, cancel_event)) = elevated::helper_args() {
+        std::process::exit(elevated::run_helper(&pipe, &nonce, cancel_event.as_deref()));
     }
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())

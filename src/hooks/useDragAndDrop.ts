@@ -127,12 +127,17 @@ export function useDragAndDrop({
       const tab = pane && current ? current.tabs[pane.activeTabId] : undefined
       if (!current || !pane || !tab?.path) return
       const sourceDir = tab.path
+      // The pointerdown handler collapses a multi-selection to the pressed row in the same
+      // tick, so the committed ref no longer holds what the user sees while dragging.
+      const atDown = listData[tab.id]
       const startX = ev.clientX
       const startY = ev.clientY
       let started = false
       let userSelect = ''
-      // Selection as the user sees it once the pointerdown selection has been committed.
+      // Prefer the selection captured before pointerdown (what the user saw when pressing
+      // the row); the committed ref only helps when the pressed row was not selected yet.
       const selectedNames = () => {
+        if (atDown?.selected.has(entry.name)) return Array.from(atDown.selected)
         const live = listDataRef.current[tab.id]
         return live?.selected.has(entry.name) ? Array.from(live.selected) : [entry.name]
       }

@@ -127,11 +127,11 @@ pub fn set<R: Runtime>(
         let _ = watcher.watch(dir, RecursiveMode::NonRecursive);
     }
 
-    {
-        let latest = watchers.latest.lock().unwrap();
-        if latest.get(&pane_id) != Some(&epoch) {
-            return Ok(());
-        }
+    // Check and insert under the same lock pair (latest → map, the order `clear` uses):
+    // releasing `latest` first let a newer `set` be overwritten by this stale watcher.
+    let latest = watchers.latest.lock().unwrap();
+    if latest.get(&pane_id) != Some(&epoch) {
+        return Ok(());
     }
     let mut map = watchers.map.lock().unwrap();
     map.insert(pane_id, watcher);

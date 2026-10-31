@@ -309,7 +309,6 @@ export default function App() {
     setPrompt,
     setBatchRename,
     setDeleteConfirm,
-    deleteConfirm,
   })
 
   const {

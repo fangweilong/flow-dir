@@ -269,9 +269,11 @@ pub fn start_hash(
         other => return Err(ApiError::new("BAD_ALGORITHM", format!("unsupported {other}"))),
     };
     let job = state.begin(&job_id);
+    let err_job = job_id.clone();
+    let err_state = state.clone();
     let state = state.clone();
     let total = paths.len() as u32;
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name(format!("flowdir-hash-{job_id}"))
         .spawn(move || {
             let sizes: Vec<u64> = paths
@@ -338,9 +340,11 @@ pub fn start_hash(
                 results,
             });
             state.finish(&job_id);
-        })
-        .map(|_| ())
-        .map_err(|e| ApiError::new("THREAD", e.to_string()))
+        });
+    if spawned.is_err() {
+        err_state.finish(&err_job);
+    }
+    spawned.map(|_| ()).map_err(|e| ApiError::new("THREAD", e.to_string()))
 }
 
 #[cfg(test)]
