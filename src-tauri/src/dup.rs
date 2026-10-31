@@ -223,7 +223,9 @@ fn walk(
                 stats.skipped_hidden += 1;
                 continue;
             }
-            if meta.len() < min_size.max(1) {
+            // `min_size == 0` means "no filter"; forcing the floor to 1 silently
+            // hid all empty-file duplicates.
+            if meta.len() < min_size {
                 continue;
             }
             stats.scanned += 1;

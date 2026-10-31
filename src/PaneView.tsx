@@ -256,6 +256,16 @@ export function PaneView({
     return () => observer.disconnect()
   }, [])
 
+  // The scroller is mounted per pane and merely re-targets its data when the active
+  // tab changes; leftover offsets would land the new directory mid-list.
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    el.scrollTop = 0
+    el.scrollLeft = 0
+    if (headerRef.current) headerRef.current.style.transform = ''
+  }, [pane.activeTabId])
+
   // Each surface scales from its own text size. The global size still drives rem spacing;
   // the list scale also keeps stored column widths proportional to the list text.
   const tabFont = clampRegionFontSize(tabFontSize, DEFAULT_TAB_FONT_SIZE)

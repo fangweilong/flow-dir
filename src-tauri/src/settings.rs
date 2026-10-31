@@ -949,7 +949,13 @@ fn parse_file(path: &std::path::Path) -> Parse {
     }
 }
 
+/// Serializes the whole read-modify-write window of `save`: `write_atomic` only
+/// serializes the final rename, and two concurrent saves would each patch their own
+/// stale snapshot, silently dropping the other's fields.
+static SAVE_LOCK: Mutex<()> = Mutex::new(());
+
 pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), ApiError> {
+    let _guard = SAVE_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let dir = store::config_dir(app)?;
     std::fs::create_dir_all(&dir).map_err(|e| ApiError::new("CONFIG_DIR", e.to_string()))?;
     let path = dir.join(FILE);

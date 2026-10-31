@@ -262,15 +262,20 @@ pub fn start(
     // Registered in the shared op state so `op_cancel` and the quit guard already know
     // about extraction jobs.
     let token = state.begin_external(&job_id);
+    let err_job_id = job_id.clone();
+    let err_state = state.clone();
     let state = state.clone();
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name(format!("flowdir-extract-{job_id}"))
         .spawn(move || {
             run(job_id.clone(), archive, dest, password, token, channel);
             state.finish_external(&job_id);
-        })
-        .map(|_| ())
-        .map_err(|e| ApiError::new("THREAD", e.to_string()))
+        });
+    // Spawn failure would otherwise leave a ghost job that blocks `wait_idle` forever.
+    if spawned.is_err() {
+        err_state.finish_external(&err_job_id);
+    }
+    spawned.map(|_| ()).map_err(|e| ApiError::new("THREAD", e.to_string()))
 }
 
 /// Runs one extraction to completion, emitting progress and a final message.

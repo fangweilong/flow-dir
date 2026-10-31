@@ -439,7 +439,10 @@ export function useDirectoryScanner({
         const tab = current.tabs[pane.activeTabId]
         if (!tab || !tab.path) continue
         const now = Date.now()
-        const scannedAt = listDataRef.current[tab.id]?.loading ? now : 0
+        // `lastScan` is stamped when a scan starts, so tabs that are loading are
+        // covered by the same window; comparing against `loading` alone would
+        // rescan on every focus.
+        const scannedAt = lastScan.current.get(tab.id) ?? 0
         if (now - scannedAt > 3_000) {
           startScan(tab.id, tab.path, pane.sort, pane.hidden, true)
         }

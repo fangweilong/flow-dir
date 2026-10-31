@@ -342,9 +342,11 @@ pub fn start(
     validate(&request, kind)?;
     let token = state.begin(&request.op_id);
     let op_id = request.op_id.clone();
+    let err_op_id = op_id.clone();
+    let err_state = state.clone();
     let state = state.clone();
 
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name(format!("flowdir-op-{op_id}"))
         .spawn(move || {
             let total = request.sources.len() as u32;
@@ -395,9 +397,13 @@ pub fn start(
                 state.record_denied(&request);
             }
             state.finish(&op_id);
-        })
-        .map(|_| ())
-        .map_err(|e| ApiError::new("THREAD", e.to_string()))
+        });
+    // Without this the token would stay in `jobs` forever: a ghost operation that
+    // keeps `wait_idle` timing out and never sends the frontend a `done` progress.
+    if spawned.is_err() {
+        err_state.finish(&err_op_id);
+    }
+    spawned.map(|_| ()).map_err(|e| ApiError::new("THREAD", e.to_string()))
 }
 
 fn outcome_denied(outcome: &Outcome) -> bool {

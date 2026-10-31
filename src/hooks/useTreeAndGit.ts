@@ -73,7 +73,10 @@ export function useTreeAndGit({
         setTreeErrors(treeErrorsRef.current)
       })
       .finally(() => {
-        if (treeGeneration.current.get(key) === generation) treePending.current.delete(key)
+        // `invalidateTree` bumps the generation to drop the in-flight reply, but the
+        // key must not stay in `treePending` or every later load (even forced) is
+        // refused until a showHidden reset clears the set.
+        treePending.current.delete(key)
       })
   }, [settingsRef])
 

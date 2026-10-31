@@ -550,6 +550,7 @@ export function useFileOperations({
       newName: request.newName,
       newNames: request.newNames,
       overwrite: request.overwrite,
+      permanent: request.permanent,
       after: afterDirs,
     }).then((ok: boolean) => {
       if (!ok) return

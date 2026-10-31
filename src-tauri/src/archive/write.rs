@@ -145,16 +145,21 @@ pub fn start(
     let level = request.level.min(9);
 
     let token = state.begin_external(&request.job_id);
+    let err_state = state.clone();
     let state = state.clone();
-    std::thread::Builder::new()
+    let err_job_id = request.job_id.clone();
+    let spawned = std::thread::Builder::new()
         .name(format!("flowdir-compress-{}", request.job_id))
         .spawn(move || {
             let job_id = request.job_id.clone();
             let _ = run(request, format, level, token, channel);
             state.finish_external(&job_id);
-        })
-        .map(|_| ())
-        .map_err(|err| ApiError::new("THREAD", err.to_string()))
+        });
+    // Spawn failure would otherwise leave a ghost job that blocks `wait_idle` forever.
+    if spawned.is_err() {
+        err_state.finish_external(&err_job_id);
+    }
+    spawned.map(|_| ()).map_err(|err| ApiError::new("THREAD", err.to_string()))
 }
 
 /// Runs one job to completion, emitting progress and one final message.
