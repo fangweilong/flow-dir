@@ -17,6 +17,8 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
+use crate::pathkey::path_key;
+
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// The listed folder's own status; also the `rev-parse` probe.
@@ -95,12 +97,21 @@ static ROOT_CACHE: LazyLock<Mutex<HashMap<String, RootData>>> =
 static CHILD_CACHE: LazyLock<Mutex<HashMap<String, ChildCacheEntry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// True when `path` is `root` or lies inside it (a plain prefix test would match `C:\foo`
+/// against `C:\foobar`).
+fn is_within(path: &str, root: &str) -> bool {
+    path == root
+        || path
+            .strip_prefix(root)
+            .is_some_and(|rest| rest.starts_with('\\'))
+}
+
 /// Drops cached status for a repository root, called when the watcher reports a change
 /// there so the next listing is fresh instead of waiting out the TTL.
 pub fn invalidate(path: &str) {
-    let key = path.to_lowercase();
+    let key = path_key(path);
     if let Ok(mut cache) = ROOT_CACHE.lock() {
-        cache.retain(|root, _| !key.starts_with(root.as_str()));
+        cache.retain(|root, _| !is_within(&key, root));
     }
     if let Ok(mut cache) = CHILD_CACHE.lock() {
         cache.remove(&key);
@@ -156,7 +167,7 @@ pub fn status(path: &str) -> GitStatus {
 /// only needs to push a change into the list; the short TTL also covers changes made
 /// outside the app without a per-pane invalidation round-trip.
 fn root_data(git: &Path, root: &str) -> Option<RootData> {
-    let key = root.to_lowercase();
+    let key = path_key(root);
     if let Ok(cache) = ROOT_CACHE.lock() {
         if let Some(entry) = cache.get(&key) {
             if entry.at.elapsed() < STATUS_CACHE_TTL {
@@ -367,7 +378,7 @@ fn repo_states(git: &Path, parent: &str, names: Vec<String>) -> Vec<GitRepo> {
     let mut repos = unchecked_repos(names.clone());
     // Re-entering a folder must not re-probe every child repository: a short TTL keeps
     // navigation instant while still catching edits made outside the app.
-    let key = parent.to_lowercase();
+    let key = path_key(parent);
     if let Ok(cache) = CHILD_CACHE.lock() {
         if let Some((at, cached)) = cache.get(&key) {
             if at.elapsed() < CHILD_CACHE_TTL && cached.len() == names.len() {
@@ -505,9 +516,11 @@ fn split_direct(files: Vec<GitFile>) -> (Vec<GitFile>, Vec<String>) {
 /// Path of `dir` relative to the work-tree root, or `None` when `dir` *is* the root.
 /// Comparing ASCII case-insensitively is enough: both strings come from the same volume.
 fn relative_to_root(root: &str, dir: &str) -> Option<String> {
-    let root = root.trim_end_matches(['\\', '/']);
-    let dir = dir.trim_end_matches(['\\', '/']);
-    if dir.len() <= root.len() || !dir.get(..root.len()).is_some_and(|head| head.eq_ignore_ascii_case(root)) {
+    // Same normalisation as the caches: git may report the long spelling while the pane
+    // holds a short (8.3) or differently-separated one.
+    let root = path_key(root);
+    let dir = path_key(dir);
+    if dir.len() <= root.len() || !dir.get(..root.len()).is_some_and(|head| head.eq_ignore_ascii_case(&root)) {
         return None;
     }
     let rest = dir.get(root.len()..).unwrap_or_default().trim_start_matches(['\\', '/']);

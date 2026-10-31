@@ -23,6 +23,7 @@ use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::WindowsAndMessaging::{CreatePopupMenu, DestroyMenu};
 
 use crate::error::ApiError;
+use crate::pathkey::path_key;
 
 /// `PKEY_Recycle_DeletedFrom` is `FMTID_Displaced`/{2}; the shell SDK only defines it for C++.
 const PKEY_DISPLACED_FROM: PROPERTYKEY = PROPERTYKEY {
@@ -82,7 +83,9 @@ unsafe fn restore_on_thread(paths: &[String]) -> Result<RestoreReport, ApiError>
 
 unsafe fn restore_items(paths: &[String]) -> Result<RestoreReport, ApiError> {
     unsafe {
-        let wanted: Vec<String> = paths.iter().map(|path| path.to_lowercase()).collect();
+        // The bin reports displaced-from in its own spelling; the caller may hold an 8.3
+        // short name or forward slashes, so both sides go through the same key.
+        let wanted: Vec<String> = paths.iter().map(|path| path_key(path)).collect();
         let mut report = RestoreReport::default();
         let folder = recycle_folder()?;
         let mut found: Vec<Option<String>> = vec![None; wanted.len()];
@@ -90,7 +93,7 @@ unsafe fn restore_items(paths: &[String]) -> Result<RestoreReport, ApiError> {
             let Some(original) = original_path(&folder, item) else {
                 return true;
             };
-            let key = original.to_lowercase();
+            let key = path_key(&original);
             if let Some(index) = wanted.iter().position(|path| *path == key) {
                 if restore_item(&folder, item).is_ok() {
                     report.restored.push(original);
@@ -208,6 +211,21 @@ mod tests {
     /// `restore` is deliberately single-flight; the tests share that guard.
     static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Item count of the current user's Recycle Bin on `volume`; `None` when the volume has
+    /// no bin to query (network drives, some removable media).
+    fn bin_items(volume: &str) -> Option<i64> {
+        use windows::core::PCWSTR;
+        use windows::Win32::UI::Shell::{SHQueryRecycleBinW, SHQUERYRBINFO};
+
+        let wide: Vec<u16> = volume.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut info = SHQUERYRBINFO {
+            cbSize: std::mem::size_of::<SHQUERYRBINFO>() as u32,
+            ..Default::default()
+        };
+        unsafe { SHQueryRecycleBinW(PCWSTR(wide.as_ptr()), &mut info).ok()? };
+        Some(info.i64NumItems)
+    }
+
     /// End to end: recycle a file through the shell, then restore it by its original path.
     #[test]
     fn restores_a_recycled_file() {
@@ -218,9 +236,21 @@ mod tests {
         let file = dir.join("undo-me.txt");
         std::fs::write(&file, b"payload").unwrap();
         let path = file.to_string_lossy().into_owned();
+        let volume = format!("{}:\\", path.chars().next().unwrap_or('C'));
+        let before = bin_items(&volume);
 
         assert_eq!(crate::ops::recycle_for_test(&path), 0, "recycle must succeed");
         assert!(!file.exists(), "the file must leave the folder");
+
+        // Windows Server (and machines with the Recycle Bin policy disabled) deletes
+        // permanently while the shell still reports success; there is nothing to restore.
+        if let (Some(before), Some(after)) = (before, bin_items(&volume)) {
+            if after <= before {
+                eprintln!("recycle bin does not retain files on {volume}; skipping restore assertions");
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+        }
 
         let report = restore(std::slice::from_ref(&path)).expect("restore call");
         assert!(report.missing.is_empty(), "report: {report:?}");

@@ -17,6 +17,7 @@ mod layout;
 mod logging;
 mod naming;
 mod ops;
+mod pathkey;
 mod preview;
 mod restore;
 mod search;

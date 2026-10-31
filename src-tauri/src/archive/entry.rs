@@ -77,17 +77,26 @@ fn decode_with(raw: &[u8], utf8_flag: bool, backslash: bool) -> Result<String, A
     Ok(segments.join("\\"))
 }
 
-/// Legacy code page of the user's Windows language, then GBK as the wider net for
-/// Chinese archives, then CP437 — the page the zip specification itself falls back to.
+/// Legacy code page of the user's Windows language, then GBK, then CP437 — the page the
+/// zip specification itself falls back to.
 ///
-/// The system ANSI page alone is not enough: machines with the "UTF-8 worldwide language
-/// support" beta report 65001, under which every legacy CJK name is invalid.
+/// The second pass matters on CJK machines: zh-TW/ja/ko use 950/932/949, which reject
+/// some GBK sequences, so 936 rescues those names. Single-byte pages (437, 1252) accept
+/// most bytes, so there the host page wins — the same result as Explorer and WinRAR.
+/// The "UTF-8 worldwide language support" beta reports 65001, under which every legacy
+/// CJK name is invalid, hence the 0 page marker.
 fn decode_legacy(bytes: &[u8]) -> String {
     for page in [language_codepage(), 936] {
         if let Some(text) = decode_with_page(bytes, page) {
             return text;
         }
     }
+    cp437_fallback(bytes)
+}
+
+/// Last resort named by the zip specification: every byte has a glyph, so decoding never
+/// fails. Kept separate so its table is testable without depending on the host page.
+fn cp437_fallback(bytes: &[u8]) -> String {
     bytes
         .iter()
         .map(|byte| {
@@ -171,16 +180,18 @@ mod tests {
     #[test]
     fn utf8_and_legacy_names_decode() {
         assert_eq!(decode("相册/照片.txt".as_bytes(), true).unwrap(), "相册\\照片.txt");
-        // GBK without the UTF-8 flag, as written by Chinese Windows zip tools.
+        // GBK without the UTF-8 flag, as written by Chinese Windows zip tools. The page is
+        // explicit: `decode` starts with the host's page, which is 437/1252 on an English
+        // Windows and accepts these bytes as different (mojibake) text.
         assert_eq!(
-            decode(&[0xd6, 0xd0, 0xce, 0xc4, b'.', b't', b'x', b't'], false).unwrap(),
+            decode_with_page(&[0xd6, 0xd0, 0xce, 0xc4, b'.', b't', b'x', b't'], 936).unwrap(),
             "中文.txt"
         );
-        // Explicit pages keep the decoder testable regardless of the machine's language.
         assert_eq!(decode_with_page(&[0xd6, 0xd0], 936).unwrap(), "中");
         assert_eq!(decode_with_page(&[0xb0, 0xdb], 437).unwrap(), "░█");
         // Bytes no ANSI page accepts fall back to CP437 instead of failing the entry.
-        assert_eq!(decode(&[0xff], false).unwrap(), "\u{a0}");
+        assert_eq!(cp437_fallback(&[0xff]), "\u{a0}");
+        assert_eq!(cp437_fallback(b"ascii-.txt"), "ascii-.txt");
     }
 
     #[test]
