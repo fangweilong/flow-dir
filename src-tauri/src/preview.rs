@@ -49,6 +49,10 @@ const ATTR_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
 /// Hard ceiling for one decoded preview bitmap (32bpp BGRA). A 4096×4096 image is 64 MB,
 /// which is the largest frame the panel can show anyway.
 const MAX_RENDER_BYTES: usize = 64 * 1024 * 1024;
+/// Decoded source pixels allowed before scaling. PNG/BMP/GIF/TIFF decoders materialise the
+/// full frame even when the scaler downscales afterwards, so the render budget alone does
+/// not stop a small file that declares a 30k×30k image.
+const MAX_SOURCE_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Caps applied to every preview read. They come from settings so a slow volume or a
 /// very large PDF can be tuned without a rebuild.
@@ -481,6 +485,22 @@ pub fn info(
             });
         }
         bring_online(&path)?;
+        // Hydration returns with the first byte and the provider keeps streaming. While
+        // the placeholder attribute is still set, `fd://preview` answers 409, so handing
+        // out a URL here would leave the panel blank with no retry.
+        let still_placeholder = std::fs::metadata(&path)
+            .map(|meta| is_cloud_placeholder(&meta))
+            .unwrap_or(false);
+        if still_placeholder {
+            return Ok(PreviewInfo {
+                kind: "cloud".into(),
+                reason: Some("cloud-placeholder".into()),
+                size,
+                mtime,
+                external,
+                ..Default::default()
+            });
+        }
     }
     if size > limits.max_bytes {
         return Ok(PreviewInfo {
@@ -934,6 +954,14 @@ fn scale_to_bgra(
             .map_err(|e| ApiError::new("WIC", e.to_string()))?;
         if width == 0 || height == 0 {
             return Err(ApiError::new("WIC", "empty image"));
+        }
+        // Budget the *source* as well: the scaler's decoder may allocate the full frame
+        // before any downscale happens.
+        if u64::from(width) * u64::from(height) * 4 > MAX_SOURCE_BYTES {
+            return Err(ApiError::new(
+                "IMAGE_TOO_LARGE",
+                format!("{width}x{height} source pixels"),
+            ));
         }
         let scale = (max_width as f64 / width as f64).min(1.0);
         let target_w = ((width as f64 * scale).round() as u32).max(1);

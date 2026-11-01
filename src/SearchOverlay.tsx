@@ -300,6 +300,10 @@ export function SearchOverlay({
     if (!selectedPaths.length) return
     if (!window.confirm(t('search.deleteConfirm', { count: selectedPaths.length }))) return
     onDelete(selectedPaths)
+    // The rows are gone from disk; keeping them would allow a second delete or an
+    // activate that fails with NOT_FOUND.
+    const doomed = new Set(selectedPaths)
+    setItems((prev) => prev.filter((item) => !doomed.has(item.path)))
     setSelected(new Set())
   }
 

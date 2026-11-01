@@ -335,4 +335,6 @@ export type LaunchRequest = {
   select: string | null
   newWindow: boolean
   autostart: boolean
+  /** Delivery sequence from the backend; a request is applied at most once. */
+  seq?: number
 }

@@ -57,6 +57,11 @@ pub struct LaunchRequest {
     pub new_window: bool,
     /// Started by the HKCU Run entry; the window may stay hidden.
     pub autostart: bool,
+    /// Delivery sequence assigned by [`Integration`]. The frontend applies a request at
+    /// most once: the same launch may arrive as an event and again when the pending queue
+    /// is drained (a startup launch can outrun the webview's listener).
+    #[serde(default)]
+    pub seq: u64,
 }
 
 impl LaunchRequest {
@@ -79,15 +84,34 @@ pub struct Integration {
     hotkey: Mutex<Option<Hotkey>>,
     recent: Mutex<Vec<String>>,
     launch: Mutex<Option<LaunchRequest>>,
+    next_seq: std::sync::atomic::AtomicU64,
 }
 
 impl Integration {
     pub fn set_launch(&self, request: LaunchRequest) {
-        *self.launch.lock().unwrap() = Some(request);
+        let stamped = self.stamp(request);
+        *self.launch.lock().unwrap() = Some(stamped);
+    }
+
+    /// Stores and returns a stamped copy for the event. The frontend may not have its
+    /// listener yet when a second instance starts (the webview is still loading), so the
+    /// request also stays queued for the next drain instead of being lost with the event.
+    pub fn forward(&self, request: LaunchRequest) -> LaunchRequest {
+        let stamped = self.stamp(request);
+        *self.launch.lock().unwrap() = Some(stamped.clone());
+        stamped
     }
 
     pub fn take_launch(&self) -> Option<LaunchRequest> {
         self.launch.lock().unwrap().take()
+    }
+
+    fn stamp(&self, mut request: LaunchRequest) -> LaunchRequest {
+        request.seq = self
+            .next_seq
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        request
     }
 }
 
@@ -577,8 +601,10 @@ pub fn on_menu_event(app: &AppHandle, id: &str) {
             select: None,
             new_window: true,
             autostart: false,
+            seq: 0,
         };
-        let _ = app.emit("flowdir:open-request", request);
+        let stamped = app.state::<Integration>().forward(request);
+        let _ = app.emit("flowdir:open-request", stamped);
     }
 }
 

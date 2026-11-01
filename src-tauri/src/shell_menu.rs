@@ -621,7 +621,15 @@ unsafe fn track(
         }
 
         let mut bitmaps = GlyphBitmaps(Vec::new());
-        if extract.is_some() || compress.is_some() || !extras.is_empty() {
+        // Only add the separator when something follows it: `insert_compress_submenu`
+        // appends nothing when no writable format survives, which left an empty gap.
+        let compress_available = compress.as_ref().is_some_and(|labels| {
+            labels
+                .formats
+                .iter()
+                .any(|format| WRITABLE.contains(&format.id.as_str()))
+        });
+        if extract.is_some() || compress_available || !extras.is_empty() {
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         }
         if let Some(labels) = extract {

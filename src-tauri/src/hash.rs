@@ -276,10 +276,15 @@ pub fn start_hash(
     let spawned = std::thread::Builder::new()
         .name(format!("flowdir-hash-{job_id}"))
         .spawn(move || {
-            let sizes: Vec<u64> = paths
-                .iter()
-                .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
-                .collect();
+            let mut sizes: Vec<u64> = Vec::with_capacity(paths.len());
+            for path in &paths {
+                // A metadata sweep over a dead share costs seconds per path; Cancel must
+                // not wait for it to finish.
+                if job.stopped() {
+                    break;
+                }
+                sizes.push(std::fs::metadata(path).map(|m| m.len()).unwrap_or(0));
+            }
             let bytes_total: u64 = sizes.iter().sum();
             let mut results = Vec::with_capacity(paths.len());
             let mut finished = 0u32;

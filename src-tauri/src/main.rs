@@ -1544,7 +1544,12 @@ fn main() {
             }
             show_main(app);
             if !request.is_empty() {
-                let _ = app.emit("flowdir:open-request", request);
+                // Keep a copy queued as well: emitting before the webview registered its
+                // listener dropped the folder on a quick double-click at startup.
+                let stamped = app
+                    .state::<shell_integration::Integration>()
+                    .forward(request);
+                let _ = app.emit("flowdir:open-request", stamped);
             }
         }))
         .manage(AppState::default())
@@ -1570,6 +1575,7 @@ fn main() {
         .setup(|app| {
             store::migrate_legacy(app.handle());
             update::cleanup_leftovers();
+            archive::cleanup_cache();
             // The frontend asks for this once its workspace is restored, so a path from
             // Explorer or the command line lands on a ready list.
             let launch =

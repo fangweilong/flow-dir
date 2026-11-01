@@ -53,6 +53,8 @@ export function BatchRenameDialog({ dir, names, lang, onConfirm, onClose }: Prop
   const [policy, setPolicy] = useState<ConflictPolicy>('ask')
   /** Rows whose target name exists on disk and would overwrite an unrelated entry. */
   const [conflicts, setConflicts] = useState<Set<number>>(new Set())
+  /** False until the existence probe for the current preview has answered. */
+  const [probed, setProbed] = useState(false)
   const findRef = useRef<HTMLInputElement>(null)
   const templateRef = useRef<HTMLInputElement>(null)
 
@@ -114,8 +116,10 @@ export function BatchRenameDialog({ dir, names, lang, onConfirm, onClose }: Prop
    */
   useEffect(() => {
     let stale = false
+    setProbed(false)
     if (!changedTargets.length) {
       setConflicts(new Set())
+      setProbed(true)
       return
     }
     const selected = new Set(names.map((name) => name.toLowerCase()))
@@ -134,6 +138,11 @@ export function BatchRenameDialog({ dir, names, lang, onConfirm, onClose }: Prop
         if (!freeByMove) hit.add(index)
       })
       setConflicts(hit)
+      setProbed(true)
+    }).catch(() => {
+      // Without an answer an overwrite cannot be ruled out; stay disabled rather than
+      // rename blind.
+      if (!stale) setProbed(false)
     })
     return () => {
       stale = true
@@ -141,6 +150,9 @@ export function BatchRenameDialog({ dir, names, lang, onConfirm, onClose }: Prop
   }, [changedTargets, plan, names, dir])
 
   const blocked = invalid.size > 0 || effective.length === 0
+  // `conflicts` is empty while the first probe is in flight, which must not be mistaken
+  // for "checked, no conflict".
+  const ready = probed && !blocked
   const needsDecision = conflicts.size > 0 && policy === 'ask'
   // `uniquePaths` resolves after the dialog may already be gone (Esc, backdrop, second
   // Enter); a cancelled or repeated submit must not reach `onConfirm`.
@@ -158,7 +170,7 @@ export function BatchRenameDialog({ dir, names, lang, onConfirm, onClose }: Prop
   }
 
   const submit = () => {
-    if (blocked || needsDecision || submitted.current) return
+    if (!ready || needsDecision || submitted.current) return
     submitted.current = true
     if (!conflicts.size) {
       confirm(effective.map((item) => item.pair))
@@ -366,7 +378,7 @@ export function BatchRenameDialog({ dir, names, lang, onConfirm, onClose }: Prop
           <button
             type="button"
             onClick={submit}
-            disabled={blocked || needsDecision}
+            disabled={!ready || needsDecision}
             className="shrink-0 rounded-md bg-blue-600 px-3 py-1 text-[0.71875rem] font-medium text-white hover:bg-blue-500 disabled:opacity-40"
           >
             {t('batch.confirm')}

@@ -237,6 +237,40 @@ fn validate_inner_path(inner: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Root of the per-archive preview cache under `%TEMP%`.
+fn cache_root() -> std::path::PathBuf {
+    std::env::temp_dir().join("FlowDir").join("archive_cache")
+}
+
+/// Drops cache entries no run has touched for a week. Every previewed archive member is
+/// extracted here and nothing else removes it, so without this the folder grows for the
+/// life of the profile.
+pub fn cleanup_cache() {
+    const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+    let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(cache_root()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        let Ok(modified) = meta.modified() else { continue };
+        let Ok(age) = modified.duration_since(std::time::UNIX_EPOCH) else {
+            continue;
+        };
+        if now.saturating_sub(age) < MAX_AGE {
+            continue;
+        }
+        let path = entry.path();
+        let _ = if meta.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+    }
+}
+
 /// Extracts a single entry to the FlowDir temporary cache and returns the path on disk.
 ///
 /// `limit` bounds the bytes written for one member; previews pass the configured preview
@@ -253,7 +287,7 @@ pub fn extract_cached(
     archive_path.hash(&mut hasher);
     let hash = hasher.finish();
 
-    let temp = std::env::temp_dir().join("FlowDir").join("archive_cache").join(format!("{hash:016x}"));
+    let temp = cache_root().join(format!("{hash:016x}"));
     let inner_norm = inner_path.replace('/', "\\");
     let dest = temp.join(inner_norm.trim_matches('\\'));
 

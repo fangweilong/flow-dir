@@ -82,11 +82,24 @@ export function useLaunchAndTray({
     [navigate, newTab, setWs, startScan, wsRef],
   )
 
+  /** Last applied request sequence; the same launch can arrive twice (event + queue). */
+  const lastLaunchSeq = useRef(0)
+  const applyLaunch = useCallback(
+    (req: LaunchRequest | null) => {
+      if (!req || !wsRef.current) return
+      const seq = req.seq ?? 0
+      if (seq > 0 && seq <= lastLaunchSeq.current) return
+      if (seq > 0) lastLaunchSeq.current = seq
+      openRequest(req)
+    },
+    [openRequest, wsRef],
+  )
+
   useEffect(() => {
     let disposed = false
     const unlistens: (() => void)[] = []
     const register = async () => {
-      const u1 = await listen<LaunchRequest>('flowdir:open-request', (event) => openRequest(event.payload))
+      const u1 = await listen<LaunchRequest>('flowdir:open-request', (event) => applyLaunch(event.payload))
       if (disposed) u1()
       else unlistens.push(u1)
 
@@ -101,17 +114,41 @@ export function useLaunchAndTray({
       disposed = true
       for (const unlisten of unlistens) unlisten()
     }
-  }, [openRequest, setSearchOpen])
+  }, [applyLaunch, setSearchOpen])
 
   useEffect(() => {
     if (!ws || launchApplied.current) return
     launchApplied.current = true
     void takeLaunchRequest()
-      .then((req) => {
-        if (req) openRequest(req)
-      })
+      .then((req) => applyLaunch(req))
       .catch(() => undefined)
-  }, [openRequest, ws])
+  }, [applyLaunch, ws])
+
+  // A forwarded launch can outrun the event listener while the webview is still loading;
+  // the backend keeps it queued, so every focus drains whatever is left. The sequence
+  // number makes a request that also arrived as an event idempotent.
+  useEffect(() => {
+    if (!ws) return
+    let disposed = false
+    let inFlight = false
+    const drain = () => {
+      if (inFlight || !wsRef.current) return
+      inFlight = true
+      void takeLaunchRequest()
+        .then((req) => {
+          if (!disposed) applyLaunch(req)
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          inFlight = false
+        })
+    }
+    window.addEventListener('focus', drain)
+    return () => {
+      disposed = true
+      window.removeEventListener('focus', drain)
+    }
+  }, [applyLaunch, ws, wsRef])
 
   // Tray recent directories
   const recentDirs = useMemo(() => {

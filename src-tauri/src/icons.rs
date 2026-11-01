@@ -67,7 +67,9 @@ pub fn handle_request<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) ->
         .get("s")
         .and_then(|value| value.parse::<i32>().ok())
         .unwrap_or(16)
-        .clamp(16, 64);
+        // The frontend asks for `iconSize * devicePixelRatio`; at 200 % scaling a 32 px
+        // icon is 64 px, and 96 px on a 300 % display, so the old cap blurred it.
+        .clamp(16, 128);
 
     let key = format!(
         "icon:{}?s={size}&v={}",
@@ -76,6 +78,10 @@ pub fn handle_request<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) ->
     );
     let cache = app.state::<PreviewCache>();
     if let Some(bytes) = cache.get(&key) {
+        // An empty entry is a cached failure (see below).
+        if bytes.is_empty() {
+            return plain(StatusCode::INTERNAL_SERVER_ERROR, "icon failed");
+        }
         return ok(bytes);
     }
     match render(path, size) {
@@ -83,7 +89,13 @@ pub fn handle_request<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) ->
             cache.put(key, bytes.clone());
             ok(bytes)
         }
-        Err(_) => plain(StatusCode::INTERNAL_SERVER_ERROR, "icon failed"),
+        Err(_) => {
+            // Remember the failure: a dead share or a broken shell handler would otherwise
+            // pay for a COM + shell + PNG-encode round trip on every scroll pass. The key
+            // carries the `v` revision, so a changed file retries.
+            cache.put(key, Vec::new());
+            plain(StatusCode::INTERNAL_SERVER_ERROR, "icon failed")
+        }
     }
 }
 

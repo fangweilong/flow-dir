@@ -129,6 +129,8 @@ export function ComparePanel({
   const seq = useRef(0)
   /** Invalidates in-flight level replies and post-sync reloads of an older root pair. */
   const sessionSeq = useRef(0)
+  /** Bumped by every `loadLevel`: a slower earlier level must not win the race. */
+  const navSeq = useRef(0)
   const levelRelRef = useRef('')
   levelRelRef.current = levelRel
 
@@ -264,6 +266,9 @@ export function ComparePanel({
       // Bumped whenever the roots/options change: a reply from the previous session must
       // not overwrite the new one's cache or counts.
       const seq = sessionSeq.current
+      // Each navigation is its own request: opening A on a slow share and then B must not
+      // let A's late reply replace B's rows.
+      const nav = ++navSeq.current
       cancelCounts()
       cancelHash()
       setLoading(true)
@@ -272,7 +277,7 @@ export function ComparePanel({
         const left = rel ? joinPath(active.left, rel) : active.left
         const right = rel ? joinPath(active.right, rel) : active.right
         const result = await compareLevel(left, right, rel, active.options)
-        if (seq !== sessionSeq.current) return
+        if (nav !== navSeq.current || seq !== sessionSeq.current) return
         const entries = result.entries
         setCache((prev) => {
           if (!refresh && prev.has(rel)) return prev
@@ -284,10 +289,10 @@ export function ComparePanel({
         startCounts(rel, entries, active)
         startHash(entries, active)
       } catch (e: unknown) {
-        if (seq !== sessionSeq.current) return
+        if (nav !== navSeq.current || seq !== sessionSeq.current) return
         setError(describeError(e))
       } finally {
-        if (seq === sessionSeq.current) setLoading(false)
+        if (nav === navSeq.current && seq === sessionSeq.current) setLoading(false)
       }
     },
     [cancelCounts, cancelHash, startCounts, startHash],

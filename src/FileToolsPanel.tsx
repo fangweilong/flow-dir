@@ -74,7 +74,7 @@ export function FileToolsPanel({
   const started = useRef(Date.now())
   /// Speed is sampled locally because the backend only reports cumulative bytes.
   const sample = useRef({ at: Date.now(), bytes: 0, speed: 0 })
-  const aborted = useRef(false)
+  const [canceled, setCanceled] = useState(false)
 
   const hash = mode === 'hash'
   const progress = hash ? hashProgress : dupProgress
@@ -95,7 +95,10 @@ export function FileToolsPanel({
     setError(null)
     setRunning(true)
     setPaused(false)
-    aborted.current = false
+    setCanceled(false)
+    // Selections refer to paths from the previous scan; keeping them would let the delete
+    // button act on files this run never listed.
+    setSelected(new Set())
     started.current = Date.now()
     sample.current = { at: Date.now(), bytes: 0, speed: 0 }
     try {
@@ -105,9 +108,12 @@ export function FileToolsPanel({
           return
         }
         await hashStart(jobId.current, paths, algo, (next) => {
+          // An algorithm switch cancels the old job and starts a new one; its late final
+          // batch must not overwrite the new job's results.
+          if (next.jobId !== jobId.current) return
           if (next.done) {
             setRunning(false)
-            aborted.current = next.aborted
+            setCanceled(next.aborted)
           }
           setHashProgress(next)
         })
@@ -117,16 +123,20 @@ export function FileToolsPanel({
           {
             roots: [root],
             includeHidden: hidden,
-            minSize: Math.max(1, Math.round(minSizeKb * 1024)),
+            // 0 is "no filter" in the backend, which is what the empty-file case needs.
+            minSize: Math.max(0, Math.round(minSizeKb * 1024)),
             concurrency: dupConcurrency,
             maxBytesPerSec: dupMaxMbPerSec * 1024 * 1024,
             exclude: dupExclude,
           },
           (next) => {
+            if (next.jobId !== jobId.current) return
             if (next.done) {
               setRunning(false)
-              aborted.current = next.aborted
-              if (next.groups.length) setSelected(defaultSelection(next.groups))
+              setCanceled(next.aborted)
+              // A cancelled scan keeps whatever it found, but pre-ticking deletions for a
+              // partial result would let one click remove files the scan never compared.
+              if (!next.aborted && next.groups.length) setSelected(defaultSelection(next.groups))
             }
             setDupProgress(next)
           },
@@ -184,7 +194,6 @@ export function FileToolsPanel({
   }
 
   const cancel = () => {
-    aborted.current = true
     void toolCancel(jobId.current)
     setPaused(false)
     setRunning(false)
@@ -271,7 +280,7 @@ export function FileToolsPanel({
 
   const percent = progress && progress.total > 0 ? Math.min(100, (progress.current / progress.total) * 100) : 0
   const speed = sample.current.speed
-  const done = !!progress?.done
+  const done = !!progress?.done && !canceled
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onMouseDown={onClose}>
@@ -422,6 +431,9 @@ export function FileToolsPanel({
             />
           </div>
           {error && <div className="text-[0.65625rem] text-red-500">{error}</div>}
+          {canceled && !running && (
+            <div className="text-[0.65625rem] text-amber-500">{t('op.canceled')}</div>
+          )}
         </div>
 
         <div className="min-h-0 flex-1 overflow-auto px-3 py-2">

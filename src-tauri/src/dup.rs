@@ -185,6 +185,15 @@ fn walk(
             if job.stopped() {
                 return;
             }
+            // Runs before any filter: a folder made only of hidden/small files must still
+            // answer Pause and keep the elapsed/progress readout moving.
+            if last.elapsed() >= Duration::from_millis(150) {
+                last = Instant::now();
+                if job.wait_if_paused() {
+                    return;
+                }
+                send_progress(progress, job_id, "scan", files.len() as u32, 0, None, job, 0, stats, started);
+            }
             let path = entry.path();
             let Ok(meta) = entry.metadata() else {
                 continue;
@@ -230,15 +239,6 @@ fn walk(
                 size: meta.len(),
                 mtime: mtime_ms(&meta),
             });
-            if last.elapsed() >= Duration::from_millis(150) {
-                last = Instant::now();
-                // A single huge folder must honour Pause too, not only the phase that
-                // reads file contents.
-                if job.wait_if_paused() {
-                    return;
-                }
-                send_progress(progress, job_id, "scan", files.len() as u32, 0, None, job, 0, stats, started);
-            }
         }
     }
 }
@@ -423,6 +423,11 @@ pub fn start(
                 // offer a delete that frees nothing.
                 let mut linked = Vec::with_capacity(candidates.len());
                 for candidate in candidates {
+                    // Opening every size collision can take as long as a phase on a slow
+                    // share, so Pause and Cancel must be answered here too.
+                    if job.wait_if_paused() {
+                        break;
+                    }
                     match link_count(&candidate.path) {
                         Some(1) => linked.push(candidate),
                         // Unknown count: treat like a link, since deleting it may free
