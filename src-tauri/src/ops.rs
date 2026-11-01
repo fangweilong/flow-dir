@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -590,6 +590,7 @@ fn perform(
         succeeded: succeeded.clone(),
         failed_indices: failed_indices.clone(),
         source_index,
+        canonical_index: Arc::new(OnceLock::new()),
         cancel,
         progress,
     };
@@ -815,11 +816,29 @@ struct Sink {
     failed_indices: Arc<Mutex<Vec<u32>>>,
     /// Lowercased source path → index, so a Post callback can map its item back.
     source_index: Arc<HashMap<String, u32>>,
+    /// Canonical source key → index, built on the first lookup miss. The shell reports
+    /// its own spelling (8.3 short names, different case), which the raw map misses.
+    canonical_index: Arc<OnceLock<HashMap<String, u32>>>,
     cancel: Arc<AtomicBool>,
     progress: Channel<OpProgress>,
 }
 
 impl Sink {
+    /// Source index of the item the shell is reporting.
+    fn source_of(&self, path: &str) -> Option<u32> {
+        let raw = path.to_lowercase();
+        if let Some(index) = self.source_index.get(&raw) {
+            return Some(*index);
+        }
+        let canonical = self.canonical_index.get_or_init(|| {
+            self.source_index
+                .iter()
+                .map(|(path, index)| (crate::pathkey::path_key(path), *index))
+                .collect()
+        });
+        canonical.get(&crate::pathkey::path_key(&raw)).copied()
+    }
+
     fn emit(&self, name: Option<String>, force: bool) {
         let mut last = self.last.lock().unwrap();
         if !force && last.elapsed().as_millis() < PROGRESS_INTERVAL_MS {
@@ -878,13 +897,13 @@ impl Sink {
             // Record the success before checking the cancel flag: an abort that arrives
             // while this callback runs must not hide an item that already landed.
             let path = self.current_path.lock().unwrap();
-            if let Some(index) = self.source_index.get(&path.to_lowercase()) {
-                self.succeeded.lock().unwrap().push(*index);
+            if let Some(index) = self.source_of(&path) {
+                self.succeeded.lock().unwrap().push(index);
             }
         } else if !self.cancel.load(Ordering::Relaxed) {
             let path = self.current_path.lock().unwrap();
-            if let Some(index) = self.source_index.get(&path.to_lowercase()) {
-                self.failed_indices.lock().unwrap().push(*index);
+            if let Some(index) = self.source_of(&path) {
+                self.failed_indices.lock().unwrap().push(index);
             }
             self.failures.record(&path, hr);
             self.emit(None, true);
