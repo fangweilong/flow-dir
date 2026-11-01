@@ -7,7 +7,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    tauri_build::build();
+    // The custom manifest declares `longPathAware` on top of the stock Common-Controls
+    // dependency, so `\\?\`-free paths beyond MAX_PATH resolve instead of failing.
+    tauri_build::try_build(
+        tauri_build::Attributes::new().windows_attributes(
+            tauri_build::WindowsAttributes::new()
+                .app_manifest(include_str!("windows-app-manifest.xml")),
+        ),
+    )
+    .expect("tauri build script failed");
 
     println!("cargo:rerun-if-changed=Cargo.lock");
     println!("cargo:rerun-if-changed=Cargo.toml");
