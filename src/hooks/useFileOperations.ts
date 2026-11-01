@@ -233,12 +233,22 @@ export function useFileOperations({
             // The backend caps the failure list; past that point the index list is the
             // only way to know which items landed (and must not be recorded as undoable).
             const succeeded = progress.succeeded
+            const failedIndices = progress.failedIndices
             let keep = succeeded ?? []
             if (!keep.length) {
-              const failedSet = new Set(progress.failed.map((failure) => failure.path.toLowerCase()))
-              keep = sources
-                .map((_, index) => index)
-                .filter((index) => !failedSet.has(sources[index].toLowerCase()))
+              if (failedIndices?.length) {
+                const failedSet = new Set(failedIndices)
+                keep = sources.map((_, index) => index).filter((index) => !failedSet.has(index))
+              } else if (progress.failed.length === progress.failedCount) {
+                // The list is complete, so the paths identify the landed items. When it is
+                // capped, deriving from it would record items that never landed.
+                const failedSet = new Set(
+                  progress.failed.map((failure) => failure.path.toLowerCase()),
+                )
+                keep = sources
+                  .map((_, index) => index)
+                  .filter((index) => !failedSet.has(sources[index].toLowerCase()))
+              }
             }
             const landed = new Set(keep)
             recordEntry(
@@ -280,10 +290,17 @@ export function useFileOperations({
       const failedPaths = new Set(
         (ops[opId]?.failed ?? []).map((failure) => failure.path.toLowerCase()),
       )
+      const failedIndices = ops[opId]?.failedIndices ?? []
       const canSubset = request.kind !== 'rename' && !request.newName && !request.newNames
-      const subsetSources = canSubset
-        ? request.sources.filter((source) => failedPaths.has(source.toLowerCase()))
-        : request.sources
+      // The failure list is capped at 200; the index list is not, so a large denied batch
+      // retries completely instead of silently dropping the tail.
+      const subsetSources = !canSubset
+        ? request.sources
+        : failedIndices.length
+          ? failedIndices
+              .map((index) => request.sources[index])
+              .filter((source): source is string => Boolean(source))
+          : request.sources.filter((source) => failedPaths.has(source.toLowerCase()))
       // Only the shell-level error carries no per-item paths; then the whole request is
       // the right unit to retry.
       const retry = subsetSources.length ? { ...request, sources: subsetSources } : request
@@ -294,11 +311,19 @@ export function useFileOperations({
           refreshPanes()
           const failed = new Set(report.failed.map((failure) => failure.path.toLowerCase()))
           const succeeded = report.succeeded ?? []
+          const reportedIndices = report.failedIndices ?? []
           let keep = succeeded
-          if (!report.aborted && !succeeded.length) {
-            keep = retry.sources
-              .map((_, index) => index)
-              .filter((index) => !failed.has(retry.sources[index].toLowerCase()))
+          if (!keep.length) {
+            if (reportedIndices.length) {
+              const failedSet = new Set(reportedIndices)
+              keep = retry.sources
+                .map((_, index) => index)
+                .filter((index) => !failedSet.has(index))
+            } else if (!report.aborted && report.failedTotal === report.failed.length) {
+              keep = retry.sources
+                .map((_, index) => index)
+                .filter((index) => !failed.has(retry.sources[index].toLowerCase()))
+            }
           }
           const completed = keep.map((index) => retry.sources[index])
           // The elevated run does not go through `runOp`, so its history entry has to be

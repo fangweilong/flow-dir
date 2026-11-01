@@ -31,8 +31,8 @@ use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows::Win32::System::Threading::{
-    CreateEventW, OpenEventW, SetEvent, TerminateProcess, WaitForSingleObject, INFINITE,
-    SYNCHRONIZATION_SYNCHRONIZE,
+    CreateEventW, OpenEventW, SetEvent, TerminateProcess, WaitForMultipleObjects,
+    WaitForSingleObject, INFINITE, SYNCHRONIZATION_SYNCHRONIZE,
 };
 use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
 use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
@@ -236,14 +236,18 @@ fn run_worker(
     let budget = Instant::now() + Duration::from_millis(u64::from(WAIT_TIMEOUT_MS));
 
     let result = (|| {
-        connect(pipe.0, event.0, &cancel, budget)?;
+        // The helper may exit before it ever connects (credential-based elevation denies
+        // the pipe to the other account). Waiting on the process as well turns a ten-minute
+        // stall into an immediate, accurate error.
+        let process = Some(fork.0);
+        connect(pipe.0, event.0, process, &cancel, budget)?;
         let payload = serde_json::to_vec(&Payload {
             nonce: nonce.to_string(),
             request,
         })
         .map_err(|err| ApiError::new("ELEVATED", format!("request: {err}")))?;
-        write_message(pipe.0, event.0, &payload, &cancel, budget)?;
-        let bytes = read_message(pipe.0, event.0, &cancel, budget)?;
+        write_message(pipe.0, event.0, process, &payload, &cancel, budget)?;
+        let bytes = read_message(pipe.0, event.0, process, &cancel, budget)?;
         serde_json::from_slice(&bytes)
             .map_err(|err| ApiError::new("ELEVATED_NO_RESULT", err.to_string()))
     })();
@@ -316,6 +320,7 @@ fn open_client(name: &str) -> Result<OwnedHandle, ApiError> {
 fn connect(
     pipe: HANDLE,
     event: HANDLE,
+    process: Option<HANDLE>,
     cancel: &AtomicBool,
     budget: Instant,
 ) -> Result<(), ApiError> {
@@ -337,7 +342,7 @@ fn connect(
                         format!("ConnectNamedPipe: {}", code.0),
                     ));
                 }
-                wait_io(pipe, &mut overlap, event, cancel, budget).map(|_| ())
+                wait_io(pipe, &mut overlap, event, process, cancel, budget).map(|_| ())
             }
         }
     }
@@ -359,6 +364,7 @@ unsafe fn wait_io(
     handle: HANDLE,
     overlap: &mut OVERLAPPED,
     event: HANDLE,
+    process: Option<HANDLE>,
     cancel: &AtomicBool,
     budget: Instant,
 ) -> Result<u32, ApiError> {
@@ -367,12 +373,24 @@ unsafe fn wait_io(
             cancel_and_drain(handle, overlap);
             return Err(ApiError::new("ELEVATION_CANCELED", "canceled"));
         }
-        match WaitForSingleObject(event, 200) {
+        let ready = match process {
+            Some(process) => unsafe { WaitForMultipleObjects(&[event, process], false, 200) },
+            None => unsafe { WaitForSingleObject(event, 200) },
+        };
+        match ready {
             WAIT_OBJECT_0 => {
                 let mut bytes = 0u32;
                 GetOverlappedResult(handle, overlap, &mut bytes, false)
                     .map_err(|err| ApiError::new("ELEVATED_IO", err.to_string()))?;
                 return Ok(bytes);
+            }
+            // Index 1 is the helper handle: it exited without answering.
+            exited if exited.0 == WAIT_OBJECT_0.0 + 1 => {
+                cancel_and_drain(handle, overlap);
+                return Err(ApiError::new(
+                    "ELEVATED_LAUNCH",
+                    "the elevated helper exited before replying",
+                ));
             }
             WAIT_TIMEOUT => {
                 if Instant::now() >= budget {
@@ -391,19 +409,21 @@ unsafe fn wait_io(
 fn write_message(
     pipe: HANDLE,
     event: HANDLE,
+    process: Option<HANDLE>,
     bytes: &[u8],
     cancel: &AtomicBool,
     budget: Instant,
 ) -> Result<(), ApiError> {
     let len = u32::try_from(bytes.len())
         .map_err(|_| ApiError::new("ELEVATED", "request too large"))?;
-    write_all(pipe, event, &len.to_le_bytes(), cancel, budget)?;
-    write_all(pipe, event, bytes, cancel, budget)
+    write_all(pipe, event, process, &len.to_le_bytes(), cancel, budget)?;
+    write_all(pipe, event, process, bytes, cancel, budget)
 }
 
 fn write_all(
     pipe: HANDLE,
     event: HANDLE,
+    process: Option<HANDLE>,
     bytes: &[u8],
     cancel: &AtomicBool,
     budget: Instant,
@@ -423,7 +443,7 @@ fn write_all(
                     count
                 }
                 Err(_) if GetLastError() == ERROR_IO_PENDING => {
-                    wait_io(pipe, &mut overlap, event, cancel, budget)?
+                    wait_io(pipe, &mut overlap, event, process, cancel, budget)?
                 }
                 Err(_) => {
                     let code = GetLastError();
@@ -445,23 +465,25 @@ fn write_all(
 fn read_message(
     pipe: HANDLE,
     event: HANDLE,
+    process: Option<HANDLE>,
     cancel: &AtomicBool,
     budget: Instant,
 ) -> Result<Vec<u8>, ApiError> {
     let mut header = [0u8; 4];
-    read_exact(pipe, event, &mut header, cancel, budget)?;
+    read_exact(pipe, event, process, &mut header, cancel, budget)?;
     let len = u32::from_le_bytes(header);
     if len > MAX_MESSAGE {
         return Err(ApiError::new("ELEVATED", "response too large"));
     }
     let mut body = vec![0u8; len as usize];
-    read_exact(pipe, event, &mut body, cancel, budget)?;
+    read_exact(pipe, event, process, &mut body, cancel, budget)?;
     Ok(body)
 }
 
 fn read_exact(
     pipe: HANDLE,
     event: HANDLE,
+    process: Option<HANDLE>,
     out: &mut [u8],
     cancel: &AtomicBool,
     budget: Instant,
@@ -487,7 +509,7 @@ fn read_exact(
                     count
                 }
                 Err(_) if GetLastError() == ERROR_IO_PENDING => {
-                    wait_io(pipe, &mut overlap, event, cancel, budget)?
+                    wait_io(pipe, &mut overlap, event, process, cancel, budget)?
                 }
                 Err(_) => {
                     let code = GetLastError();

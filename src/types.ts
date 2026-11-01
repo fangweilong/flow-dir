@@ -65,6 +65,8 @@ export type OpProgress = {
   failed: OpFailure[]
   /** Source indices that completed; only sent with the final message of an aborted op. */
   succeeded?: number[]
+  /** Indices of failed sources, complete even when `failed` is capped. */
+  failedIndices?: number[]
   done: boolean
   aborted: boolean
   error: ApiError | null
@@ -118,6 +120,8 @@ export type ElevatedReport = {
   failedTotal: number
   /** Source indices that completed; used to undo an aborted retry. */
   succeeded?: number[]
+  /** Indices of failed sources, complete even when `failed` is capped. */
+  failedIndices?: number[]
   error: ApiError | null
 }
 export type AppInfo = { version: string; dependencies: Dependency[] }

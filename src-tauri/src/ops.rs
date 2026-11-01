@@ -57,6 +57,10 @@ pub struct OpProgress {
     /// operation so the UI can still undo the part that reached the disk.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub succeeded: Vec<u32>,
+    /// Indices of failed sources, complete even when `failed` is capped; the elevated
+    /// retry uses them to replay exactly the denied subset.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_indices: Vec<u32>,
     pub done: bool,
     pub aborted: bool,
     pub error: Option<ApiError>,
@@ -123,6 +127,9 @@ struct Outcome {
     /// exposes them: the UI records an undo for what landed, which it cannot derive from
     /// `failed` because that list is capped.
     succeeded: Vec<u32>,
+    /// Source indices that failed, uncapped (4 bytes each; the 200-entry cap exists for
+    /// the user-facing message, not for this bookkeeping).
+    failed_indices: Vec<u32>,
     /// Any failure was `ACCESS_DENIED`, even past the capped report list.
     denied: bool,
 }
@@ -282,6 +289,9 @@ pub struct ElevatedReport {
     /// Source indices that completed; used to undo an aborted retry.
     #[serde(default)]
     pub succeeded: Vec<u32>,
+    /// Indices of failed sources, uncapped; see [`OpProgress::failed_indices`].
+    #[serde(default)]
+    pub failed_indices: Vec<u32>,
     pub error: Option<ApiError>,
 }
 
@@ -334,6 +344,7 @@ pub fn run_headless(request: Request, cancel: Arc<AtomicBool>) -> ElevatedReport
         failed: Vec::new(),
         failed_total: 0,
         succeeded: Vec::new(),
+        failed_indices: Vec::new(),
         error,
     };
     let kind = match Kind::parse(&request.kind) {
@@ -364,6 +375,7 @@ pub fn run_headless(request: Request, cancel: Arc<AtomicBool>) -> ElevatedReport
         } else {
             Vec::new()
         },
+        failed_indices: outcome.failed_indices,
         error: outcome.error,
     }
 }
@@ -439,6 +451,8 @@ pub fn start(
                 // landed) and by a batch whose failure list was capped: the paths alone
                 // then cannot tell which items succeeded.
                 succeeded,
+                // Uncapped: the elevated retry replays exactly this subset.
+                failed_indices: outcome.failed_indices,
                 done: true,
                 aborted: outcome.aborted,
                 error: outcome.error,
@@ -482,6 +496,7 @@ fn run_guarded<F: FnOnce() -> Outcome>(kind: &str, work: F) -> Outcome {    matc
                 failed: Vec::new(),
                 failed_total: 0,
                 succeeded: Vec::new(),
+                failed_indices: Vec::new(),
                 denied: false,
             }
         }
@@ -503,6 +518,7 @@ fn run(
                 failed: Vec::new(),
                 failed_total: 0,
                 succeeded: Vec::new(),
+                failed_indices: Vec::new(),
                 denied: false,
             };
         }
@@ -550,6 +566,7 @@ fn perform(
     let total = request.sources.len() as u32;
     let failures = Arc::new(FailureLog::default());
     let succeeded: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+    let failed_indices: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
     let source_index: Arc<HashMap<String, u32>> = Arc::new(
         request
             .sources
@@ -571,6 +588,7 @@ fn perform(
         current_path: Mutex::new(String::new()),
         failures: failures.clone(),
         succeeded: succeeded.clone(),
+        failed_indices: failed_indices.clone(),
         source_index,
         cancel,
         progress,
@@ -583,6 +601,7 @@ fn perform(
             failed: failures.take(),
             failed_total: failures.count(),
             succeeded: succeeded.lock().unwrap().clone(),
+            failed_indices: failed_indices.lock().unwrap().clone(),
             denied: failures.denied(),
         };
         let operation: IFileOperation = match CoCreateInstance(&FileOperation, None, CLSCTX_ALL) {
@@ -624,7 +643,7 @@ fn perform(
             Err(e) => return failure(ApiError::new("SHELL_FAILED", e.to_string())),
         };
 
-        let queued = queue(&operation, request, kind, &failures);
+        let queued = queue(&operation, request, kind, &failures, &failed_indices);
         let result = match queued {
             // Every source already failed to resolve; the shell has nothing to perform and
             // would report an unrelated error of its own.
@@ -651,12 +670,14 @@ fn perform(
             Err(err) => Some(err),
         };
         let completed: Vec<u32> = succeeded.lock().unwrap().clone();
+        let reported_failed: Vec<u32> = failed_indices.lock().unwrap().clone();
         Outcome {
             aborted,
             error,
             failed: failures.take(),
             failed_total,
             succeeded: completed,
+            failed_indices: reported_failed,
             denied: failures.denied(),
         }
     }
@@ -667,6 +688,7 @@ fn queue(
     request: &Request,
     kind: Kind,
     failures: &FailureLog,
+    failed_indices: &Mutex<Vec<u32>>,
 ) -> Result<usize, ApiError> {
     unsafe {
         let failure = |path: &str, error: ApiError| failures.push(path, error);
@@ -709,6 +731,7 @@ fn queue(
                 // One unresolvable path (deleted meanwhile, unparsable) must not abort the
                 // whole batch; report it and keep queueing the rest.
                 Err(err) => {
+                    failed_indices.lock().unwrap().push(index as u32);
                     failure(
                         path,
                         ApiError::new(&err.code, err.detail),
@@ -763,6 +786,7 @@ fn queue(
                 Kind::NewDir => unreachable!(),
             };
             if let Err(e) = queued {
+                failed_indices.lock().unwrap().push(index as u32);
                 failure(path, ApiError::from_windows(path, e.code().0));
             } else {
                 queued_count += 1;
@@ -787,6 +811,8 @@ struct Sink {
     failures: Arc<FailureLog>,
     /// Source indices of completed items; see [`Outcome::succeeded`].
     succeeded: Arc<Mutex<Vec<u32>>>,
+    /// Source indices of failed items, uncapped; see [`Outcome::failed_indices`].
+    failed_indices: Arc<Mutex<Vec<u32>>>,
     /// Lowercased source path → index, so a Post callback can map its item back.
     source_index: Arc<HashMap<String, u32>>,
     cancel: Arc<AtomicBool>,
@@ -811,6 +837,7 @@ impl Sink {
             failed_count: self.failures.count(),
             failed: Vec::new(),
             succeeded: Vec::new(),
+            failed_indices: Vec::new(),
             done: false,
             aborted: false,
             error: None,
@@ -855,7 +882,11 @@ impl Sink {
                 self.succeeded.lock().unwrap().push(*index);
             }
         } else if !self.cancel.load(Ordering::Relaxed) {
-            self.failures.record(&self.current_path.lock().unwrap(), hr);
+            let path = self.current_path.lock().unwrap();
+            if let Some(index) = self.source_index.get(&path.to_lowercase()) {
+                self.failed_indices.lock().unwrap().push(*index);
+            }
+            self.failures.record(&path, hr);
             self.emit(None, true);
         }
         self.check_cancel()

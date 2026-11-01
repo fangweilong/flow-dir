@@ -62,6 +62,7 @@ impl Progress {
             failed_count: self.failed,
             failed: Vec::new(),
             succeeded: Vec::new(),
+            failed_indices: Vec::new(),
             done: false,
             aborted: false,
             error: None,
