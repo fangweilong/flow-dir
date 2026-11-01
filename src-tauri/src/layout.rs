@@ -120,8 +120,11 @@ fn clamp_to(work: (i32, i32, u32, u32), state: &WindowState) -> WindowState {
     let (area_x, area_y, area_w, area_h) = work;
     let width = (state.width as i64).clamp(200, area_w.max(200) as i64) as u32;
     let height = (state.height as i64).clamp(120, area_h.max(120) as i64) as u32;
-    let max_x = area_x as i64 + area_w as i64 - width as i64;
-    let max_y = area_y as i64 + area_h as i64 - height as i64;
+    // A degenerate work area (0×0 from a detached display or RDP session) leaves no room
+    // for the 200-px floor, which made `max_x < area_x` and panicked `clamp` during setup —
+    // a crash loop until layout.json was deleted. Anchor such a window at the area corner.
+    let max_x = (area_x as i64 + area_w as i64 - width as i64).max(area_x as i64);
+    let max_y = (area_y as i64 + area_h as i64 - height as i64).max(area_y as i64);
     let x = (state.x as i64).clamp(area_x as i64, max_x) as i32;
     let y = (state.y as i64).clamp(area_y as i64, max_y) as i32;
     WindowState {
@@ -186,4 +189,39 @@ pub fn restore_window<R: Runtime>(app: &AppHandle<R>) {
     );
     let _ = window.set_position(PhysicalPosition::new(clamped.x, clamped.y));
     let _ = window.set_size(PhysicalSize::new(clamped.width, clamped.height));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(x: i32, y: i32, width: u32, height: u32) -> WindowState {
+        WindowState {
+            x,
+            y,
+            width,
+            height,
+            maximized: false,
+            monitor: None,
+        }
+    }
+
+    #[test]
+    fn clamp_survives_a_degenerate_work_area() {
+        // `rcWork` is 0×0 on a detached display; the 200×120 floor used to invert the
+        // clamp range and panic inside `setup`, which made every launch crash.
+        let clamped = clamp_to((0, 0, 0, 0), &state(5000, 4000, 900, 600));
+        assert_eq!((clamped.x, clamped.y), (0, 0));
+        assert_eq!((clamped.width, clamped.height), (200, 120));
+    }
+
+    #[test]
+    fn clamp_keeps_the_saved_rectangle_inside_a_real_area() {
+        let clamped = clamp_to((0, 0, 1920, 1080), &state(5000, 4000, 900, 600));
+        assert_eq!((clamped.x, clamped.width), (1020, 900));
+        assert_eq!((clamped.y, clamped.height), (480, 600));
+        let smaller = clamp_to((0, 0, 1920, 1080), &state(10, 20, 120, 80));
+        assert_eq!((smaller.x, smaller.width), (10, 200));
+        assert_eq!((smaller.y, smaller.height), (20, 120));
+    }
 }

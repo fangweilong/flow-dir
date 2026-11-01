@@ -37,8 +37,9 @@ export const executeAddressCommand = (command: string, workingDir?: string) =>
 export const openWith = (path: string) => invoke<void>('open_with', { path })
 /** Which of the paths already exist on disk; used before a rename overwrites one. */
 export const pathsExist = (paths: string[]) => invoke<boolean[]>('paths_exist', { paths })
-/** Free `name (n)` variants, in the same order, for conflict-free batch renames. */
-export const uniquePaths = (paths: string[]) => invoke<string[]>('unique_paths', { paths })
+/** Free "name (n)" variants; `sources` are the rows the same batch renames away. */
+export const uniquePaths = (paths: string[], sources?: string[]) =>
+  invoke<string[]>('unique_paths', { paths, sources })
 
 /** Row shape for {@link sortOrder}; mirrors the fields a listing already carries. */
 export type SortItem = { name: string; path?: string; size: number; mtime: number; isDir: boolean }
@@ -409,7 +410,7 @@ export const shellProperties = (path: string) => invoke<void>('shell_properties'
 export const driveEject = (root: string) => invoke<void>('drive_eject', { root })
 /** Puts recycled files back at their original paths; reports the ones no longer in the bin. */
 export const restoreRecycle = (paths: string[]) =>
-  invoke<{ restored: string[]; missing: string[] }>('restore_recycle', { paths })
+  invoke<{ restored: string[]; missing: string[]; failed: string[] }>('restore_recycle', { paths })
 
 export const searchCancel = () => invoke<void>('search_cancel')
 /** Preview payload; `hydrate` reads a cloud placeholder, which downloads it. */

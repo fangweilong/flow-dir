@@ -403,9 +403,10 @@ async fn paths_exist(paths: Vec<String>) -> Vec<bool> {
 
 /// Free "name (n)" variants of every path, in the same order as the input.
 #[tauri::command]
-async fn unique_paths(paths: Vec<String>) -> Vec<String> {
+async fn unique_paths(paths: Vec<String>, sources: Option<Vec<String>>) -> Vec<String> {
     let fallback = paths.clone();
-    tauri::async_runtime::spawn_blocking(move || naming::unique(&paths))
+    let sources = sources.unwrap_or_default();
+    tauri::async_runtime::spawn_blocking(move || naming::unique(&paths, &sources))
         .await
         .unwrap_or(fallback)
 }
@@ -695,7 +696,7 @@ async fn archive_extract_items(
                     // Never merge into an existing folder: pick a free name, like the copy path.
                     let folder = dest_path.join(folder_name).to_string_lossy().into_owned();
                     let target_folder = std::path::PathBuf::from(
-                        naming::unique(std::slice::from_ref(&folder)).remove(0),
+                        naming::unique(std::slice::from_ref(&folder), &[]).remove(0),
                     );
                     std::fs::create_dir_all(&target_folder)
                         .map_err(|e| ApiError::from_io(&target_folder.to_string_lossy(), &e))?;
@@ -710,7 +711,7 @@ async fn archive_extract_items(
                     // A same-named file in the destination must not be truncated silently.
                     let file = dest_path.join(file_name).to_string_lossy().into_owned();
                     let target_file = std::path::PathBuf::from(
-                        naming::unique(std::slice::from_ref(&file)).remove(0),
+                        naming::unique(std::slice::from_ref(&file), &[]).remove(0),
                     );
                     archive::backends::extract_single(&archive_str, &inner, &target_file, None, None)?;
                     extracted.push(target_file.to_string_lossy().into_owned());

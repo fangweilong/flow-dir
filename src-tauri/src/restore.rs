@@ -31,11 +31,20 @@ const PKEY_DISPLACED_FROM: PROPERTYKEY = PROPERTYKEY {
     pid: 2,
 };
 
+/// `PKEY_DateDeleted` is `FMTID_Displaced`/{3}: same format id, the item's deletion stamp.
+const PKEY_DATE_DELETED: PROPERTYKEY = PROPERTYKEY {
+    fmtid: GUID::from_u128(0x9b17_4b33_40ff_11d2_a27e_00c0_4fc3_0871),
+    pid: 3,
+};
+
 #[derive(Serialize, Clone, Default, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct RestoreReport {
     pub restored: Vec<String>,
+    /// Paths no item in the bin claims any more (or the item disappeared mid-walk).
     pub missing: Vec<String>,
+    /// Paths whose item is still in the bin but the shell verb failed; retryable.
+    pub failed: Vec<String>,
 }
 
 /// Puts each path back where it came from. Paths that are no longer in the bin are reported
@@ -112,32 +121,65 @@ unsafe fn restore_items(paths: &[String]) -> Result<RestoreReport, ApiError> {
         let wanted: Vec<String> = paths.iter().map(|path| path_key(path)).collect();
         let mut report = RestoreReport::default();
         let folder = recycle_folder()?;
-        let mut found: Vec<Option<String>> = vec![None; wanted.len()];
+        // The bin can hold several items displaced from the same path (delete, recreate,
+        // delete again). Enumeration order is not chronological, so the deletion stamp is
+        // collected first and a second pass restores exactly the newest item; restoring
+        // whichever item happened to come first brought back an arbitrary version.
+        let mut newest = vec![0u64; wanted.len()];
         for_each_recycled(&folder, |item| {
             let Some(original) = original_path(&folder, item) else {
                 return true;
             };
-            let key = path_key(&original);
-            if let Some(index) = wanted.iter().position(|path| *path == key) {
-                // The bin can hold several entries displaced from the same path; only the
-                // newest one should be restored for this request.
-                if found[index].is_some() {
-                    return true;
-                }
-                if restore_item(&folder, item).is_ok() {
-                    report.restored.push(original);
-                    found[index] = Some(key);
+            let Some(index) = wanted.iter().position(|path| *path == path_key(&original)) else {
+                return true;
+            };
+            newest[index] = newest[index].max(deleted_stamp(&folder, item).unwrap_or(0));
+            true
+        });
+
+        let mut handled = vec![false; wanted.len()];
+        for_each_recycled(&folder, |item| {
+            let Some(original) = original_path(&folder, item) else {
+                return true;
+            };
+            let Some(index) = wanted.iter().position(|path| *path == path_key(&original)) else {
+                return true;
+            };
+            if handled[index] || deleted_stamp(&folder, item).unwrap_or(0) != newest[index] {
+                return true;
+            }
+            handled[index] = true;
+            match restore_item(&folder, item) {
+                Ok(()) => report.restored.push(original),
+                Err(err) => {
+                    log::warn!(
+                        target: "flowdir::restore",
+                        "restore {original} failed: {} {}",
+                        err.code,
+                        err.detail
+                    );
+                    report.failed.push(original);
                 }
             }
             true
         });
 
         for (index, path) in paths.iter().enumerate() {
-            if found[index].is_none() {
+            if !handled[index] {
                 report.missing.push(path.clone());
             }
         }
         Ok(report)
+    }
+}
+
+/// Deletion stamp of a recycled item; `None` when the shell does not expose it, which
+/// keeps the previous "first match wins" behaviour for such items.
+unsafe fn deleted_stamp(folder: &IShellFolder, item: *const ITEMIDLIST) -> Option<u64> {
+    unsafe {
+        let shell_item: IShellItem2 = SHCreateItemWithParent(None, folder, item).ok()?;
+        let stamp = shell_item.GetFileTime(&PKEY_DATE_DELETED).ok()?;
+        Some(((stamp.dwHighDateTime as u64) << 32) | stamp.dwLowDateTime as u64)
     }
 }
 
@@ -283,6 +325,7 @@ mod tests {
 
         let report = restore(std::slice::from_ref(&path)).expect("restore call");
         assert!(report.missing.is_empty(), "report: {report:?}");
+        assert!(report.failed.is_empty(), "report: {report:?}");
         assert_eq!(report.restored.len(), 1);
         assert!(file.exists(), "the file must be back at its original path");
         assert_eq!(std::fs::read(&file).unwrap(), b"payload");

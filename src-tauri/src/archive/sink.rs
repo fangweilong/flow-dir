@@ -460,7 +460,7 @@ impl Sink {
                 let target = if fs::symlink_metadata(&target).is_ok() {
                     // Keep the `\\?\` form: `display()` strips it, which would turn a UNC
                     // target into a relative `UNC\server\share\...` path.
-                    let unique = naming::unique(&[target.to_string_lossy().into_owned()]);
+                    let unique = naming::unique(&[target.to_string_lossy().into_owned()], &[]);
                     PathBuf::from(unique.into_iter().next().unwrap_or_default())
                 } else {
                     target
@@ -571,7 +571,7 @@ fn merge_dir_target(target: &Path) -> PathBuf {
     if meta.is_dir() && !is_reparse_point(&meta) {
         return target.to_path_buf();
     }
-    let unique = naming::unique(&[target.to_string_lossy().into_owned()]);
+    let unique = naming::unique(&[target.to_string_lossy().into_owned()], &[]);
     PathBuf::from(unique.into_iter().next().unwrap_or_default())
 }
 

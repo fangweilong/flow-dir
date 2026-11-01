@@ -21,18 +21,27 @@ pub fn existing(paths: &[String]) -> Vec<bool> {
 /// inputs that would collide with each other still end up with distinct names. Names that
 /// are already free are returned unchanged; the search stops after [`MAX_SUFFIX`] tries so
 /// a pathological folder cannot hang the request.
-pub fn unique(paths: &[String]) -> Vec<String> {
+///
+/// `sources` is the parallel list of files the same batch renames away. A target that only
+/// changes the case of its own source ("readme.md" -> "README.md") hits that source on a
+/// case-insensitive volume; it is free by definition and must not gain a ` (1)` suffix.
+pub fn unique(paths: &[String], sources: &[String]) -> Vec<String> {
     let mut claimed = std::collections::HashSet::new();
     paths
         .iter()
-        .map(|path| unique_one(path, &mut claimed))
+        .enumerate()
+        .map(|(index, path)| unique_one(path, sources.get(index).map(String::as_str), &mut claimed))
         .collect()
 }
 
 const MAX_SUFFIX: u32 = 10_000;
 
-fn unique_one(path: &str, claimed: &mut std::collections::HashSet<String>) -> String {
-    if !is_taken(path, claimed) {
+fn unique_one(
+    path: &str,
+    source: Option<&str>,
+    claimed: &mut std::collections::HashSet<String>,
+) -> String {
+    if !is_taken(path, source, claimed) {
         claimed.insert(path.to_lowercase());
         return path.to_string();
     }
@@ -50,7 +59,7 @@ fn unique_one(path: &str, claimed: &mut std::collections::HashSet<String>) -> St
     for n in 1..=MAX_SUFFIX {
         let candidate = dir.join(format!("{stem} ({n}){ext}"));
         let candidate = candidate.to_string_lossy().into_owned();
-        if !is_taken(&candidate, claimed) {
+        if !is_taken(&candidate, source, claimed) {
             claimed.insert(candidate.to_lowercase());
             return candidate;
         }
@@ -58,8 +67,15 @@ fn unique_one(path: &str, claimed: &mut std::collections::HashSet<String>) -> St
     path.to_string()
 }
 
-fn is_taken(path: &str, claimed: &std::collections::HashSet<String>) -> bool {
-    claimed.contains(&path.to_lowercase()) || std::fs::symlink_metadata(PathBuf::from(path)).is_ok()
+fn is_taken(path: &str, source: Option<&str>, claimed: &std::collections::HashSet<String>) -> bool {
+    let key = path.to_lowercase();
+    if claimed.contains(&key) {
+        return true;
+    }
+    if source.is_some_and(|source| source.to_lowercase() == key) {
+        return false;
+    }
+    std::fs::symlink_metadata(PathBuf::from(path)).is_ok()
 }
 
 #[cfg(test)]
@@ -96,13 +112,13 @@ mod tests {
         let dir = temp_dir("unique");
         let taken = dir.join("report.txt");
         std::fs::write(&taken, b"x").unwrap();
-        let next = unique(&[taken.to_string_lossy().into_owned()]);
+        let next = unique(&[taken.to_string_lossy().into_owned()], &[]);
         assert_eq!(
             Path::new(&next[0]).file_name().unwrap().to_string_lossy(),
             "report (1).txt"
         );
         std::fs::write(Path::new(&next[0]), b"y").unwrap();
-        let again = unique(&[taken.to_string_lossy().into_owned()]);
+        let again = unique(&[taken.to_string_lossy().into_owned()], &[]);
         assert_eq!(
             Path::new(&again[0]).file_name().unwrap().to_string_lossy(),
             "report (2).txt"
@@ -114,10 +130,10 @@ mod tests {
     fn unique_keeps_free_paths_and_extensionless_names() {
         let dir = temp_dir("unique-free");
         let free = dir.join("free.txt").to_string_lossy().into_owned();
-        assert_eq!(unique(std::slice::from_ref(&free)), vec![free]);
+        assert_eq!(unique(std::slice::from_ref(&free), &[]), vec![free]);
         let bare = dir.join("notes");
         std::fs::write(&bare, b"x").unwrap();
-        let next = unique(&[bare.to_string_lossy().into_owned()]);
+        let next = unique(&[bare.to_string_lossy().into_owned()], &[]);
         assert_eq!(
             Path::new(&next[0]).file_name().unwrap().to_string_lossy(),
             "notes (1)"
@@ -126,10 +142,24 @@ mod tests {
     }
 
     #[test]
+    fn a_case_only_target_is_not_suffixed() {
+        let dir = temp_dir("unique-case");
+        let source = dir.join("readme.md");
+        std::fs::write(&source, b"x").unwrap();
+        let from = source.to_string_lossy().into_owned();
+        let to = dir.join("README.md").to_string_lossy().into_owned();
+        // The target hits its own source on a case-insensitive volume, which is a rename,
+        // not a collision. The frontend routes every row of a numbering batch through
+        // `unique`, so without the hint a mixed batch renamed this row to "README (1).md".
+        assert_eq!(unique(std::slice::from_ref(&to), std::slice::from_ref(&from)), vec![to]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn unique_separates_paths_that_collide_with_each_other() {
         let dir = temp_dir("unique-batch");
         let target = dir.join("same.txt").to_string_lossy().into_owned();
-        let names = unique(&[target.clone(), target]);
+        let names = unique(&[target.clone(), target], &[]);
         assert_ne!(names[0].to_lowercase(), names[1].to_lowercase());
         assert!(names[0].ends_with("same.txt"));
         assert!(names[1].ends_with("same (1).txt"));

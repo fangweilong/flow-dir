@@ -182,8 +182,12 @@ export function BatchRenameDialog({ dir, names, lang, onConfirm, onClose }: Prop
       return
     }
     // `number`: ask the backend for the first free `name (n)` variant of every target,
-    // including the ones that were already free.
-    void uniquePaths(effective.map((item) => joinPath(dir, item.pair.to)))
+    // including the ones that were already free. The parallel source list keeps a
+    // case-only rename from numbering itself.
+    void uniquePaths(
+      effective.map((item) => joinPath(dir, item.pair.to)),
+      effective.map((item) => joinPath(dir, item.pair.from)),
+    )
       .then((resolved) => {
         confirm(
           effective.map((item, i) => ({ from: item.pair.from, to: baseName(resolved[i] ?? item.pair.to) })),

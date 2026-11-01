@@ -505,6 +505,38 @@ mod tests {
     }
 
     #[test]
+    fn a_corrupt_member_is_skipped_without_aborting() {
+        let dir = temp_dir("corrupt-member");
+        let archive = dir.join("src.zip");
+        let file = std::fs::File::create(&archive).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("good.txt", stored).unwrap();
+        zip.write_all(b"good").unwrap();
+        zip.start_file("bad.txt", stored).unwrap();
+        zip.write_all(b"alpha payload").unwrap();
+        zip.finish().unwrap();
+        // Stored members keep their payload verbatim; one flipped byte breaks that
+        // member's CRC while the rest of the archive stays readable.
+        let mut bytes = std::fs::read(&archive).unwrap();
+        let pos = bytes
+            .windows(7)
+            .position(|window| window == b"alpha p")
+            .expect("stored payload");
+        bytes[pos] ^= 0xFF;
+        std::fs::write(&archive, &bytes).unwrap();
+
+        let dest = dir.join("out");
+        let progress = extract(&archive, &dest);
+        assert!(progress.error.is_none(), "{:?}", progress.error);
+        assert_eq!(std::fs::read(dest.join("good.txt")).unwrap(), b"good");
+        assert!(!dest.join("bad.txt").exists());
+        assert_eq!(progress.failed_count, 1, "{:?}", progress.failed);
+        assert_eq!(progress.failed[0].code, "CORRUPT");
+    }
+
+    #[test]
     fn zip_names_dirs_and_unsafe_entries() {
         let dir = temp_dir("zip");
         let archive = dir.join("sample.zip");

@@ -869,7 +869,7 @@ pub fn extract_dir(
         }
         let target = if uniquify {
             let path = target.to_string_lossy().into_owned();
-            std::path::PathBuf::from(crate::naming::unique(std::slice::from_ref(&path)).remove(0))
+            std::path::PathBuf::from(crate::naming::unique(std::slice::from_ref(&path), &[]).remove(0))
         } else {
             target
         };
@@ -922,7 +922,7 @@ fn extract_zip_dir(
         }
         let target = if uniquify {
             let path = target.to_string_lossy().into_owned();
-            std::path::PathBuf::from(crate::naming::unique(std::slice::from_ref(&path)).remove(0))
+            std::path::PathBuf::from(crate::naming::unique(std::slice::from_ref(&path), &[]).remove(0))
         } else {
             target
         };

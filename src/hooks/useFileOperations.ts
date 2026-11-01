@@ -559,10 +559,11 @@ export function useFileOperations({
         case 'delete': {
           try {
             const report = await restoreRecycle(entry.paths)
-            if (report.missing.length) {
-              showToast(
-                t('undo.partial', { ok: report.restored.length, failed: report.missing.length }),
-              )
+            // `missing` means the item left the bin; `failed` means it is still there but
+            // the shell verb refused (locked target, permissions), so a retry can work.
+            const failedCount = report.missing.length + report.failed.length
+            if (failedCount) {
+              showToast(t('undo.partial', { ok: report.restored.length, failed: failedCount }))
             } else {
               showToast(t('undo.done'))
             }

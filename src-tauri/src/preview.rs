@@ -130,6 +130,14 @@ struct CacheInner {
     tick: u64,
 }
 
+/// Per-entry cost used for eviction. Payload length alone charged cached failures (empty
+/// bytes) nothing, so a dead share could pin one immortal entry per path per icon revision.
+fn entry_cost(key: &str, data: &[u8]) -> usize {
+    data.len() + key.len() + std::mem::size_of::<(String, (Vec<u8>, u64))>()
+}
+
+const MAX_CACHE_ENTRIES: usize = 512;
+
 impl PreviewCache {
     pub fn get(&self, key: &str) -> Option<Vec<u8>> {
         let mut inner = self.inner.lock().unwrap();
@@ -145,11 +153,13 @@ impl PreviewCache {
         inner.tick += 1;
         let tick = inner.tick;
         if let Some((old, _)) = inner.entries.remove(&key) {
-            inner.total = inner.total.saturating_sub(old.len());
+            inner.total = inner.total.saturating_sub(entry_cost(&key, &old));
         }
-        inner.total += data.len();
+        inner.total += entry_cost(&key, &data);
         inner.entries.insert(key, (data, tick));
-        while inner.total > MAX_CACHE_BYTES && !inner.entries.is_empty() {
+        while (inner.total > MAX_CACHE_BYTES || inner.entries.len() > MAX_CACHE_ENTRIES)
+            && !inner.entries.is_empty()
+        {
             let oldest = inner
                 .entries
                 .iter()
@@ -157,7 +167,7 @@ impl PreviewCache {
                 .map(|(k, _)| k.clone());
             if let Some(key) = oldest {
                 if let Some((old, _)) = inner.entries.remove(&key) {
-                    inner.total = inner.total.saturating_sub(old.len());
+                    inner.total = inner.total.saturating_sub(entry_cost(&key, &old));
                 }
             } else {
                 break;
