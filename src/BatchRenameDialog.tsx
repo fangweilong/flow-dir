@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { NumberField } from './components/NumberField'
 import { makeT } from './i18n'
 import { baseName, joinPath } from './paths'
 import { pathsExist, uniquePaths } from './api'
@@ -268,23 +269,21 @@ export function BatchRenameDialog({ dir, names, lang, onConfirm, onClose }: Prop
             />
             <label className="flex shrink-0 items-center gap-1 text-[0.6875rem] text-muted-2">
               {t('batch.start')}
-              <input
-                type="number"
+              <NumberField
                 min={0}
                 max={9999}
                 value={start}
-                onChange={(ev) => setStart(Math.max(0, Math.min(9999, Number(ev.target.value) || 0)))}
+                onChange={setStart}
                 className="h-7 w-14 rounded border border-line bg-surface-2 px-1 text-[0.71875rem] text-fg outline-none focus:border-blue-400"
               />
             </label>
             <label className="flex shrink-0 items-center gap-1 text-[0.6875rem] text-muted-2">
               {t('batch.digits')}
-              <input
-                type="number"
+              <NumberField
                 min={1}
                 max={6}
                 value={digits}
-                onChange={(ev) => setDigits(Math.max(1, Math.min(6, Number(ev.target.value) || 1)))}
+                onChange={setDigits}
                 className="h-7 w-12 rounded border border-line bg-surface-2 px-1 text-[0.71875rem] text-fg outline-none focus:border-blue-400"
               />
             </label>

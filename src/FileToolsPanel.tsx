@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { NumberField } from './components/NumberField'
 import { dupStart, exportText, hashStart, pickFolder, toolCancel, toolPause } from './api'
 import { errorKey, makeT, type Translate } from './i18n'
 import type { DupGroup, DupProgress, HashProgress } from './types'
@@ -374,11 +375,11 @@ export function FileToolsPanel({
             <div className="flex items-center gap-3 text-[0.6875rem] text-muted">
               <label className="flex items-center gap-1">
                 {t('tools.minSize')}
-                <input
-                  type="number"
+                <NumberField
                   min={0}
+                  max={Number.MAX_SAFE_INTEGER}
                   value={minSizeKb}
-                  onChange={(ev) => setMinSizeKb(Math.max(0, Number(ev.target.value) || 0))}
+                  onChange={setMinSizeKb}
                   className="h-6 w-14 rounded border border-line bg-surface-2 px-1 text-right tabular text-fg outline-none"
                 />
               </label>

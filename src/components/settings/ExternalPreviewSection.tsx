@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { NumberField } from '../NumberField'
 import type { Translate } from '../../i18n'
 import type { Settings } from '../../persist'
 import { formatBinding } from '../../shortcuts'
@@ -95,16 +96,11 @@ export function ExternalPreviewSection({ settings, keys, onChange, t, visible }:
             <div className="text-[0.71875rem] text-fg">{t('settings.previewMaxFile')}</div>
             <div className="text-[0.625rem] text-muted-2">{t('settings.previewMaxFileHint')}</div>
           </div>
-          <input
-            type="number"
+          <NumberField
             min={1}
             max={4096}
             value={settings.previewMaxFileMb}
-            onChange={(ev) => {
-              const next = Number(ev.target.value)
-              if (!Number.isFinite(next)) return
-              onChange({ ...settings, previewMaxFileMb: Math.min(4096, Math.max(1, Math.round(next))) })
-            }}
+            onChange={(value) => onChange({ ...settings, previewMaxFileMb: value })}
             data-preview-max-file
             className="h-6 w-16 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-blue-400"
           />
@@ -114,20 +110,12 @@ export function ExternalPreviewSection({ settings, keys, onChange, t, visible }:
             <div className="text-[0.71875rem] text-fg">{t('settings.previewMaxDimension')}</div>
             <div className="text-[0.625rem] text-muted-2">{t('settings.previewMaxDimensionHint')}</div>
           </div>
-          <input
-            type="number"
+          <NumberField
             min={256}
             max={16384}
             step={64}
             value={settings.previewMaxDimension}
-            onChange={(ev) => {
-              const next = Number(ev.target.value)
-              if (!Number.isFinite(next)) return
-              onChange({
-                ...settings,
-                previewMaxDimension: Math.min(16384, Math.max(256, Math.round(next))),
-              })
-            }}
+            onChange={(value) => onChange({ ...settings, previewMaxDimension: value })}
             data-preview-max-dimension
             className="h-6 w-20 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-blue-400"
           />
@@ -137,16 +125,11 @@ export function ExternalPreviewSection({ settings, keys, onChange, t, visible }:
             <div className="text-[0.71875rem] text-fg">{t('settings.previewTextKb')}</div>
             <div className="text-[0.625rem] text-muted-2">{t('settings.previewTextKbHint')}</div>
           </div>
-          <input
-            type="number"
+          <NumberField
             min={1}
             max={1024}
             value={settings.previewTextKb}
-            onChange={(ev) => {
-              const next = Number(ev.target.value)
-              if (!Number.isFinite(next)) return
-              onChange({ ...settings, previewTextKb: Math.min(1024, Math.max(1, Math.round(next))) })
-            }}
+            onChange={(value) => onChange({ ...settings, previewTextKb: value })}
             data-preview-text-kb
             className="h-6 w-16 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-blue-400"
           />

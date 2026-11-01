@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { NumberField } from '../NumberField'
 import type { Translate } from '../../i18n'
 import type { Settings } from '../../persist'
 import type { EverythingStatus, Lang } from '../../types'
@@ -299,16 +300,11 @@ export function GeneralSection({ settings, onChange, t, visible, everything }: G
               <div className="text-[0.71875rem] text-fg">{t('settings.closedTabLimit')}</div>
               <div className="text-[0.625rem] text-muted-2">{t('settings.closedTabLimitHint')}</div>
             </div>
-            <input
-              type="number"
+            <NumberField
               min={1}
               max={50}
               value={settings.closedTabLimit}
-              onChange={(ev) => {
-                const next = Number(ev.target.value)
-                if (!Number.isFinite(next)) return
-                onChange({ ...settings, closedTabLimit: Math.min(50, Math.max(1, Math.round(next))) })
-              }}
+              onChange={(value) => onChange({ ...settings, closedTabLimit: value })}
               className="h-6 w-16 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-blue-400"
             />
           </div>
@@ -317,16 +313,11 @@ export function GeneralSection({ settings, onChange, t, visible, everything }: G
               <div className="text-[0.71875rem] text-fg">{t('settings.dupConcurrency')}</div>
               <div className="text-[0.625rem] text-muted-2">{t('settings.dupConcurrencyHint')}</div>
             </div>
-            <input
-              type="number"
+            <NumberField
               min={0}
               max={16}
               value={settings.dupConcurrency}
-              onChange={(ev) => {
-                const next = Number(ev.target.value)
-                if (!Number.isFinite(next)) return
-                onChange({ ...settings, dupConcurrency: Math.min(16, Math.max(0, Math.round(next))) })
-              }}
+              onChange={(value) => onChange({ ...settings, dupConcurrency: value })}
               className="h-6 w-16 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-blue-400"
             />
           </div>
@@ -335,16 +326,11 @@ export function GeneralSection({ settings, onChange, t, visible, everything }: G
               <div className="text-[0.71875rem] text-fg">{t('settings.dupSpeed')}</div>
               <div className="text-[0.625rem] text-muted-2">{t('settings.dupSpeedHint')}</div>
             </div>
-            <input
-              type="number"
+            <NumberField
               min={0}
               max={4096}
               value={settings.dupMaxMbPerSec}
-              onChange={(ev) => {
-                const next = Number(ev.target.value)
-                if (!Number.isFinite(next)) return
-                onChange({ ...settings, dupMaxMbPerSec: Math.min(4096, Math.max(0, Math.round(next))) })
-              }}
+              onChange={(value) => onChange({ ...settings, dupMaxMbPerSec: value })}
               className="h-6 w-16 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-blue-400"
             />
           </div>
@@ -396,16 +382,11 @@ export function GeneralSection({ settings, onChange, t, visible, everything }: G
               <div className="text-[0.71875rem] text-fg">{t('settings.undoLimit')}</div>
               <div className="text-[0.625rem] text-muted-2">{t('settings.undoLimitHint')}</div>
             </div>
-            <input
-              type="number"
+            <NumberField
               min={1}
               max={100}
               value={settings.undoLimit}
-              onChange={(ev) => {
-                const next = Number(ev.target.value)
-                if (!Number.isFinite(next)) return
-                onChange({ ...settings, undoLimit: Math.min(100, Math.max(1, Math.round(next))) })
-              }}
+              onChange={(value) => onChange({ ...settings, undoLimit: value })}
               data-undo-limit
               className="h-6 w-16 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-blue-400"
             />
