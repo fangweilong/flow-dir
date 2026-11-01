@@ -158,11 +158,6 @@ pub fn restore_window<R: Runtime>(app: &AppHandle<R>) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
-    if state.maximized {
-        let _ = window.maximize();
-        return;
-    }
-
     let monitors = window.available_monitors().unwrap_or_default();
     let chosen = state
         .monitor
@@ -170,6 +165,17 @@ pub fn restore_window<R: Runtime>(app: &AppHandle<R>) {
         .and_then(|name| monitors.iter().find(|monitor| monitor.name() == Some(name)))
         .or_else(|| monitors.iter().find(|monitor| intersects(monitor, &state)))
         .or_else(|| monitors.first());
+    if state.maximized {
+        // Maximizing before the window reaches the saved monitor parks it on whichever
+        // monitor currently owns it (usually the primary).
+        if let Some(monitor) = chosen {
+            let work = monitor.work_area();
+            let _ = window.set_position(PhysicalPosition::new(work.position.x, work.position.y));
+        }
+        let _ = window.maximize();
+        return;
+    }
+
     let Some(monitor) = chosen else {
         return;
     };

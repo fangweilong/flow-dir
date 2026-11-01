@@ -43,7 +43,9 @@ pub fn path_key(path: &str) -> String {
 /// different UTF-8 length (`İ` → `i̇`), where slicing by a byte offset taken from the
 /// lowercased string would land inside a character.
 pub fn strip_prefix_dir<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
-    let mut rest = path;
+    // `\\server\share` starts with a separator that would otherwise be read as an empty
+    // first segment and make every UNC path fail the comparison.
+    let mut rest = path.trim_start_matches('\\');
     for want in prefix.split('\\').filter(|segment| !segment.is_empty()) {
         let (head, tail) = rest.split_once('\\')?;
         if head.to_lowercase() != want.to_lowercase() {
@@ -84,6 +86,22 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prefix_strip_handles_roots_and_unc() {
+        // A UNC path begins with a separator that used to become an empty first segment.
+        assert_eq!(
+            strip_prefix_dir(r"\\server\share\dir\f.txt", r"\\server\share"),
+            Some(r"dir\f.txt")
+        );
+        assert_eq!(
+            strip_prefix_dir(r"C:\Users\a\f.txt", r"C:\Users\a"),
+            Some("f.txt")
+        );
+        // The prefix itself is not "inside" the prefix.
+        assert_eq!(strip_prefix_dir(r"C:\Users\a", r"C:\Users\a"), None);
+        assert_eq!(strip_prefix_dir(r"C:\Users\ab\f.txt", r"C:\Users\a"), None);
     }
 
     #[test]

@@ -99,16 +99,20 @@ impl State {
     }
 }
 
+/// Locking for the logger must survive a poisoned lock: the panic hook logs, and a
+/// second panic while formatting would otherwise abort the process instead of recording it.
+fn state_lock(state: &Mutex<State>) -> std::sync::MutexGuard<'_, State> {
+    state.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
 impl Log for Logger {
     fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= self.state.lock().unwrap().level
+        metadata.level() <= state_lock(&self.state).level
     }
 
     fn log(&self, record: &Record) {
-        let mut state = self.state.lock().unwrap();
-        if record.level() > state.level {
-            return;
-        }
+        // Format before locking: a panicking `Display` in a log argument must not leave
+        // the mutex held while the panic hook tries to log the panic itself.
         let line = format!(
             "[{}] {:<5} {}: {}\n",
             timestamp(),
@@ -116,6 +120,10 @@ impl Log for Logger {
             record.target(),
             record.args()
         );
+        let mut state = state_lock(&self.state);
+        if record.level() > state.level {
+            return;
+        }
         if state.size + line.len() as u64 > MAX_BYTES {
             state.rotate();
         }
@@ -125,7 +133,7 @@ impl Log for Logger {
     }
 
     fn flush(&self) {
-        let _ = self.state.lock().unwrap().file.flush();
+        let _ = state_lock(&self.state).file.flush();
     }
 }
 
@@ -141,7 +149,7 @@ pub fn init(dir: PathBuf, level: &str) -> Result<(), ApiError> {
         return Ok(());
     }
     let logger = LOGGER.get().expect("the logger was just set");
-    logger.state.lock().unwrap().level = filter(level);
+    state_lock(&logger.state).level = filter(level);
     log::set_max_level(filter(level));
     let _ = log::set_logger(logger);
     Ok(())
@@ -152,14 +160,14 @@ pub fn set_level(level: &str) {
     let filter = filter(level);
     log::set_max_level(filter);
     if let Some(logger) = LOGGER.get() {
-        logger.state.lock().unwrap().level = filter;
+        state_lock(&logger.state).level = filter;
     }
 }
 
 pub fn dir() -> Option<PathBuf> {
     LOGGER
         .get()
-        .map(|logger| logger.state.lock().unwrap().dir.clone())
+        .map(|logger| state_lock(&logger.state).dir.clone())
 }
 
 /// Logs a failure at most once per key per process, so a broken watcher or a folder that

@@ -47,7 +47,14 @@ const parentRel = (rel: string) => {
   return cut < 0 ? '' : rel.slice(0, cut)
 }
 
-const csvCell = (value: string | number) => `"${String(value).replace(/"/g, '""')}"`
+// Excel evaluates a quoted cell that starts with `=`, `+`, `-` or `@` as a formula, so a
+// file name like `=cmd|'/c calc'!A1` would run when the exported CSV is opened. The
+// leading apostrophe keeps such values literal.
+const csvCell = (value: string | number) => {
+  const text = String(value)
+  const safe = /^[=+\-@\t\r]/.test(text) ? `'${text}` : text
+  return `"${safe.replace(/"/g, '""')}"`
+}
 
 type Props = {
   lang: Lang
@@ -238,7 +245,11 @@ export function ComparePanel({
       cancelCounts()
       const jobId = `cmp-count-${++seq.current}`
       countsJob.current = jobId
-      compareCountsStart(jobId, active.left, active.right, rel, active.options, (event) => {
+      // `compare_counts` reads the two directories it is given and joins the child names,
+      // so it needs this level's paths, not the session roots (`rel` only prefixes names).
+      const left = rel ? joinPath(active.left, rel) : active.left
+      const right = rel ? joinPath(active.right, rel) : active.right
+      compareCountsStart(jobId, left, right, rel, active.options, (event) => {
         setCounts((prev) => ({ ...prev, [event.name]: event }))
         if (event.done && countsJob.current === jobId) countsJob.current = null
       }).catch(() => {

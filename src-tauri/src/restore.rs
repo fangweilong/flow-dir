@@ -6,7 +6,7 @@
 //! the behaviour identical to Explorer's (including conflicts with existing files).
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
 use windows::core::GUID;
@@ -45,20 +45,35 @@ pub fn restore(paths: &[String]) -> Result<RestoreReport, ApiError> {
         return Err(ApiError::new("EMPTY", "no paths"));
     }
     // A timed-out shell restore keeps running in its worker thread. Refusing a second
-    // call until that thread exits avoids two restores racing over the same bin items.
-    if BUSY.swap(true, Ordering::SeqCst) {
+    // call until that thread exits avoids two restores racing over the same bin items —
+    // but the stamp also expires, because a shell thread stuck on a modal conflict dialog
+    // would otherwise lock restores out for the rest of the process.
+    let started = now_secs();
+    let previous = BUSY.load(Ordering::SeqCst);
+    if previous != 0 && started.saturating_sub(previous) < RESTORE_STALE_SECS {
         return Err(ApiError::new(
             "RESTORE_BUSY",
             "a previous restore is still running",
         ));
     }
-    struct Guard;
+    if BUSY
+        .compare_exchange(previous, started, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err(ApiError::new(
+            "RESTORE_BUSY",
+            "a previous restore is still running",
+        ));
+    }
+    struct Guard(u64);
     impl Drop for Guard {
         fn drop(&mut self) {
-            BUSY.store(false, Ordering::SeqCst);
+            // Only clear the stamp this job installed: if it expired and a newer restore
+            // took over, this thread must not release that job's claim.
+            let _ = BUSY.compare_exchange(self.0, 0, Ordering::SeqCst, Ordering::SeqCst);
         }
     }
-    let guard = Guard;
+    let guard = Guard(started);
     crate::shell_menu::run_offthread("flowdir-restore", std::time::Duration::from_secs(120), {
         let paths = paths.to_vec();
         move || {
@@ -68,7 +83,16 @@ pub fn restore(paths: &[String]) -> Result<RestoreReport, ApiError> {
     })?
 }
 
-static BUSY: AtomicBool = AtomicBool::new(false);
+/// Unix seconds of the running restore, `0` when idle.
+static BUSY: AtomicU64 = AtomicU64::new(0);
+const RESTORE_STALE_SECS: u64 = 10 * 60;
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 unsafe fn restore_on_thread(paths: &[String]) -> Result<RestoreReport, ApiError> {
     unsafe {

@@ -63,6 +63,8 @@ export type OpProgress = {
   /** Live count of failed items; `failed` only arrives with the final message. */
   failedCount: number
   failed: OpFailure[]
+  /** Source indices that completed; only sent with the final message of an aborted op. */
+  succeeded?: number[]
   done: boolean
   aborted: boolean
   error: ApiError | null
@@ -114,6 +116,8 @@ export type ElevatedReport = {
   aborted: boolean
   failed: OpFailure[]
   failedTotal: number
+  /** Source indices that completed; used to undo an aborted retry. */
+  succeeded?: number[]
   error: ApiError | null
 }
 export type AppInfo = { version: string; dependencies: Dependency[] }
@@ -194,7 +198,7 @@ export function filterList(data: ListData, filter: string): ListData {
 
 export const EMPTY_LIST: ListData = emptyList()
 
-export type ArchiveEntry = { name: string; size: number }
+export type ArchiveEntry = { name: string; size: number; isDir?: boolean; mtime?: number }
 export type MetaRow = { label: string; value: string }
 export type PreviewInfo = {
   /** `cloud` marks a placeholder whose bytes are still in the cloud; nothing was read. */

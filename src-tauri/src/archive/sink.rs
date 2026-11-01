@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -27,6 +27,8 @@ const CHUNK: usize = 256 * 1024;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(80);
 const MAX_ENTRIES: u32 = 200_000;
 const MAX_REPORTED_FAILURES: usize = 200;
+/// Distinguishes concurrent extractions into the same destination within this process.
+static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// What the sink decided to do with one entry.
 pub enum Take {
@@ -59,6 +61,7 @@ impl Progress {
             work_total: self.bytes_total,
             failed_count: self.failed,
             failed: Vec::new(),
+            succeeded: Vec::new(),
             done: false,
             aborted: false,
             error: None,
@@ -170,8 +173,11 @@ impl Sink {
         } else {
             safe_job
         };
-        let temp = dest.join(format!(".flowdir-extract-{safe_job}"));
-        let _ = fs::remove_dir_all(&temp);
+        let temp = dest.join(format!(
+            ".flowdir-extract-{safe_job}-{}-{}",
+            std::process::id(),
+            TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
         fs::create_dir(&temp).map_err(|e| ApiError::from_io(temp.to_string_lossy().as_ref(), &e))?;
         // A volume that refuses the query (some network shares do) must not block
         // extraction; a real full disk still fails on the write itself.
@@ -423,8 +429,11 @@ impl Sink {
         self.progress.phase = "merge";
         self.progress.send(None);
         let temp = self.temp.clone();
-        let mut stack = vec![temp.clone()];
-        while let Some(dir) = stack.pop() {
+        // Each stack entry carries the destination folder its children belong to: a
+        // directory that had to be renamed (collision, junction) must not send its
+        // children back through the original name.
+        let mut stack = vec![(temp.clone(), self.dest.clone())];
+        while let Some((dir, dest_dir)) = stack.pop() {
             if self.cancelled() {
                 return Err(ApiError::new("CANCELED", "extraction canceled"));
             }
@@ -433,13 +442,16 @@ impl Sink {
                 let path = entry.map_err(|e| self.abort_io(&dir, &e))?.path();
                 let meta = fs::symlink_metadata(&path)
                     .map_err(|e| self.abort_io(&path, &e))?;
-                let Ok(rel) = path.strip_prefix(&temp) else {
-                    continue;
+                let name = match path.file_name() {
+                    Some(name) => name.to_os_string(),
+                    None => continue,
                 };
-                let target = self.dest.join(rel);
+                let rel = path.strip_prefix(&temp).unwrap_or(&path);
+                let target = dest_dir.join(&name);
                 if meta.is_dir() {
+                    let target = merge_dir_target(&target);
                     fs::create_dir_all(&target).map_err(|e| self.abort_io(&target, &e))?;
-                    stack.push(path);
+                    stack.push((path, target));
                     continue;
                 }
                 if let Some(parent) = target.parent() {
@@ -545,6 +557,30 @@ impl Drop for Sink {
 fn display(path: &Path) -> String {
     let text = path.to_string_lossy();
     text.strip_prefix(r"\\?\").unwrap_or(&text).to_string()
+}
+
+/// Destination folder an archive directory may merge into.
+///
+/// A plain existing folder is reused. Anything else — a file with that name, a junction or
+/// a symlink — would either abort the merge (`create_dir_all` fails) or redirect every
+/// child outside the chosen destination, so the folder is given a free name instead.
+fn merge_dir_target(target: &Path) -> PathBuf {
+    let Ok(meta) = fs::symlink_metadata(target) else {
+        return target.to_path_buf();
+    };
+    if meta.is_dir() && !is_reparse_point(&meta) {
+        return target.to_path_buf();
+    }
+    let unique = naming::unique(&[target.to_string_lossy().into_owned()]);
+    PathBuf::from(unique.into_iter().next().unwrap_or_default())
+}
+
+/// Reparse points (mount points included) are reported as symlinks only by some std
+/// versions, so the attribute is checked directly.
+fn is_reparse_point(meta: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 /// `std::fs` accepts long paths only when they carry the verbatim prefix, which also

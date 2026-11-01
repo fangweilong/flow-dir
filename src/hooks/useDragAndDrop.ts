@@ -9,9 +9,11 @@ import {
   archiveExtractItems,
   archivePrepareDrag,
   dragOut,
+  dropModifiers,
 } from '../api'
 import {
   isFsPath,
+  isArchiveMember,
   isInsideArchive,
   joinPath,
   parentPath,
@@ -92,7 +94,7 @@ export function useDragAndDrop({
           invalidateGit(dir)
         }
       }
-      if (items.some(isInsideArchive) && !isInsideArchive(targetDir)) {
+      if (items.some(isArchiveMember) && !isInsideArchive(targetDir)) {
         void archiveExtractItems(items, targetDir)
           .then((extracted) => {
             invalidateTree(targetDir)
@@ -216,11 +218,6 @@ export function useDragAndDrop({
   )
 
   useEffect(() => {
-    const mods = { ctrl: false, shift: false }
-    const onModifier = (e: KeyboardEvent) => {
-      mods.ctrl = e.ctrlKey
-      mods.shift = e.shiftKey
-    }
     let paths: string[] = []
     let disposed = false
     let unlisten: (() => void) | undefined
@@ -239,8 +236,14 @@ export function useDragAndDrop({
           const dropped = payload.paths.filter((path) => isFsPath(path))
           setOsDrag(null)
           if (!target || !dropped.length) return
-          const forced = mods.ctrl ? 'copy' : mods.shift ? 'move' : null
-          dropPaths(dropped, target.dir, forced)
+          // The drop payload carries no keyboard state and the webview saw no keydown
+          // while another process was dragging, so ask the OS which modifiers are held.
+          void dropModifiers()
+            .then((mask) => {
+              const forced = mask & 1 ? 'copy' : mask & 2 ? 'move' : null
+              dropPaths(dropped, target.dir, forced)
+            })
+            .catch(() => dropPaths(dropped, target.dir, null))
           return
         }
         setOsDrag({ paths, target })
@@ -249,13 +252,9 @@ export function useDragAndDrop({
         if (disposed) fn()
         else unlisten = fn
       })
-    window.addEventListener('keydown', onModifier)
-    window.addEventListener('keyup', onModifier)
     return () => {
       disposed = true
       unlisten?.()
-      window.removeEventListener('keydown', onModifier)
-      window.removeEventListener('keyup', onModifier)
     }
   }, [dropPaths, resolveDropTarget])
 

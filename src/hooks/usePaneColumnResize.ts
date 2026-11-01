@@ -228,7 +228,12 @@ export function usePaneColumnResize({
     const head = headerRef.current?.firstElementChild as HTMLElement | null
     const startName = nameWidth || Math.max(nameMin, Math.round(head?.getBoundingClientRect().width ?? nameMin))
     const paneWidth = scrollRef.current?.clientWidth ?? width
-    const maxName = Math.max(startName, paneWidth - columnsWidth - 6)
+    // The backend clamps `list_name_width` to MAX_COL_WIDTH; letting the drag exceed it
+    // silently shrank the column again on the next settings load.
+    const maxName = Math.max(
+      startName,
+      Math.min(MAX_COL_WIDTH * listScale, paneWidth - columnsWidth - 6),
+    )
     let next = startName
     let moved = false
     const move = (e: PointerEvent) => {

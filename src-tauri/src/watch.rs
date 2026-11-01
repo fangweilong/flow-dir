@@ -118,13 +118,13 @@ pub fn set<R: Runtime>(
 
     // Watcher construction and `watch()` can block on a dead SMB share; only the map
     // insert is serialized, so one broken pane cannot freeze every other pane.
-    watcher
-        .watch(folder, RecursiveMode::NonRecursive)
-        .map_err(|e| ApiError::new("WATCH", e.to_string()))?;
+    let installed = watcher.watch(folder, RecursiveMode::NonRecursive);
     // A pane showing a repository subfolder still needs to see `git add`/`git commit`
     // outside the app; both touch only metadata above the folder.
-    if let Some(dir) = &git_dir {
-        let _ = watcher.watch(dir, RecursiveMode::NonRecursive);
+    if installed.is_ok() {
+        if let Some(dir) = &git_dir {
+            let _ = watcher.watch(dir, RecursiveMode::NonRecursive);
+        }
     }
 
     // Check and insert under the same lock pair (latest → map, the order `clear` uses):
@@ -134,6 +134,22 @@ pub fn set<R: Runtime>(
         return Ok(());
     }
     let mut map = watchers.map.lock().unwrap();
+    if let Err(err) = installed {
+        // Never keep the previous folder's watcher: its events carry only the pane id,
+        // and the pane now shows a different folder. Tell the pane to fall back to a
+        // rescan instead of silently going stale.
+        map.remove(&pane_id);
+        let _ = app.emit(
+            "flowdir:dir-error",
+            DirError {
+                pane_id: pane_id.clone(),
+                path: path.clone(),
+                code: "WATCH".into(),
+                detail: err.to_string(),
+            },
+        );
+        return Err(ApiError::new("WATCH", err.to_string()));
+    }
     map.insert(pane_id, watcher);
     Ok(())
 }

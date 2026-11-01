@@ -29,6 +29,7 @@ static CACHE_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// One entry of an archive, as shown by the preview panel and virtual directory listing.
 #[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct ArchiveEntry {
     pub name: String,
     pub size: u64,
@@ -221,8 +222,32 @@ pub fn enumerate_virtual(
     })
 }
 
+/// `inner_path` crosses IPC and is joined under the cache directory, so it must be a plain
+/// relative path: no drive, UNC prefix, root or `..` component may escape the cache.
+fn validate_inner_path(inner: &str) -> Result<(), ApiError> {
+    if inner.is_empty() || inner.starts_with(['\\', '/']) || inner.contains(':') {
+        return Err(ApiError::new("INVALID_PATH", inner));
+    }
+    if inner
+        .split(['\\', '/'])
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(ApiError::new("INVALID_PATH", inner));
+    }
+    Ok(())
+}
+
 /// Extracts a single entry to the FlowDir temporary cache and returns the path on disk.
-pub fn extract_cached(archive_path: &Path, inner_path: &str) -> Result<std::path::PathBuf, ApiError> {
+///
+/// `limit` bounds the bytes written for one member; previews pass the configured preview
+/// size so a hostile archive cannot decompress a multi-GB member into `%TEMP%`. User
+/// initiated opens and drags pass `None`.
+pub fn extract_cached(
+    archive_path: &Path,
+    inner_path: &str,
+    limit: Option<u64>,
+) -> Result<std::path::PathBuf, ApiError> {
+    validate_inner_path(inner_path)?;
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     archive_path.hash(&mut hasher);
@@ -285,7 +310,7 @@ pub fn extract_cached(archive_path: &Path, inner_path: &str) -> Result<std::path
         CACHE_TMP_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
     let _ = std::fs::remove_file(&tmp);
-    if let Err(err) = backends::extract_single(&archive_path.to_string_lossy(), &inner_norm, &tmp, None) {
+    if let Err(err) = backends::extract_single(&archive_path.to_string_lossy(), &inner_norm, &tmp, None, limit) {
         let _ = std::fs::remove_file(&tmp);
         return Err(err);
     }
@@ -355,6 +380,7 @@ fn run(
                 work_total: 0,
                 failed_count: 0,
                 failed: Vec::new(),
+                succeeded: Vec::new(),
                 done: true,
                 aborted: false,
                 error: Some(err),
@@ -405,6 +431,7 @@ fn run(
         work_total: sink.bytes(),
         failed_count: sink.failed_total(),
         failed: sink.failures().to_vec(),
+        succeeded: Vec::new(),
         done: true,
         aborted,
         error,
@@ -515,6 +542,27 @@ mod tests {
         let entries = preview_entries(archive.to_str().unwrap(), 10).unwrap();
         let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
         assert_eq!(names, vec!["相册\\照片.txt", "plain.txt"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sevenz_backslash_names_extract_nested() {
+        let dir = temp_dir("sevenz-backslash");
+        let seven = dir.join("win.7z");
+        let mut writer = sevenz_rust2::ArchiveWriter::create(&seven).unwrap();
+        writer
+            .push_archive_entry(
+                sevenz_rust2::ArchiveEntry::new_file("相册\\照片.txt"),
+                Some(&b"win body"[..]),
+            )
+            .unwrap();
+        writer.finish().unwrap();
+
+        let dest = dir.join("out");
+        let progress = extract(&seven, &dest);
+        assert!(progress.error.is_none(), "{:?}", progress.error);
+        assert_eq!(progress.failed_count, 0);
+        assert_eq!(std::fs::read(dest.join("相册").join("照片.txt")).unwrap(), b"win body");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -801,7 +849,7 @@ mod tests {
         assert!(!is_inner_dir(&archive, "folder\\nested\\item.txt").unwrap());
 
         // 5. extract_cached
-        let cached = extract_cached(&archive, "folder\\nested\\item.txt").unwrap();
+        let cached = extract_cached(&archive, "folder\\nested\\item.txt", None).unwrap();
         assert!(cached.is_file());
         assert_eq!(std::fs::read(&cached).unwrap(), b"nested content");
 
@@ -817,7 +865,7 @@ mod tests {
                 .unwrap();
             writer.finish().unwrap();
         }
-        let cached_7z = extract_cached(&sevenz_path, "deep\\sub\\doc.txt").unwrap();
+        let cached_7z = extract_cached(&sevenz_path, "deep\\sub\\doc.txt", None).unwrap();
         assert!(cached_7z.is_file());
         assert_eq!(std::fs::read(&cached_7z).unwrap(), b"7z deep content");
 
@@ -834,9 +882,91 @@ mod tests {
             builder.append_data(&mut header, "a/b/file.txt", &body[..]).unwrap();
             builder.into_inner().unwrap().finish().unwrap();
         }
-        let cached_tar = extract_cached(&targz_path, "a\\b\\file.txt").unwrap();
+        let cached_tar = extract_cached(&targz_path, "a\\b\\file.txt", None).unwrap();
         assert!(cached_tar.is_file());
         assert_eq!(std::fs::read(&cached_tar).unwrap(), b"tar content");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `inner_path` comes over IPC and is joined under `%TEMP%`; a traversal must not be
+    /// able to create or overwrite anything outside the archive cache.
+    #[test]
+    fn cached_extraction_rejects_escaping_inner_paths() {
+        let dir = temp_dir("inner-path");
+        let archive = dir.join("a.zip");
+        {
+            let file = std::fs::File::create(&archive).unwrap();
+            let mut writer = zip::ZipWriter::new(file);
+            writer
+                .start_file("a.txt", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(b"body").unwrap();
+            writer.finish().unwrap();
+        }
+        for bad in [r"..\evil.txt", r"a\..\..\evil.txt", r"\absolute.txt", r"D:\evil.txt", ""] {
+            let err = extract_cached(&archive, bad, None).unwrap_err();
+            assert_eq!(err.code, "INVALID_PATH", "{bad}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A destination that already holds a file with the archive folder's name used to
+    /// abort the whole merge (and delete the files already moved). The folder is renamed
+    /// instead, and its children follow the renamed folder.
+    #[test]
+    fn merge_relocates_a_colliding_folder() {
+        let dir = temp_dir("merge-collision");
+        let archive = dir.join("tree.zip");
+        {
+            let file = std::fs::File::create(&archive).unwrap();
+            let mut writer = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default();
+            writer.add_directory("docs/", options).unwrap();
+            writer.start_file("docs/a.txt", options).unwrap();
+            writer.write_all(b"child").unwrap();
+            writer.finish().unwrap();
+        }
+        let dest = dir.join("out");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("docs"), b"existing file").unwrap();
+
+        let progress = extract(&archive, &dest);
+        assert!(progress.error.is_none(), "{:?}", progress.error);
+        assert_eq!(std::fs::read(dest.join("docs")).unwrap(), b"existing file");
+        assert_eq!(
+            std::fs::read(dest.join("docs (1)").join("a.txt")).unwrap(),
+            b"child"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A preview must not decompress a member past its budget: the declared size is
+    /// attacker-controlled, so the cap has to hold on the byte stream itself.
+    #[test]
+    fn cached_extraction_honours_the_byte_budget() {
+        let dir = temp_dir("extract-budget");
+        let archive = dir.join("bomb.zip");
+        {
+            let file = std::fs::File::create(&archive).unwrap();
+            let mut writer = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default();
+            writer.start_file("big.txt", options).unwrap();
+            writer.write_all(&vec![b'x'; 200_000]).unwrap();
+            writer.start_file("small.txt", options).unwrap();
+            writer.write_all(b"tiny").unwrap();
+            writer.finish().unwrap();
+        }
+
+        let err = extract_cached(&archive, "big.txt", Some(1024)).unwrap_err();
+        assert_eq!(err.code, "TOO_LARGE");
+
+        let cached = extract_cached(&archive, "small.txt", Some(1024)).unwrap();
+        assert_eq!(std::fs::read(&cached).unwrap(), b"tiny");
+
+        // Without a preview budget the same member extracts in full.
+        let full = extract_cached(&archive, "big.txt", None).unwrap();
+        assert_eq!(std::fs::metadata(&full).unwrap().len(), 200_000);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

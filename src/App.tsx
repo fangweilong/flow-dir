@@ -518,6 +518,7 @@ export default function App() {
     redoLast,
     openExternalPreview,
     cyclePane,
+    refreshActive: manualRefresh,
   })
   const openInApp = useCallback(
     (path: string) => {

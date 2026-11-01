@@ -205,7 +205,8 @@ fn scan(
             // Offsets come from the server (SMB) and were never validated, so every read is
             // bounded: a record that claims to extend past the buffer ends the batch instead
             // of reading heap memory beyond it.
-            let available = buffer.len().saturating_sub(offset);
+            // `offset` and `NextEntryOffset` count bytes, `buffer.len()` counts u64 slots.
+            let available = (buffer.len() * std::mem::size_of::<u64>()).saturating_sub(offset);
             if available < record_size {
                 break;
             }
@@ -1013,6 +1014,31 @@ mod tests {
         let dead = volume_info("\\\\localhost\\flowdir-no-such-share");
         assert!(!dead.available);
         assert_eq!(dead.total, 0);
+    }
+
+    /// One `FileIdBothDirectoryInfo` batch is 64 KiB and every record is ~120 bytes, so a
+    /// few hundred entries cross both the old 8 KiB bound and the buffer size. Every entry
+    /// must survive; the bounds check used to compare a byte offset with a slot count and
+    /// silently dropped the tail of each batch.
+    #[test]
+    fn scan_reads_every_entry_across_batches() {
+        let root = std::env::temp_dir().join(format!("flowdir-scan-batch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        for i in 0..700u32 {
+            std::fs::write(root.join(format!("f{i:04}.txt")), b"").unwrap();
+        }
+
+        let cancel = AtomicBool::new(false);
+        let rows = enumerate_reporting(root.to_str().unwrap(), true, &cancel, &mut |_| {})
+            .unwrap();
+        assert!(!rows.truncated);
+        assert_eq!(rows.entries.len(), 700);
+        let unique: std::collections::HashSet<&str> =
+            rows.entries.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(unique.len(), 700, "every entry must be reported once");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The tree cap must be reported, and progress must fire before the sort so a slow

@@ -53,6 +53,10 @@ pub struct OpProgress {
     pub failed_count: u32,
     /// Failure details, sent once with the final message.
     pub failed: Vec<OpFailure>,
+    /// Source indices that completed, sent only with the final message of an aborted
+    /// operation so the UI can still undo the part that reached the disk.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub succeeded: Vec<u32>,
     pub done: bool,
     pub aborted: bool,
     pub error: Option<ApiError>,
@@ -65,6 +69,9 @@ pub struct OpProgress {
 struct FailureLog {
     total: AtomicU32,
     items: Mutex<Vec<OpFailure>>,
+    /// Set by any `ACCESS_DENIED`, including failures past the report cap. The retry
+    /// button must not depend on the capped `items` list.
+    denied: std::sync::atomic::AtomicBool,
 }
 
 impl FailureLog {
@@ -77,6 +84,9 @@ impl FailureLog {
     /// Queue-time failures already carry a mapped {@link ApiError}.
     fn push(&self, path: &str, err: ApiError) {
         self.total.fetch_add(1, Ordering::Relaxed);
+        if err.code == "ACCESS_DENIED" {
+            self.denied.store(true, Ordering::Relaxed);
+        }
         let mut items = self.items.lock().unwrap();
         if items.len() < MAX_REPORTED_FAILURES {
             items.push(OpFailure {
@@ -85,6 +95,10 @@ impl FailureLog {
                 detail: err.detail,
             });
         }
+    }
+
+    fn denied(&self) -> bool {
+        self.denied.load(Ordering::Relaxed)
     }
 
     fn count(&self) -> u32 {
@@ -105,6 +119,12 @@ struct Outcome {
     failed: Vec<OpFailure>,
     /// Every failure, including the ones cut from `failed`.
     failed_total: u32,
+    /// Source indices the shell completed, in completion order. Only an aborted batch
+    /// exposes them: the UI records an undo for what landed, which it cannot derive from
+    /// `failed` because that list is capped.
+    succeeded: Vec<u32>,
+    /// Any failure was `ACCESS_DENIED`, even past the capped report list.
+    denied: bool,
 }
 
 #[derive(Clone, Default)]
@@ -125,10 +145,16 @@ struct Denied {
 impl OpState {
     fn begin(&self, op_id: &str) -> Arc<AtomicBool> {
         let token = Arc::new(AtomicBool::new(false));
-        self.jobs
+        // A reused id must not orphan the running job's token: the old operation would
+        // become uncancellable and keep writing after the UI forgot about it.
+        if let Some(previous) = self
+            .jobs
             .lock()
             .unwrap()
-            .insert(op_id.to_string(), token.clone());
+            .insert(op_id.to_string(), token.clone())
+        {
+            previous.store(true, Ordering::Relaxed);
+        }
         token
     }
 
@@ -248,6 +274,9 @@ pub struct ElevatedReport {
     pub aborted: bool,
     pub failed: Vec<OpFailure>,
     pub failed_total: u32,
+    /// Source indices that completed; used to undo an aborted retry.
+    #[serde(default)]
+    pub succeeded: Vec<u32>,
     pub error: Option<ApiError>,
 }
 
@@ -299,6 +328,7 @@ pub fn run_headless(request: Request, cancel: Arc<AtomicBool>) -> ElevatedReport
         aborted: false,
         failed: Vec::new(),
         failed_total: 0,
+        succeeded: Vec::new(),
         error,
     };
     let kind = match Kind::parse(&request.kind) {
@@ -321,6 +351,11 @@ pub fn run_headless(request: Request, cancel: Arc<AtomicBool>) -> ElevatedReport
         aborted: outcome.aborted,
         failed: outcome.failed,
         failed_total: outcome.failed_total,
+        succeeded: if outcome.aborted {
+            outcome.succeeded
+        } else {
+            Vec::new()
+        },
         error: outcome.error,
     }
 }
@@ -384,6 +419,13 @@ pub fn start(
                 work_total: 0,
                 failed_count: outcome.failed_total,
                 failed: outcome.failed,
+                // Only an aborted batch needs the index list; a successful one would
+                // otherwise push a large vector over IPC for nothing.
+                succeeded: if outcome.aborted {
+                    outcome.succeeded
+                } else {
+                    Vec::new()
+                },
                 done: true,
                 aborted: outcome.aborted,
                 error: outcome.error,
@@ -402,10 +444,8 @@ pub fn start(
 }
 
 fn outcome_denied(outcome: &Outcome) -> bool {
-    outcome
-        .failed
-        .iter()
-        .any(|item| item.code == "ACCESS_DENIED")
+    // `failed` stops at the report cap, so the flag set at record time is what counts.
+    outcome.denied
         || outcome
             .error
             .as_ref()
@@ -428,6 +468,8 @@ fn run_guarded<F: FnOnce() -> Outcome>(kind: &str, work: F) -> Outcome {    matc
                 error: Some(ApiError::new("PANIC", detail)),
                 failed: Vec::new(),
                 failed_total: 0,
+                succeeded: Vec::new(),
+                denied: false,
             }
         }
     }
@@ -447,6 +489,8 @@ fn run(
                 error: Some(ApiError::new("COM", e.to_string())),
                 failed: Vec::new(),
                 failed_total: 0,
+                succeeded: Vec::new(),
+                denied: false,
             };
         }
         let outcome = perform(request, kind, hwnd, cancel, progress);
@@ -492,6 +536,15 @@ fn perform(
 ) -> Outcome {
     let total = request.sources.len() as u32;
     let failures = Arc::new(FailureLog::default());
+    let succeeded: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+    let source_index: Arc<HashMap<String, u32>> = Arc::new(
+        request
+            .sources
+            .iter()
+            .enumerate()
+            .map(|(index, path)| (path.to_lowercase(), index as u32))
+            .collect(),
+    );
     let sink = Sink {
         op_id: request.op_id.clone(),
         phase: AtomicU8::new(0),
@@ -504,6 +557,8 @@ fn perform(
         ),
         current_path: Mutex::new(String::new()),
         failures: failures.clone(),
+        succeeded: succeeded.clone(),
+        source_index,
         cancel,
         progress,
     };
@@ -514,6 +569,8 @@ fn perform(
             error: Some(error),
             failed: failures.take(),
             failed_total: failures.count(),
+            succeeded: succeeded.lock().unwrap().clone(),
+            denied: failures.denied(),
         };
         let operation: IFileOperation = match CoCreateInstance(&FileOperation, None, CLSCTX_ALL) {
             Ok(operation) => operation,
@@ -580,11 +637,14 @@ fn perform(
             Err(_) if failed_total > 0 => None,
             Err(err) => Some(err),
         };
+        let completed: Vec<u32> = succeeded.lock().unwrap().clone();
         Outcome {
             aborted,
             error,
             failed: failures.take(),
             failed_total,
+            succeeded: completed,
+            denied: failures.denied(),
         }
     }
 }
@@ -712,6 +772,10 @@ struct Sink {
     /// Path of the item currently being processed, so a Post callback can name its failure.
     current_path: Mutex<String>,
     failures: Arc<FailureLog>,
+    /// Source indices of completed items; see [`Outcome::succeeded`].
+    succeeded: Arc<Mutex<Vec<u32>>>,
+    /// Lowercased source path → index, so a Post callback can map its item back.
+    source_index: Arc<HashMap<String, u32>>,
     cancel: Arc<AtomicBool>,
     progress: Channel<OpProgress>,
 }
@@ -733,6 +797,7 @@ impl Sink {
             work_total: self.work_total.load(Ordering::Relaxed),
             failed_count: self.failures.count(),
             failed: Vec::new(),
+            succeeded: Vec::new(),
             done: false,
             aborted: false,
             error: None,
@@ -769,12 +834,18 @@ impl Sink {
     /// A failing item is not an abort: record it, keep the queue going, and let the final
     /// message carry the list so the UI can say "X done, Y failed" instead of "done".
     fn post_item(&self, hr: HRESULT) -> WinResult<()> {
-        self.check_cancel()?;
-        if hr.is_err() && !self.cancel.load(Ordering::Relaxed) {
+        if hr.is_ok() {
+            // Record the success before checking the cancel flag: an abort that arrives
+            // while this callback runs must not hide an item that already landed.
+            let path = self.current_path.lock().unwrap();
+            if let Some(index) = self.source_index.get(&path.to_lowercase()) {
+                self.succeeded.lock().unwrap().push(*index);
+            }
+        } else if !self.cancel.load(Ordering::Relaxed) {
             self.failures.record(&self.current_path.lock().unwrap(), hr);
             self.emit(None, true);
         }
-        Ok(())
+        self.check_cancel()
     }
 }
 
@@ -1063,6 +1134,43 @@ mod tests {
         };
         let error = start(&OpState::default(), request, None, channel).unwrap_err();
         assert_eq!(error.code, "BAD_ARGS");
+    }
+
+    /// The sink maps each completed item back to its source index; an aborted batch uses
+    /// that list to undo the part that landed (the failure list is capped).
+    #[test]
+    fn completed_items_are_mapped_to_source_indices() {
+        let dir = temp_dir("succeeded-indices");
+        let first = dir.join("first.txt");
+        let second = dir.join("second.txt");
+        fs::write(&first, b"a").unwrap();
+        fs::write(&second, b"b").unwrap();
+        let request = Request {
+            op_id: "indices".into(),
+            kind: "rename".into(),
+            sources: vec![
+                first.to_string_lossy().into_owned(),
+                second.to_string_lossy().into_owned(),
+            ],
+            target_dir: None,
+            new_name: None,
+            new_names: Some(vec!["one.txt".into(), "two.txt".into()]),
+            permanent: false,
+            overwrite: false,
+        };
+        let outcome = run(
+            &request,
+            Kind::Rename,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Channel::new(|_| Ok(())),
+        );
+        assert!(outcome.error.is_none(), "{outcome:?}");
+        assert_eq!(outcome.failed_total, 0);
+        let mut indices = outcome.succeeded;
+        indices.sort_unstable();
+        assert_eq!(indices, vec![0, 1]);
+        let _ = fs::remove_dir_all(dir);
     }
 
     /// One IFileOperation renames the whole selection and reports per-item progress.

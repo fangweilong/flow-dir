@@ -58,8 +58,8 @@ unsafe fn shell_item_from_path(path: &str) -> windows::core::Result<IShellItem> 
 unsafe fn item_path(item: &IShellItem) -> Option<String> {
     unsafe {
         let raw = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
-        let text = raw.to_string().ok()?;
+        let text = raw.to_string().ok();
         CoTaskMemFree(Some(raw.0 as *const _));
-        Some(text)
+        text
     }
 }

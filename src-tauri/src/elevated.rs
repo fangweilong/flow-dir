@@ -343,6 +343,16 @@ fn connect(
     }
 }
 
+/// Cancels a pending overlapped operation and waits for the kernel to finish with
+/// `overlap` and its buffer. `CancelIoEx` only marks the request: returning before the
+/// driver completes it would free `OVERLAPPED` and the I/O buffer underneath a pending
+/// write, so the completion is drained here even though the caller sees a cancellation.
+unsafe fn cancel_and_drain(handle: HANDLE, overlap: &mut OVERLAPPED) {
+    let _ = CancelIoEx(handle, Some(overlap));
+    let mut bytes = 0u32;
+    let _ = GetOverlappedResult(handle, overlap, &mut bytes, true);
+}
+
 /// Waits for an overlapped operation in short slices so cancellation and the overall
 /// deadline stay responsive.
 unsafe fn wait_io(
@@ -354,7 +364,7 @@ unsafe fn wait_io(
 ) -> Result<u32, ApiError> {
     loop {
         if cancel.load(Ordering::Relaxed) {
-            let _ = CancelIoEx(handle, Some(overlap));
+            cancel_and_drain(handle, overlap);
             return Err(ApiError::new("ELEVATION_CANCELED", "canceled"));
         }
         match WaitForSingleObject(event, 200) {
@@ -366,7 +376,7 @@ unsafe fn wait_io(
             }
             WAIT_TIMEOUT => {
                 if Instant::now() >= budget {
-                    let _ = CancelIoEx(handle, Some(overlap));
+                    cancel_and_drain(handle, overlap);
                     return Err(ApiError::new(
                         "ELEVATED_TIMEOUT",
                         "the elevated operation is still running",

@@ -193,7 +193,10 @@ export function usePaneKeyboard({
 
       if (!tab.path) return
 
-      if (!ev.ctrlKey && !ev.altKey && !ev.metaKey && ev.key.length === 1) {
+      // A shortcut bound to a bare letter must win over type-ahead, or rebinding
+      // rename/refresh to `r` would only jump the selection.
+      const boundKey = Object.values(keys).some((binding) => matchBinding(ev, binding))
+      if (!boundKey && !ev.ctrlKey && !ev.altKey && !ev.metaKey && ev.key.length === 1) {
         ev.preventDefault()
         typeAhead(ev.key)
         return

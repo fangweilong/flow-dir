@@ -17,6 +17,7 @@ import type { CompressValues } from './CompressDialog'
 import { baseName, joinPath } from './paths'
 import { COMPRESS_EXTENSIONS, uniquePaths, type CompressFormat } from './api'
 import { errorCode } from './hooks/useFileOperations'
+import { errorKey } from './i18n'
 
 const FolderPickerDialog = lazy(() =>
   import('./FolderPickerDialog').then((m) => ({ default: m.FolderPickerDialog })),
@@ -276,7 +277,7 @@ export function ModalContainer({
                 .then(([dest]) =>
                   runCompress(pending.paths, dest, values.format, values.level, values.password),
                 )
-                .catch((e: unknown) => showToast(t('op.failed', { code: errorCode(e) })))
+                .catch((e: unknown) => showToast(t('op.failed', { code: t(errorKey(errorCode(e))) })))
             }}
           />
         )}

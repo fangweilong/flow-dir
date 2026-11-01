@@ -175,7 +175,7 @@ fn walk(
     let mut stack: Vec<PathBuf> = roots.iter().map(PathBuf::from).collect();
     let mut last = Instant::now();
     while let Some(dir) = stack.pop() {
-        if job.stopped() {
+        if job.wait_if_paused() {
             return;
         }
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -232,6 +232,11 @@ fn walk(
             });
             if last.elapsed() >= Duration::from_millis(150) {
                 last = Instant::now();
+                // A single huge folder must honour Pause too, not only the phase that
+                // reads file contents.
+                if job.wait_if_paused() {
+                    return;
+                }
                 send_progress(progress, job_id, "scan", files.len() as u32, 0, None, job, 0, stats, started);
             }
         }

@@ -525,13 +525,47 @@ fn clipboard_paste() -> Result<clipboard::Clip, ApiError> {
     clipboard::read_paths()
 }
 
+/// Modifier keys held right now, as a bitmask (`1` ctrl, `2` shift, `4` alt).
+///
+/// A native (Explorer/OLE) drop carries no keyboard state and dragging from another
+/// process leaves the webview without key events, so the last in-window `keydown` is
+/// stale. Reading the actual key state at drop time is the only reliable source for the
+/// copy-vs-move decision.
+#[tauri::command]
+fn drop_modifiers() -> u8 {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_MENU, VK_RCONTROL,
+        VK_RMENU, VK_RSHIFT, VK_SHIFT, VIRTUAL_KEY,
+    };
+    let down = |key: VIRTUAL_KEY| {
+        // The high bit means "currently down"; the low bit is the since-last-call flag.
+        unsafe { GetAsyncKeyState(key.0 as i32) as u16 & 0x8000 != 0 }
+    };
+    let mut mask = 0;
+    if down(VK_CONTROL) || down(VK_LCONTROL) || down(VK_RCONTROL) {
+        mask |= 1;
+    }
+    if down(VK_SHIFT) || down(VK_LSHIFT) || down(VK_RSHIFT) {
+        mask |= 2;
+    }
+    if down(VK_MENU) || down(VK_LMENU) || down(VK_RMENU) {
+        mask |= 4;
+    }
+    mask
+}
+
 /// Starts an OLE drag for the given paths; blocks until the target accepts or cancels.
+///
+/// `DoDragDrop` runs for as long as the user drags, so it must not occupy the IPC thread
+/// that every other command shares.
 #[tauri::command(rename_all = "camelCase")]
-fn drag_out(paths: Vec<String>) -> Result<String, ApiError> {
+async fn drag_out(paths: Vec<String>) -> Result<String, ApiError> {
     if paths.is_empty() {
         return Err(ApiError::new("EMPTY", "no paths"));
     }
-    dragout::drag_out(&paths)
+    tauri::async_runtime::spawn_blocking(move || dragout::drag_out(&paths))
+        .await
+        .map_err(|e| ApiError::new("THREAD", e.to_string()))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -628,7 +662,7 @@ async fn archive_prepare_drag(paths: Vec<String>) -> Result<Vec<String>, ApiErro
         for p in paths {
             if let Some((arc, inner)) = archive::resolve_archive_path(&p) {
                 if !inner.is_empty() {
-                    let cached = archive::extract_cached(&arc, &inner)?;
+                    let cached = archive::extract_cached(&arc, &inner, None)?;
                     out.push(cached.to_string_lossy().into_owned());
                     continue;
                 }
@@ -678,7 +712,7 @@ async fn archive_extract_items(
                     let target_file = std::path::PathBuf::from(
                         naming::unique(std::slice::from_ref(&file)).remove(0),
                     );
-                    archive::backends::extract_single(&archive_str, &inner, &target_file, None)?;
+                    archive::backends::extract_single(&archive_str, &inner, &target_file, None, None)?;
                     extracted.push(target_file.to_string_lossy().into_owned());
                 }
             }
@@ -933,7 +967,23 @@ async fn preview_info(
                         ..Default::default()
                     });
                 }
-                let cached_file = archive::extract_cached(&archive_path, &inner_path)?;
+                let cached_file = match archive::extract_cached(
+                    &archive_path,
+                    &inner_path,
+                    Some(limits.max_bytes),
+                ) {
+                    Ok(file) => file,
+                    // Same placeholder a real file of that size gets, instead of an error
+                    // card: the member is simply too large to preview.
+                    Err(err) if err.code == "TOO_LARGE" => {
+                        return Ok(preview::PreviewInfo {
+                            kind: "unsupported".to_string(),
+                            reason: Some("too-large".to_string()),
+                            ..Default::default()
+                        });
+                    }
+                    Err(err) => return Err(err),
+                };
                 return preview::info(
                     cached_file.to_string_lossy().into_owned(),
                     width,
@@ -1183,7 +1233,7 @@ fn config_warnings() -> Vec<&'static str> {
 fn open_path(path: String) -> Result<(), ApiError> {
     let target_path = if let Some((archive_path, inner_path)) = archive::resolve_archive_path(&path) {
         if !inner_path.is_empty() {
-            archive::extract_cached(&archive_path, &inner_path)?.to_string_lossy().into_owned()
+            archive::extract_cached(&archive_path, &inner_path, None)?.to_string_lossy().into_owned()
         } else {
             path
         }
@@ -1294,7 +1344,7 @@ async fn open_with(path: String) -> Result<(), ApiError> {
     };
     let target_path = if let Some((archive_path, inner_path)) = archive::resolve_archive_path(&path) {
         if !inner_path.is_empty() {
-            archive::extract_cached(&archive_path, &inner_path)?.to_string_lossy().into_owned()
+            archive::extract_cached(&archive_path, &inner_path, None)?.to_string_lossy().into_owned()
         } else {
             path
         }
@@ -1645,6 +1695,7 @@ fn main() {
             watch_clear,
             clipboard_copy,
             clipboard_paste,
+            drop_modifiers,
             drag_out,
             op_start,
             op_cancel,

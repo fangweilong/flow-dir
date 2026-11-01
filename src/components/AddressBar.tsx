@@ -66,6 +66,13 @@ export const AddressBar = forwardRef<AddressBarHandle, AddressBarProps>(function
 
   const isEditing = addressDraft !== null
   const prevEditing = useRef(false)
+  // A draft belongs to the tab it was opened for: switching tabs (Ctrl+Tab, Ctrl+1..9)
+  // while the bar is open would otherwise resolve the typed path against the new folder.
+  useEffect(() => {
+    addressSeq.current += 1
+    setAddressDraft(null)
+    setAddressBad(false)
+  }, [tab?.id])
   useEffect(() => {
     if (isEditing && !prevEditing.current) {
       addressRef.current?.focus()

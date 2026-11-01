@@ -32,13 +32,18 @@ const RESERVED: [&str; 24] = [
 
 /// Decodes a raw archive name into a relative `\`-separated path.
 ///
+/// Both `/` and `\` split segments: Windows cannot represent a literal `\` in a file name,
+/// and 7-Zip on Windows (plus a number of repacking tools) writes nested 7z/zip entries
+/// with backslashes. Treating them as literal characters made every nested entry of such
+/// an archive fail the safety check and disappear from the extraction.
+///
 /// `utf8_flag` is the zip bit 11 marker. When clear (and for tar), a name that is valid
 /// UTF-8 is still taken as UTF-8 — writers that omit the flag are common and UTF-8 bytes
 /// almost never form valid text in a legacy code page. Otherwise the system ANSI code page
 /// is tried (what WinRAR/7-Zip do for names produced on a localized Windows) and CP437 is
 /// the last resort the zip specification itself names.
 pub fn decode(raw: &[u8], utf8_flag: bool) -> Result<String, ApiError> {
-    decode_with(raw, utf8_flag, false)
+    decode_with(raw, utf8_flag, true)
 }
 
 /// RAR and CAB store path separators as `\`; every other backend in this crate uses `/`.
@@ -47,6 +52,16 @@ pub fn decode_rar(raw: &[u8], utf8_flag: bool) -> Result<String, ApiError> {
 }
 
 fn decode_with(raw: &[u8], utf8_flag: bool, backslash: bool) -> Result<String, ApiError> {
+    decode_parts(raw, utf8_flag, backslash, None)
+}
+
+/// `page` overrides the legacy code page; only tests use it.
+fn decode_parts(
+    raw: &[u8],
+    utf8_flag: bool,
+    backslash: bool,
+    page: Option<u32>,
+) -> Result<String, ApiError> {
     if raw.starts_with(b"/") || raw.starts_with(b"\\") {
         return Err(ApiError::new("UNSAFE_PATH", "absolute entry name"));
     }
@@ -54,8 +69,9 @@ fn decode_with(raw: &[u8], utf8_flag: bool, backslash: bool) -> Result<String, A
         return Err(ApiError::new("UNSAFE_PATH", "NUL in entry name"));
     }
     let mut segments = Vec::new();
-    let is_separator = |byte: &u8| *byte == b'/' || (backslash && *byte == b'\\');
-    for part in raw.split(is_separator) {
+    // Only `/` may split the raw bytes: GBK and Shift-JIS use 0x5C (`\`) as a trail byte,
+    // so a backslash becomes a separator only after the name is decoded.
+    for part in raw.split(|byte| *byte == b'/') {
         if part.is_empty() {
             // `a//b` and a trailing `/` (directory marker) are harmless.
             continue;
@@ -67,9 +83,17 @@ fn decode_with(raw: &[u8], utf8_flag: bool, backslash: bool) -> Result<String, A
         } else if let Ok(text) = std::str::from_utf8(part) {
             text.to_string()
         } else {
-            decode_legacy(part)
+            decode_legacy(part, page)
         };
-        segments.push(sanitize_segment(&text)?);
+        if backslash {
+            for piece in text.split('\\') {
+                if !piece.is_empty() {
+                    segments.push(sanitize_segment(piece)?);
+                }
+            }
+        } else {
+            segments.push(sanitize_segment(&text)?);
+        }
     }
     if segments.is_empty() {
         return Err(ApiError::new("INVALID_NAME", "empty entry name"));
@@ -85,9 +109,12 @@ fn decode_with(raw: &[u8], utf8_flag: bool, backslash: bool) -> Result<String, A
 /// most bytes, so there the host page wins — the same result as Explorer and WinRAR.
 /// The "UTF-8 worldwide language support" beta reports 65001, under which every legacy
 /// CJK name is invalid, hence the 0 page marker.
-fn decode_legacy(bytes: &[u8]) -> String {
+fn decode_legacy(bytes: &[u8], page: Option<u32>) -> String {
+    if let Some(page) = page {
+        return decode_bytes_page(bytes, page).unwrap_or_else(|| cp437_fallback(bytes));
+    }
     for page in [language_codepage(), 936] {
-        if let Some(text) = decode_with_page(bytes, page) {
+        if let Some(text) = decode_bytes_page(bytes, page) {
             return text;
         }
     }
@@ -109,7 +136,7 @@ fn cp437_fallback(bytes: &[u8]) -> String {
         .collect()
 }
 
-fn decode_with_page(bytes: &[u8], page: u32) -> Option<String> {
+fn decode_bytes_page(bytes: &[u8], page: u32) -> Option<String> {
     if page == 0 {
         return None;
     }
@@ -184,11 +211,11 @@ mod tests {
         // explicit: `decode` starts with the host's page, which is 437/1252 on an English
         // Windows and accepts these bytes as different (mojibake) text.
         assert_eq!(
-            decode_with_page(&[0xd6, 0xd0, 0xce, 0xc4, b'.', b't', b'x', b't'], 936).unwrap(),
+            decode_bytes_page(&[0xd6, 0xd0, 0xce, 0xc4, b'.', b't', b'x', b't'], 936).unwrap(),
             "中文.txt"
         );
-        assert_eq!(decode_with_page(&[0xd6, 0xd0], 936).unwrap(), "中");
-        assert_eq!(decode_with_page(&[0xb0, 0xdb], 437).unwrap(), "░█");
+        assert_eq!(decode_bytes_page(&[0xd6, 0xd0], 936).unwrap(), "中");
+        assert_eq!(decode_bytes_page(&[0xb0, 0xdb], 437).unwrap(), "░█");
         // Bytes no ANSI page accepts fall back to CP437 instead of failing the entry.
         assert_eq!(cp437_fallback(&[0xff]), "\u{a0}");
         assert_eq!(cp437_fallback(b"ascii-.txt"), "ascii-.txt");
@@ -204,6 +231,36 @@ mod tests {
         assert!(decode(b"a\\..\\b", false).is_err());
         assert!(decode(b"a\0b", false).is_err());
         assert!(decode(b"//", false).is_err());
+    }
+
+    #[test]
+    fn legacy_trail_bytes_are_not_separators() {
+        // CP932/CP936 use 0x5C (`\`) as a trail byte. Splitting the raw name on it would
+        // turn `ソ.txt` into `â\.txt`, so the split happens after decoding.
+        assert_eq!(decode_bytes_page(&[0x83, 0x5c], 932).unwrap(), "ソ");
+        assert_eq!(decode_bytes_page(&[0xd5, 0x5c], 936).unwrap(), "誠");
+        assert_eq!(
+            decode_parts(&[0x83, 0x5c, b'.', b't', b'x', b't'], false, true, Some(932)).unwrap(),
+            "ソ.txt"
+        );
+        assert_eq!(
+            decode_parts(&[0xd5, 0x5c, b'.', b't', b'x', b't'], false, true, Some(936)).unwrap(),
+            "誠.txt"
+        );
+        // A real separator byte still splits once the text is decoded.
+        assert_eq!(
+            decode_parts(b"dir\\file.txt", false, true, Some(936)).unwrap(),
+            "dir\\file.txt"
+        );
+    }
+
+    #[test]
+    fn backslash_separators_become_paths() {
+        assert_eq!(decode(b"dir\\file.txt", true).unwrap(), "dir\\file.txt");
+        assert_eq!(decode(b"dir\\sub\\file.txt", false).unwrap(), "dir\\sub\\file.txt");
+        // Traversal is still refused once the separators are understood.
+        assert!(decode(b"dir\\..\\..\\evil", true).is_err());
+        assert!(decode(b"dir\\\\file", true).unwrap() == "dir\\file");
     }
 
     #[test]

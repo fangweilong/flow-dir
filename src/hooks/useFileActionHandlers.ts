@@ -10,8 +10,9 @@ import {
 } from '../api'
 import type { ListData } from '../types'
 import type { Translate } from '../i18n'
+import { errorKey } from '../i18n'
 import type { Workspace } from '../workspace'
-import { baseName, hasArchiveAncestor, isInsideArchive, joinPath } from '../paths'
+import { baseName, hasArchiveAncestor, isArchiveMember, isInsideArchive, joinPath } from '../paths'
 
 const errorCode = (err: unknown): string =>
   err && typeof err === 'object' && 'code' in err && typeof err.code === 'string'
@@ -108,7 +109,7 @@ export function useFileActionHandlers({
   const openProperties = useCallback(
     (paneId: string, names: string[]) => {
       for (const p of pathsFor(paneId, names)) {
-        void shellProperties(p).catch((e: unknown) => showToast(t('op.failed', { code: errorCode(e) })))
+        void shellProperties(p).catch((e: unknown) => showToast(t('op.failed', { code: t(errorKey(errorCode(e))) })))
       }
     },
     [pathsFor, showToast, t],
@@ -179,7 +180,7 @@ export function useFileActionHandlers({
             },
           })
         })
-        .catch((e: unknown) => showToast(t('op.failed', { code: errorCode(e) })))
+        .catch((e: unknown) => showToast(t('op.failed', { code: t(errorKey(errorCode(e))) })))
     },
     [runOp, showToast, startRename, t, update, wsRef],
   )
@@ -197,7 +198,7 @@ export function useFileActionHandlers({
             showToast(t('toast.noClipboard'))
             return
           }
-          const archived = clip.paths.filter(isInsideArchive)
+          const archived = clip.paths.filter(isArchiveMember)
           const maybeArchived = clip.paths.filter(
             (path) => !isInsideArchive(path) && hasArchiveAncestor(path),
           )

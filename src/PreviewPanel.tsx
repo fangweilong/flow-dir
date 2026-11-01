@@ -270,8 +270,12 @@ export function PreviewPanel({
                 <div className="space-y-0.5 font-mono text-[0.6875rem]">
                   {(info.entries ?? []).map((entry) => (
                     <div key={entry.name} className="flex justify-between gap-3">
-                      <span className="min-w-0 truncate text-fg">{entry.name}</span>
-                      <span className="shrink-0 text-muted-2">{formatSize(entry.size, false)}</span>
+                      <span className="min-w-0 truncate text-fg">
+                        {entry.isDir ? `${entry.name}\\` : entry.name}
+                      </span>
+                      <span className="shrink-0 text-muted-2">
+                        {entry.isDir ? '—' : formatSize(entry.size, false)}
+                      </span>
                     </div>
                   ))}
                   {!info.entries?.length && <div className="text-muted-2">—</div>}

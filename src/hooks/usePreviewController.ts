@@ -115,13 +115,22 @@ export function usePreviewController({
       const startX = ev.clientX
       const startWidth = previewWidth
       let finalWidth = startWidth
+      // The handle unmounts when the panel closes, so the drag has to remember it
+      // reopened itself; reading `previewOpen` here would stay stale for the whole drag.
+      let open = previewOpen
       const move = (e: PointerEvent) => {
         const next = Math.max(0, startWidth - (e.clientX - startX))
         if (next < previewMin) {
-          if (previewOpen) setPreviewOpen(false)
+          if (open) {
+            open = false
+            setPreviewOpen(false)
+          }
           return
         }
-        if (!previewOpen) setPreviewOpen(true)
+        if (!open) {
+          open = true
+          setPreviewOpen(true)
+        }
         finalWidth = Math.round(next)
         setPreviewWidth(finalWidth)
       }
@@ -129,7 +138,7 @@ export function usePreviewController({
         window.removeEventListener('pointermove', move)
         window.removeEventListener('pointerup', up)
         window.removeEventListener('pointercancel', up)
-        if (finalWidth >= previewMin) updateSettings({ ...settings, previewWidth: finalWidth })
+        if (open && finalWidth >= previewMin) updateSettings({ ...settings, previewWidth: finalWidth })
       }
       window.addEventListener('pointermove', move)
       window.addEventListener('pointerup', up)

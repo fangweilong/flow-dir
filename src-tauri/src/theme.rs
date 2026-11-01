@@ -133,6 +133,18 @@ pub fn prepare_window(hwnd: HWND) {
     let apis = apis();
     let mode = CURRENT.load(Ordering::Relaxed);
     if mode == MODE_DEFAULT {
+        // Switching an explicit palette back to `system` must drop what that palette set:
+        // an early return leaves the window frame and native popups in the old mode.
+        let dark = BOOL(if system_is_dark() { 1 } else { 0 });
+        unsafe {
+            let _ = SetWindowTheme(hwnd, PCWSTR::null(), PCWSTR::null());
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                &dark as *const BOOL as *const _,
+                std::mem::size_of::<BOOL>() as u32,
+            );
+        }
         return;
     }
     unsafe {

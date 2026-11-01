@@ -74,13 +74,31 @@ pub fn progress(hwnd: isize, state: &str, completed: u64, total: u64) -> Result<
     };
     let clear = state == "none";
     if let Some(tx) = TASKBAR_TX.as_ref() {
-        let _ = tx.try_send(TaskbarMsg {
+        let msg = TaskbarMsg {
             hwnd,
             flag,
             clear,
             completed,
             total,
-        });
+        };
+        if clear {
+            // Dropping the terminal message left the button showing stale progress, so it
+            // is retried for a short window; intermediate updates may be dropped because
+            // the next one carries a newer value.
+            let mut pending = msg;
+            for _ in 0..50 {
+                match tx.try_send(pending) {
+                    Ok(()) => break,
+                    Err(mpsc::TrySendError::Full(back)) => {
+                        pending = back;
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(mpsc::TrySendError::Disconnected(_)) => break,
+                }
+            }
+        } else {
+            let _ = tx.try_send(msg);
+        }
     }
     Ok(())
 }

@@ -257,4 +257,8 @@ export function resolveShortcuts(overrides: ShortcutOverride[] = []): Record<Sho
 /** Text-input focus check, used to keep bare-key shortcuts out of text fields. */
 export const isTextInput = (target: EventTarget | null): boolean =>
   target instanceof HTMLElement &&
+  // The hidden type-ahead field is not a text field for shortcut purposes: it only
+  // receives IME composition while the list itself keeps focus, and treating it as one
+  // made every bare-key shortcut (F3, F5, …) unreachable from the file list.
+  !target.hasAttribute('data-typeahead-input') &&
   (target.isContentEditable || target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT')

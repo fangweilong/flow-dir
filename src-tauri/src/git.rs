@@ -469,11 +469,15 @@ fn output_with_timeout(command: &mut Command, timeout: Duration) -> Option<Outpu
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                // A descendant (fsmonitor daemon, detached hook) can keep the inherited
+                // pipe open after `git` exits; an unbounded `join` would pin this thread
+                // forever, so the drain gets a short grace window.
+                let drain = deadline.max(Instant::now()) + Duration::from_millis(250);
                 return Some(Output {
                     status,
-                    stdout: out.join().ok()?,
-                    stderr: err.join().ok()?,
-                })
+                    stdout: collect_within(out, drain)?,
+                    stderr: collect_within(err, drain)?,
+                });
             }
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
@@ -484,6 +488,21 @@ fn output_with_timeout(command: &mut Command, timeout: Duration) -> Option<Outpu
             Err(_) => return None,
         }
     }
+}
+
+/// Joins a pipe reader only if it finished before `deadline`; otherwise the thread is left
+/// to drain (or block) on its own instead of holding the caller.
+fn collect_within(
+    handle: std::thread::JoinHandle<Vec<u8>>,
+    deadline: Instant,
+) -> Option<Vec<u8>> {
+    while !handle.is_finished() {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    handle.join().ok()
 }
 
 /// Splits pruned status paths into direct children and child folders, dropping duplicates

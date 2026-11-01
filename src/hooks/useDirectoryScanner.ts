@@ -110,6 +110,9 @@ export function useDirectoryScanner({
       void cancelDir(tabId).catch(() => undefined)
       listDir(path, tabId, gen, sort.key, sort.dir, hidden, (batch) => {
         if (gens.current[tabId] !== gen) return
+        // `list_dir` returns as soon as it detaches the enumeration, so the IPC promise
+        // settles before any batch arrives: only the final batch means the scan is over.
+        if (batch.done) scanning.current.delete(tabId)
         // The backend knows whether this path really is an archive; the filename alone
         // cannot tell `data.zip` (a folder) from an archive.
         markVirtualRoot(path, batch.archive)
@@ -161,6 +164,7 @@ export function useDirectoryScanner({
         })
       }).catch((e: unknown) => {
         if (gens.current[tabId] !== gen) return
+        scanning.current.delete(tabId)
         setListData((prev) => ({
           ...prev,
           [tabId]: {
@@ -169,8 +173,6 @@ export function useDirectoryScanner({
             error: { code: 'IPC', detail: String(e) },
           },
         }))
-      }).finally(() => {
-        if (scanning.current.get(tabId) === gen) scanning.current.delete(tabId)
       })
     },
     [],

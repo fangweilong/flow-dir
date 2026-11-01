@@ -290,15 +290,29 @@ pub fn run(
     // Everything cannot express size/time/attribute filters or read file contents; the
     // built-in scanner is slower but is the only provider that can honour those requests.
     if prefer_everything && filter.is_empty() && content_re.is_none() {
-        if let Ok(items) = everything_search(&roots, &needle, limit, hidden, &cancel) {
-            let _ = on_batch.send(SearchBatch {
-                gen,
-                provider: "everything".into(),
-                items,
-                done: true,
-                error: None,
-            });
-            return;
+        match everything_search(&roots, &needle, limit, hidden, &cancel) {
+            // Everything can return hits that its own path spelling cannot be mapped back
+            // to our roots (8.3 alias, junction, `subst`), leaving nothing usable. An empty
+            // list is not the same answer as "no match", so the scanner confirms it.
+            Ok(items) if !items.is_empty() => {
+                let _ = on_batch.send(SearchBatch {
+                    gen,
+                    provider: "everything".into(),
+                    items,
+                    done: true,
+                    error: None,
+                });
+                return;
+            }
+            Ok(_) => log::info!(
+                target: "flowdir::search",
+                "Everything returned no usable hits for {needle:?}; using the scanner"
+            ),
+            Err(err) => log::debug!(
+                target: "flowdir::search",
+                "Everything query failed ({}); using the scanner",
+                err.code
+            ),
         }
     }
 

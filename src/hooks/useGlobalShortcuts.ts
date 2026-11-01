@@ -24,6 +24,8 @@ export interface UseGlobalShortcutsOptions {
   redoLast: () => void
   openExternalPreview: (target: string) => void
   cyclePane?: () => void
+  /** Refresh for the active pane; also claims F5 so WebView2 cannot reload the app. */
+  refreshActive?: () => void
 }
 
 export function useGlobalShortcuts({
@@ -45,10 +47,18 @@ export function useGlobalShortcuts({
   redoLast,
   openExternalPreview,
   cyclePane,
+  refreshActive,
 }: UseGlobalShortcutsOptions) {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (overlayOpen) return
+      // Claimed before the text-input guard: F5 is WebView2's reload accelerator, and a
+      // focused address bar or filter box must not turn it back into a full SPA reload.
+      if (refreshActive && matchBinding(event, keys.refresh)) {
+        event.preventDefault()
+        refreshActive()
+        return
+      }
       const bare = !event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey
       if (bare && isTextInput(event.target)) return
 
@@ -161,5 +171,6 @@ export function useGlobalShortcuts({
     redoLast,
     openExternalPreview,
     cyclePane,
+    refreshActive,
   ])
 }

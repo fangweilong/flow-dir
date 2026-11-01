@@ -192,6 +192,21 @@ export function useFileOperations({
             return
           }
           if (progress.aborted) {
+            // Items that finished before the cancel are already on disk; without a record
+            // Ctrl+Z cannot reverse them. `succeeded` is authoritative (the failure list
+            // is capped), and `undoEntryFor` keeps positional rename names aligned.
+            const done = new Set(progress.succeeded ?? [])
+            if (done.size) {
+              recordEntry(
+                undoEntryFor(kind, sources, {
+                  ...options,
+                  skip: sources.filter((_, index) => !done.has(index)),
+                }),
+                options?.dirsAfter ?? [],
+              )
+            }
+            options?.after?.()
+            refreshPanes()
             announce(t('op.canceled'))
             options?.onDone?.(false)
             drop(2500)
@@ -250,15 +265,18 @@ export function useFileOperations({
         .then((report) => {
           refreshPanes()
           const failed = new Set(report.failed.map((failure) => failure.path))
-          const succeeded = retry.sources.filter((source) => !failed.has(source))
+          const done = new Set(report.succeeded ?? [])
+          const completed = report.aborted
+            ? retry.sources.filter((_, index) => done.has(index))
+            : retry.sources.filter((source) => !failed.has(source))
           // The elevated run does not go through `runOp`, so its history entry has to be
           // recorded here or Ctrl+Z would skip over it.
           // An inverse operation replayed by undo/redo must not add a new history entry.
-          if (!report.error && !report.aborted && succeeded.length && request.record !== false) {
+          if (!report.error && completed.length && request.record !== false) {
             const dirs = Array.from(
               new Set([
                 ...(retry.targetDir ? [retry.targetDir] : []),
-                ...succeeded.map((source) => parentPath(source)),
+                ...completed.map((source) => parentPath(source)),
               ]),
             )
             const entry = undoEntryFor(retry.kind, retry.sources, {
@@ -266,7 +284,9 @@ export function useFileOperations({
               newName: retry.newName,
               newNames: retry.newNames,
               permanent: retry.permanent,
-              skip: report.failed.map((failure) => failure.path),
+              skip: report.aborted
+                ? retry.sources.filter((_, index) => !done.has(index))
+                : report.failed.map((failure) => failure.path),
             })
             if (entry) pushUndo(entry, retry, dirs)
             else if (retry.kind === 'delete' && retry.permanent) lastIrreversible.current = true

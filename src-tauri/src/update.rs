@@ -250,25 +250,34 @@ fn install_inner<R: Runtime>(app: &AppHandle<R>) -> Result<(), ApiError> {
     download(app, &slug, asset, &downloaded)?;
 
     let exe = std::env::current_exe().map_err(|e| ApiError::new("UPDATE_IO", e.to_string()))?;
+    let mut replaced = false;
     let body = match flavor {
         Flavor::Portable => {
             // Re-hash right before touching the running image so a file swapped after the
             // download (TOCTOU) is rejected.
             verify_file(&downloaded, asset)?;
             replace_portable(&exe, &downloaded)?;
+            replaced = true;
             let _ = fs::remove_file(&downloaded);
-            format!("start \"\" \"{}\"", exe.display())
+            format!("start \"\" \"{}\"", batch_path(&exe))
         }
         Flavor::Installer => {
             verify_file(&downloaded, asset)?;
             format!(
                 "start \"\" /wait \"{}\" /S\nstart \"\" \"{}\"",
-                downloaded.display(),
-                exe.display()
+                batch_path(&downloaded),
+                batch_path(&exe)
             )
         }
     };
-    spawn_helper(&body)?;
+    if let Err(err) = spawn_helper(&body) {
+        // The image was already swapped; without a helper nothing would ever relaunch it.
+        // Put the previous one back so the running build stays launchable.
+        if replaced {
+            rollback_portable(&exe);
+        }
+        return Err(err);
+    }
 
     let handle = app.clone();
     std::thread::spawn(move || {
@@ -656,12 +665,16 @@ fn replace_portable(exe: &Path, downloaded: &Path) -> Result<(), ApiError> {
 
 /// Writes a small batch helper that polls for this PID and only then starts the new
 /// executable (or runs the installer), avoiding a race with the single-instance plugin.
+///
+/// The probe has to match the PID column: `tasklist` truncates the image name to 24
+/// characters, so a released name like `FlowDir_0.6.20_x64_portable.exe` never yields a
+/// line ending in `.exe` and the helper would start the new image while this process is
+/// still alive, only for the single-instance plugin to forward and exit.
 fn spawn_helper(body: &str) -> Result<(), ApiError> {
-    let script = std::env::temp_dir().join(format!("flowdir-update-{}.cmd", std::process::id()));
+    let pid = std::process::id();
+    let script = std::env::temp_dir().join(format!("flowdir-update-{pid}.cmd"));
     let text = format!(
-        "@echo off\r\nsetlocal\r\n:wait\r\ntasklist /FI \"PID eq {}\" /NH | find /I \".exe\" >nul\r\nif not errorlevel 1 (\r\ntimeout /t 1 /nobreak >nul\r\ngoto wait\r\n)\r\n{}\r\ndel \"%~f0\"\r\n",
-        std::process::id(),
-        body
+        "@echo off\r\nsetlocal\r\n:wait\r\ntasklist /FI \"PID eq {pid}\" /NH | find /I \"{pid}\" >nul\r\nif not errorlevel 1 (\r\nping -n 2 127.0.0.1 >nul\r\ngoto wait\r\n)\r\n{body}\r\ndel \"%~f0\"\r\n",
     );
     fs::write(&script, text).map_err(|e| ApiError::new("UPDATE_IO", e.to_string()))?;
     use std::os::windows::process::CommandExt;
@@ -672,6 +685,20 @@ fn spawn_helper(body: &str) -> Result<(), ApiError> {
         .spawn()
         .map_err(|e| ApiError::new("UPDATE_LAUNCH", e.to_string()))?;
     Ok(())
+}
+
+/// Puts the previous image back when the relaunch helper could not be started.
+fn rollback_portable(exe: &Path) {
+    let old = exe.with_extension("old.exe");
+    let _ = fs::remove_file(exe);
+    let _ = fs::rename(&old, exe);
+}
+
+/// Renders a path for a line in the generated batch file. The path is quoted, so only `%`
+/// still carries meaning there: an install folder such as `D:\50%off\` would otherwise be
+/// rewritten by the command processor and the relaunch target would not exist.
+fn batch_path(path: &Path) -> String {
+    path.display().to_string().replace('%', "%%")
 }
 
 fn wide(value: &str) -> Vec<u16> {
@@ -937,6 +964,27 @@ mod tests {
             Some(old),
             now
         ));
+    }
+
+    #[test]
+    fn rollback_restores_the_previous_image() {
+        let dir = std::env::temp_dir().join(format!("flowdir-rollback-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("FlowDir.exe");
+        fs::write(&exe, b"new").unwrap();
+        fs::write(dir.join("FlowDir.old.exe"), b"old").unwrap();
+        rollback_portable(&exe);
+        assert_eq!(fs::read(&exe).unwrap(), b"old");
+        assert!(!dir.join("FlowDir.old.exe").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn batch_path_keeps_percent_literal() {
+        let path = Path::new(r"D:\50%off\FlowDir.exe");
+        assert_eq!(batch_path(path), r"D:\50%%off\FlowDir.exe");
+        assert_eq!(batch_path(Path::new(r"C:\Tools\FlowDir.exe")), r"C:\Tools\FlowDir.exe");
     }
 
     #[test]

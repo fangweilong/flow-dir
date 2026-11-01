@@ -186,6 +186,17 @@ export function isInsideArchive(path: string): boolean {
 }
 
 /**
+ * True when `path` is an entry inside an archive listed this session, excluding the
+ * archive file itself. Copy/drag decisions need this variant: the archive was opened
+ * once, so `isInsideArchive` also matches the archive path and would route the file
+ * itself to the extraction path, which skips it.
+ */
+export function isArchiveMember(path: string): boolean {
+  const parent = parentPath(path)
+  return parent ? isInsideArchive(parent) : false
+}
+
+/**
  * True when an ancestor folder name carries an archive extension.
  *
  * Only for clipboard paths restored after a restart, where the in-session virtual roots

@@ -4,7 +4,7 @@
 //! the destination live in [`crate::archive::sink`].
 
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Write};
 use std::path::{Path as FsPath, PathBuf};
 
 use crate::error::ApiError;
@@ -16,6 +16,58 @@ use super::ArchiveEntry;
 
 /// Decompressed bytes a preview may read before it reports what it has so far.
 const PREVIEW_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Refusal marker carried inside the `io::Error` a [`Capped`] writer returns.
+#[derive(Debug)]
+struct LimitExceeded;
+
+impl std::fmt::Display for LimitExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("extraction exceeded its byte budget")
+    }
+}
+
+impl std::error::Error for LimitExceeded {}
+
+/// Writer that refuses bytes past a budget. A member header can claim any size, so the
+/// preview path cannot trust it to stop a decompression bomb.
+struct Capped<W: Write> {
+    inner: W,
+    left: u64,
+}
+
+impl<W: Write> Write for Capped<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if buf.len() as u64 > self.left {
+            return Err(std::io::Error::other(LimitExceeded));
+        }
+        self.left -= buf.len() as u64;
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn create_out(dest: &FsPath, limit: Option<u64>) -> Result<Capped<File>, ApiError> {
+    let file = File::create(dest).map_err(|e| ApiError::from_io(&dest.to_string_lossy(), &e))?;
+    Ok(Capped {
+        inner: file,
+        left: limit.unwrap_or(u64::MAX),
+    })
+}
+
+fn hit_limit(err: &std::io::Error) -> bool {
+    err.get_ref().is_some_and(|inner| inner.is::<LimitExceeded>())
+}
+
+fn write_failed(dest: &FsPath, err: &std::io::Error) -> ApiError {
+    if hit_limit(err) {
+        return ApiError::new("TOO_LARGE", dest.to_string_lossy());
+    }
+    ApiError::from_io(&dest.to_string_lossy(), err)
+}
 
 /// Opens a decompressing reader for the entry payload of `format`.
 fn reader(path: &str, format: Format) -> Result<Box<dyn Read>, ApiError> {
@@ -816,18 +868,22 @@ pub fn extract_dir(
         } else {
             target
         };
-        extract_single(archive, norm, &target, None)?;
+        extract_single(archive, norm, &target, None, None)?;
         written.push(target.to_string_lossy().into_owned());
     }
     Ok(written)
 }
 
 /// Extracts a single entry from `archive` into `dest`.
+///
+/// `limit` caps the bytes written (previews pass the configured preview size); member
+/// headers are untrusted, so the cap is enforced on the stream, not on the declared size.
 pub fn extract_single(
     archive: &str,
     inner: &str,
     dest: &std::path::Path,
     password: Option<&str>,
+    limit: Option<u64>,
 ) -> Result<(), ApiError> {
     let format = format::detect(archive)
         .ok_or_else(|| ApiError::new("UNSUPPORTED_FORMAT", name_of(archive)))?;
@@ -848,8 +904,9 @@ pub fn extract_single(
                 let utf8 = member.flags().as_u16() & 0x800 != 0;
                 if let Ok(name) = entry::decode(&raw, utf8) {
                     if name.eq_ignore_ascii_case(inner_norm) {
-                        let mut out = File::create(dest).map_err(|e| ApiError::from_io(&dest.to_string_lossy(), &e))?;
-                        std::io::copy(&mut member, &mut out).map_err(|e| ApiError::from_io(&dest.to_string_lossy(), &e))?;
+                        let mut out = create_out(dest, limit)?;
+                        std::io::copy(&mut member, &mut out).map_err(|e| write_failed(dest, &e))?;
+                        out.flush().map_err(|e| write_failed(dest, &e))?;
                         return Ok(());
                     }
                 }
@@ -866,15 +923,13 @@ pub fn extract_single(
                 if let Ok(name) = entry::decode(file.name.as_bytes(), true) {
                     if name.eq_ignore_ascii_case(inner_norm) {
                         found = true;
-                        match File::create(dest) {
+                        match create_out(dest, limit) {
                             Ok(mut out) => {
-                                if let Err(e) = std::io::copy(read, &mut out) {
-                                    copy_err = Some(ApiError::from_io(&dest.to_string_lossy(), &e));
+                                if let Err(e) = std::io::copy(read, &mut out).and_then(|_| out.flush()) {
+                                    copy_err = Some(write_failed(dest, &e));
                                 }
                             }
-                            Err(e) => {
-                                copy_err = Some(ApiError::from_io(&dest.to_string_lossy(), &e));
-                            }
+                            Err(e) => copy_err = Some(e),
                         }
                         return Ok(false);
                     }
@@ -897,8 +952,9 @@ pub fn extract_single(
                 let raw = item.path_bytes().to_vec();
                 if let Ok(name) = entry::decode(&raw, false) {
                     if name.eq_ignore_ascii_case(inner_norm) {
-                        let mut out = File::create(dest).map_err(|e| ApiError::from_io(&dest.to_string_lossy(), &e))?;
-                        std::io::copy(&mut item, &mut out).map_err(|e| ApiError::from_io(&dest.to_string_lossy(), &e))?;
+                        let mut out = create_out(dest, limit)?;
+                        std::io::copy(&mut item, &mut out).map_err(|e| write_failed(dest, &e))?;
+                        out.flush().map_err(|e| write_failed(dest, &e))?;
                         return Ok(());
                     }
                 }
@@ -924,8 +980,9 @@ pub fn extract_single(
             }
             if let Some(file_name) = found_file {
                 let mut reader = cabinet.read_file(&file_name).map_err(|err| ApiError::new("ARCHIVE", err.to_string()))?;
-                let mut out = File::create(dest).map_err(|e| ApiError::from_io(&dest.to_string_lossy(), &e))?;
-                std::io::copy(&mut reader, &mut out).map_err(|e| ApiError::from_io(&dest.to_string_lossy(), &e))?;
+                let mut out = create_out(dest, limit)?;
+                std::io::copy(&mut reader, &mut out).map_err(|e| write_failed(dest, &e))?;
+                out.flush().map_err(|e| write_failed(dest, &e))?;
                 return Ok(());
             }
             Err(ApiError::new("NOT_FOUND", inner))
@@ -938,10 +995,18 @@ pub fn extract_single(
                 let raw = info.raw_name_bytes.clone().unwrap_or_else(|| info.name.clone().into_bytes());
                 if let Ok(name) = entry::decode_rar(&raw, false) {
                     if name.eq_ignore_ascii_case(inner_norm) {
-                        let mut out = File::create(dest).map_err(|e| ApiError::from_io(&dest.to_string_lossy(), &e))?;
+                        let mut out = create_out(dest, limit)?;
                         let had_password = password.is_some();
-                        entry.copy_to(&mut out).map_err(|err| rar_error(err, had_password))?;
-                        return Ok(());
+                        match entry.copy_to(&mut out) {
+                            Ok(_) => {
+                                out.flush().map_err(|e| write_failed(dest, &e))?;
+                                return Ok(());
+                            }
+                            Err(unrar_rs::RarError::Io(io)) if hit_limit(&io) => {
+                                return Err(ApiError::new("TOO_LARGE", dest.to_string_lossy()));
+                            }
+                            Err(err) => return Err(rar_error(err, had_password)),
+                        }
                     }
                 }
             }
@@ -951,7 +1016,7 @@ pub fn extract_single(
             let mut file = File::open(archive).map_err(|err| ApiError::from_io(archive, &err))?;
             let root = isomage::detect_and_parse_filesystem(&mut file, name_of(archive))
                 .map_err(|err| ApiError::new("ARCHIVE", err.to_string()))?;
-            if extract_iso_single(&mut file, &root, "", inner_norm, dest)? {
+            if extract_iso_single(&mut file, &root, "", inner_norm, dest, limit)? {
                 return Ok(());
             }
             Err(ApiError::new("NOT_FOUND", inner))
@@ -966,6 +1031,7 @@ fn extract_iso_single(
     prefix: &str,
     target: &str,
     dest: &std::path::Path,
+    limit: Option<u64>,
 ) -> Result<bool, ApiError> {
     for child in &node.children {
         let raw = if prefix.is_empty() {
@@ -975,13 +1041,23 @@ fn extract_iso_single(
         };
         if let Ok(name) = entry::decode(raw.as_bytes(), true) {
             if child.is_directory {
-                if extract_iso_single(file, child, &raw, target, dest)? {
+                if extract_iso_single(file, child, &raw, target, dest, limit)? {
                     return Ok(true);
                 }
             } else if name.eq_ignore_ascii_case(target) {
-                let mut out = File::create(dest).map_err(|e| ApiError::from_io(&dest.to_string_lossy(), &e))?;
-                isomage::cat_node(file, child, &mut out).map_err(|err| ApiError::new("ARCHIVE", err.to_string()))?;
-                return Ok(true);
+                let mut out = create_out(dest, limit)?;
+                match isomage::cat_node(file, child, &mut out) {
+                    Ok(()) => return Ok(true),
+                    Err(err) => {
+                        if err
+                            .downcast_ref::<std::io::Error>()
+                            .is_some_and(hit_limit)
+                        {
+                            return Err(ApiError::new("TOO_LARGE", dest.to_string_lossy()));
+                        }
+                        return Err(ApiError::new("ARCHIVE", err.to_string()));
+                    }
+                }
             }
         }
     }

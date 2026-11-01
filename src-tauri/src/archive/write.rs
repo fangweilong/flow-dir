@@ -100,6 +100,7 @@ impl Progress {
             work_total: self.bytes_total,
             failed_count: 0,
             failed: Vec::new(),
+            succeeded: Vec::new(),
             done,
             aborted: false,
             error: None,
@@ -181,7 +182,7 @@ fn run(
     );
     let tmp = temporary(&dest);
     let result: Result<Progress, ApiError> = (|| {
-        let sources = collect(&request.paths, &dest, &tmp)?;
+        let sources = collect(&request.paths, &dest, &tmp, &cancel)?;
         let bytes_total = sources.iter().map(|source| source.size).sum();
         let mut progress = Progress {
             job_id: request.job_id.clone(),
@@ -230,6 +231,7 @@ fn run(
                 work_total: 0,
                 failed_count: 0,
                 failed: Vec::new(),
+                succeeded: Vec::new(),
                 done: true,
                 aborted,
                 error: if aborted { None } else { Some(err) },
@@ -240,27 +242,49 @@ fn run(
     progress
 }
 
-/// `<dest>.part`: same directory, so the final rename stays on one volume.
+/// `<dest>.<pid>-<seq>.part`: same directory, so the final rename stays on one volume, but
+/// unique per job so two compressions cannot interleave writes into one file.
 fn temporary(dest: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let mut name = dest.file_name().unwrap_or_default().to_os_string();
-    name.push(".part");
+    name.push(format!(
+        ".{}-{}.part",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     dest.with_file_name(name)
 }
 
 /// Walks the selection once. Names are relative to the parent of each selected item, so a
 /// selected folder lands under its own name and selected files land at the archive root.
-fn collect(paths: &[String], dest: &Path, tmp: &Path) -> Result<Vec<Source>, ApiError> {
-    let skip = [normal(dest), normal(tmp)];
+fn collect(
+    paths: &[String],
+    dest: &Path,
+    tmp: &Path,
+    cancel: &AtomicBool,
+) -> Result<Vec<Source>, ApiError> {
+    // Compared as lowercased text: both sides are absolute and this runs once per child,
+    // where a `canonicalize` syscall per entry would dominate the walk.
+    let skip: Vec<String> = [dest, tmp]
+        .iter()
+        .map(|path| path.to_string_lossy().to_lowercase())
+        .collect();
     let mut sources = Vec::new();
-    let mut seen_dirs = Vec::new();
+    let mut seen_dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut roots: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
     roots.sort();
     for root in roots {
-        // Junctions and symlinks are skipped, matching extraction and duplicate scanning:
-        // following one would embed files that are not part of the selection.
+        if cancel.load(Ordering::Relaxed) {
+            return Err(ApiError::new("CANCELED", "compression canceled"));
+        }
         let meta = fs::symlink_metadata(&root)
             .map_err(|err| ApiError::from_io(&root.display().to_string(), &err))?;
-        if is_link(&meta) {
+        // A junction/symlink *directory* is skipped: following it would embed files that
+        // are not part of the selection and may not terminate. A file reparse point is
+        // read normally — OneDrive/Dropbox placeholders and deduplicated files are files,
+        // and skipping them silently dropped cloud-only files from the archive.
+        if meta.is_dir() && is_link(&meta) {
             continue;
         }
         let name = root
@@ -269,30 +293,35 @@ fn collect(paths: &[String], dest: &Path, tmp: &Path) -> Result<Vec<Source>, Api
             .ok_or_else(|| ApiError::new("INVALID_NAME", root.display().to_string()))?;
         let mut stack = vec![(root.clone(), name, meta)];
         while let Some((disk, name, meta)) = stack.pop() {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(ApiError::new("CANCELED", "compression canceled"));
+            }
             if meta.is_dir() {
-                let canonical = normal(&disk);
-                if seen_dirs.contains(&canonical) {
+                let key = disk.to_string_lossy().to_lowercase();
+                if !seen_dirs.insert(key) {
                     continue;
                 }
-                seen_dirs.push(canonical);
+                let entries = fs::read_dir(&disk)
+                    .map_err(|err| ApiError::from_io(&disk.display().to_string(), &err))?;
                 sources.push(Source {
                     disk: disk.clone(),
                     name: name.clone(),
                     size: 0,
                     dir: true,
                 });
+                if sources.len() > MAX_ENTRIES {
+                    return Err(ApiError::new("TOO_MANY_ENTRIES", sources.len().to_string()));
+                }
                 let mut children: Vec<(PathBuf, String, fs::Metadata)> = Vec::new();
-                let entries = fs::read_dir(&disk)
-                    .map_err(|err| ApiError::from_io(&disk.display().to_string(), &err))?;
                 for entry in entries {
                     let entry = entry.map_err(|err| ApiError::from_io(&disk.display().to_string(), &err))?;
                     let child = entry.path();
-                    if skip.contains(&normal(&child)) {
+                    if skip.iter().any(|skipped| *skipped == child.to_string_lossy().to_lowercase()) {
                         continue;
                     }
                     let meta = fs::symlink_metadata(&child)
                         .map_err(|err| ApiError::from_io(&child.display().to_string(), &err))?;
-                    if is_link(&meta) {
+                    if meta.is_dir() && is_link(&meta) {
                         continue;
                     }
                     let child_name = format!("{}/{}", name, entry.file_name().to_string_lossy());
@@ -307,27 +336,22 @@ fn collect(paths: &[String], dest: &Path, tmp: &Path) -> Result<Vec<Source>, Api
                     size: meta.len(),
                     dir: false,
                 });
+                if sources.len() > MAX_ENTRIES {
+                    return Err(ApiError::new("TOO_MANY_ENTRIES", sources.len().to_string()));
+                }
             }
         }
     }
     if sources.is_empty() {
         return Err(ApiError::new("EMPTY", "nothing to compress"));
     }
-    if sources.len() > MAX_ENTRIES {
-        return Err(ApiError::new("TOO_MANY_ENTRIES", sources.len().to_string()));
-    }
     Ok(sources)
 }
 
-/// Reparse points (junctions, symlinks, mount points) must not be followed: their target
-/// is outside the selection and may be unbounded.
+/// Reparse points (junctions, symlinks, mount points) must not be followed as folders:
+/// their target is outside the selection and may be unbounded.
 fn is_link(meta: &fs::Metadata) -> bool {
     meta.file_attributes() & 0x400 != 0
-}
-
-/// Comparison key for paths that may not exist yet (the temporary file).
-fn normal(path: &Path) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Copies one entry's bytes, stopping on cancel and reporting progress as it goes.
@@ -610,7 +634,12 @@ impl<R: Read> Read for Counted<'_, R> {
         if self.cancel.load(Ordering::Relaxed) {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "canceled"));
         }
-        let limit = buffer.len().min(self.remaining as usize).max(1);
+        if self.remaining == 0 {
+            // The writer asked for more than the header promised: report EOF instead of
+            // reading (and underflowing `remaining` when the file grew).
+            return Ok(0);
+        }
+        let limit = buffer.len().min(self.remaining as usize);
         let read = self.inner.read(&mut buffer[..limit])?;
         if read == 0 && self.remaining > 0 {
             return Err(io::Error::new(
@@ -634,6 +663,46 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn partial_files_are_unique_per_job() {
+        let dest = Path::new(r"C:\x\out.zip");
+        let first = temporary(dest);
+        let second = temporary(dest);
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), dest.parent());
+        assert!(first.to_string_lossy().ends_with(".part"));
+    }
+
+    #[test]
+    fn counted_stops_at_the_declared_size() {
+        let channel = channel();
+        let mut progress = Progress {
+            job_id: "counted".into(),
+            channel,
+            entries: 0,
+            entries_total: 0,
+            bytes: 0,
+            bytes_total: 0,
+            current: None,
+            last: Instant::now(),
+        };
+        let cancel = AtomicBool::new(false);
+        let data = b"abcdef".as_slice();
+        // The file grew after `collect` recorded 3 bytes: the reader must stop there
+        // instead of streaming the extra bytes (and underflowing `remaining`).
+        let mut counted = Counted {
+            inner: data,
+            remaining: 3,
+            cancel: &cancel,
+            progress: &mut progress,
+        };
+        let mut buffer = [0u8; 8];
+        assert_eq!(counted.read(&mut buffer).unwrap(), 3);
+        assert_eq!(counted.read(&mut buffer).unwrap(), 0);
+        assert_eq!(counted.read(&mut buffer).unwrap(), 0);
+        assert_eq!(counted.remaining, 0);
     }
 
     fn channel() -> Channel<OpProgress> {
