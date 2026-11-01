@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import type { Drive } from '../types'
 import type { TabState } from '../workspace'
 import type { Translate } from '../i18n'
@@ -39,6 +39,13 @@ export function DrivesOverview({
   pointOf,
 }: DrivesOverviewProps) {
   const [selectedRoot, setSelectedRoot] = useState<string | null>(() => drives[0]?.root ?? null)
+  const containerRef = useRef<HTMLDivElement>(null)
+  // Rows are not focusable, so a click used to focus the pane's list container, which
+  // forwards focus to the hidden type-ahead input; arrow/Enter then bubbled to the pane
+  // handler and never reached this overview.
+  useEffect(() => {
+    containerRef.current?.focus({ preventScroll: true })
+  }, [])
 
   const openDrive = (drive: Drive) => {
     if (!tab) return
@@ -65,7 +72,17 @@ export function DrivesOverview({
   }
 
   return (
-    <div className="py-0.5 outline-none" tabIndex={0} onKeyDown={onKeyDown}>
+    <div
+      ref={containerRef}
+      className="py-0.5 outline-none"
+      tabIndex={0}
+      onKeyDown={onKeyDown}
+      onMouseDown={(ev) => {
+        if ((ev.target as HTMLElement).closest('button, input')) return
+        ev.preventDefault()
+        containerRef.current?.focus({ preventScroll: true })
+      }}
+    >
       {drives.map((drive) => {
         const sized = drive.available && drive.total > 0
         const used = sized ? Math.max(0, drive.total - drive.free) : 0

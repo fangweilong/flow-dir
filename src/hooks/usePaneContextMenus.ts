@@ -3,6 +3,7 @@ import type { MutableRefObject } from 'react'
 import type { MenuItem } from '../ContextMenu'
 import type { MenuPoint } from '../PaneView'
 import type { Drive, Entry, Lang, ListData } from '../types'
+import { filterMatches } from '../types'
 import type { Workspace } from '../workspace'
 import type { ShortcutId } from '../shortcuts'
 import type { Translate } from '../i18n'
@@ -362,7 +363,6 @@ export function usePaneContextMenus({
       const pane = current.panes[paneId]
       const tab = pane ? current.tabs[pane.activeTabId] : undefined
       if (!tab) return
-      const data = listData[tab.id]
       const inArchive = Boolean(tab.path && isInsideArchive(tab.path))
       const items: MenuItem[] = tab.path
         ? [
@@ -379,12 +379,14 @@ export function usePaneContextMenus({
               label: t('menu.selectAll'),
               hint: menuHint(keys.selectAll),
               onSelect: () => {
-                const all = (data?.entries ?? []).map((entry) => entry.name)
-                update(tab.id, (d) => ({
-                  ...d,
-                  selected: new Set(all),
-                  anchor: all[0] ?? '',
-                }))
+                update(tab.id, (d) => {
+                  // Select what the user can see: the pane invariant is that filtered-out
+                  // rows never enter the selection (copy/drag read it directly).
+                  const all = d.entries
+                    .filter((entry) => filterMatches(entry.name, d.filter))
+                    .map((entry) => entry.name)
+                  return { ...d, selected: new Set(all), anchor: all[0] ?? '' }
+                })
               },
             },
             { kind: 'sep' },

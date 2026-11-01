@@ -37,13 +37,16 @@ export function useQuickPlaces({
       const startX = ev.clientX
       const startWidth = sidebarWidth
       let finalWidth = startWidth
+      // `settings` is frozen at pointerdown, so the closures must not read it back during
+      // the drag: the collapse they persisted was immediately undone on release.
+      let open = settings.sidebarOpen
       const move = (e: PointerEvent) => {
         const next = Math.max(0, startWidth + (e.clientX - startX))
         if (next < sidebarMin) {
-          if (settings.sidebarOpen) updateSettings({ ...settings, sidebarOpen: false })
+          open = false
           return
         }
-        if (!settings.sidebarOpen) updateSettings({ ...settings, sidebarOpen: true })
+        open = true
         finalWidth = Math.round(next)
         setSidebarWidth(finalWidth)
       }
@@ -51,7 +54,11 @@ export function useQuickPlaces({
         window.removeEventListener('pointermove', move)
         window.removeEventListener('pointerup', up)
         window.removeEventListener('pointercancel', up)
-        if (finalWidth >= sidebarMin) updateSettings({ ...settings, sidebarWidth: finalWidth })
+        updateSettings({
+          ...settings,
+          sidebarOpen: open,
+          sidebarWidth: finalWidth >= sidebarMin ? finalWidth : settings.sidebarWidth,
+        })
       }
       window.addEventListener('pointermove', move)
       window.addEventListener('pointerup', up)

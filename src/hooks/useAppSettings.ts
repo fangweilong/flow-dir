@@ -167,7 +167,6 @@ export function useAppSettings({
         readyRef: ready,
         sidebarMin: sMin,
         previewMin: pMin,
-        setPreviewOpen: updatePreviewOpen,
         setSidebarWidth: updateSidebarWidth,
         setPreviewWidth: updatePreviewWidth,
       } = optionsRef.current
@@ -187,7 +186,10 @@ export function useAppSettings({
         toast(makeT(merged.language)('toast.layoutRejected'))
       }
       setSettings(merged)
-      updatePreviewOpen(merged.previewOpen)
+      // `previewOpen` is applied by `usePreviewController`'s own effect from `settings`.
+      // Writing it through `setPreviewOpen` here used a controller that still held
+      // DEFAULT_SETTINGS, so launching with the panel closed saved every settings field
+      // as its default (and cleared the shell integration).
       updateSidebarWidth(merged.sidebarWidth >= sMin ? merged.sidebarWidth : DEFAULT_SETTINGS.sidebarWidth)
       updatePreviewWidth(merged.previewWidth >= pMin ? merged.previewWidth : DEFAULT_SETTINGS.previewWidth)
       updatePlaces(placeList)
@@ -253,7 +255,7 @@ export function useAppSettings({
 
   // Column width handlers
   const setColWidths = useCallback(
-    (size: number, time: number, type: number, capacity: number, free: number) => {
+    (size: number, type: number, time: number, capacity: number, free: number) => {
       updateSettings({
         ...settingsRef.current,
         listSizeWidth: size,

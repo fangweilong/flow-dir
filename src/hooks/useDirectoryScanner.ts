@@ -361,28 +361,29 @@ export function useDirectoryScanner({
           paneId,
           event.payload.structural || pendingStructural.current.get(paneId) === true,
         )
-        const existing = rescanTimers.current.get(paneId)
-        if (existing) window.clearTimeout(existing)
-        rescanTimers.current.set(
-          paneId,
-          window.setTimeout(() => {
-            rescanTimers.current.delete(paneId)
-            const structural = pendingStructural.current.get(paneId) === true
-            pendingStructural.current.delete(paneId)
-            const current = wsRef.current
-            if (!current) return
-            const pane = current.panes[paneId]
-            const tab = pane ? current.tabs[pane.activeTabId] : undefined
-            if (!pane || !tab) return
-            if (watched.current.get(paneId) !== tab.path) return
-            if (!structural) {
-              if (gitByDirRef.current[pathKey(tab.path)]?.root) invalidateGit(tab.path)
-              return
-            }
-            startScan(tab.id, tab.path, pane.sort, pane.hidden, true)
-            invalidateTree(tab.path)
-            invalidateGit(tab.path)
-          }, 250),
+        // Coalesce, never postpone: restarting the timer on every event postponed the
+        // rescan until a long extraction or download burst went quiet.
+        if (!rescanTimers.current.has(paneId))
+          rescanTimers.current.set(
+            paneId,
+            window.setTimeout(() => {
+              rescanTimers.current.delete(paneId)
+              const structural = pendingStructural.current.get(paneId) === true
+              pendingStructural.current.delete(paneId)
+              const current = wsRef.current
+              if (!current) return
+              const pane = current.panes[paneId]
+              const tab = pane ? current.tabs[pane.activeTabId] : undefined
+              if (!pane || !tab) return
+              if (watched.current.get(paneId) !== tab.path) return
+              if (!structural) {
+                if (gitByDirRef.current[pathKey(tab.path)]?.root) invalidateGit(tab.path)
+                return
+              }
+              startScan(tab.id, tab.path, pane.sort, pane.hidden, true)
+              invalidateTree(tab.path)
+              invalidateGit(tab.path)
+            }, 250),
         )
       })
       if (disposed) u1()

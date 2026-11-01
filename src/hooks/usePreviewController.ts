@@ -99,7 +99,7 @@ export function usePreviewController({
         })
     }, 120)
     return () => window.clearTimeout(timer)
-  }, [previewOpen, previewName, activeTab, settings.theme, settings.externalPreview, selectionKey, previewWidth])
+  }, [previewOpen, previewName, activeTab, settings.theme, settings.externalPreview, selectionKey, previewWidth, settings.previewMaxFileMb, settings.previewMaxDimension, settings.previewTextKb])
 
   const downloadPreview = useCallback(() => {
     if (!activeTab || !previewName) return
