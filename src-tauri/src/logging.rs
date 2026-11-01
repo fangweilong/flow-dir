@@ -10,7 +10,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use log::{LevelFilter, Log, Metadata, Record};
 use serde_json::json;
@@ -23,6 +23,9 @@ use crate::settings::Settings;
 const MAX_BYTES: u64 = 2 * 1024 * 1024;
 const KEEP: usize = 5;
 const LOG_FILE: &str = "flowdir.log";
+/// A reader holding the rotated file makes rename fail; retrying on every line would stat
+/// and rename the whole chain per record, so rotation pauses for this long after a failure.
+const ROTATE_BACKOFF: Duration = Duration::from_secs(60);
 
 struct Logger {
     state: Mutex<State>,
@@ -33,6 +36,8 @@ struct State {
     file: File,
     size: u64,
     level: LevelFilter,
+    /// Set after a failed rotation; until then the file is not written past the cap.
+    blocked_until: Option<Instant>,
 }
 
 static LOGGER: OnceLock<Logger> = OnceLock::new();
@@ -66,6 +71,7 @@ impl State {
             file,
             size,
             level: LevelFilter::Info,
+            blocked_until: None,
         })
     }
 
@@ -86,14 +92,17 @@ impl State {
         match OpenOptions::new().create(true).append(true).open(&current) {
             Ok(file) => {
                 self.file = file;
-                self.size = if rotated {
-                    0
+                if rotated {
+                    self.size = 0;
+                    self.blocked_until = None;
                 } else {
-                    self.file.metadata().map(|meta| meta.len()).unwrap_or(0)
-                };
+                    self.size = self.file.metadata().map(|meta| meta.len()).unwrap_or(0);
+                    self.blocked_until = Some(Instant::now() + ROTATE_BACKOFF);
+                }
             }
             Err(_) => {
                 self.size = self.file.metadata().map(|meta| meta.len()).unwrap_or(self.size);
+                self.blocked_until = Some(Instant::now() + ROTATE_BACKOFF);
             }
         }
     }
@@ -125,7 +134,17 @@ impl Log for Logger {
             return;
         }
         if state.size + line.len() as u64 > MAX_BYTES {
-            state.rotate();
+            // Outside the backoff window, try the rotation chain again; it clears the
+            // window on success.
+            if state.blocked_until.is_none_or(|until| until <= Instant::now()) {
+                state.rotate();
+            }
+            if state.blocked_until.is_some_and(|until| until > Instant::now()) {
+                // Rotation cannot succeed while a reader holds the file; appending would
+                // grow the log without bound, so the record only goes to stderr.
+                eprintln!("{}", line.trim_end_matches('\n'));
+                return;
+            }
         }
         if state.file.write_all(line.as_bytes()).is_ok() {
             state.size += line.len() as u64;

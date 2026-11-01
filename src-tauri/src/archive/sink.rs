@@ -241,16 +241,18 @@ impl Sink {
     /// Accepts one entry: enforces the entry cap, resolves duplicate names and prepares
     /// the placeholder. Returns [`Take::Skip`] for links and unsupported entries.
     pub fn accept(&mut self, rel: &str, is_dir: bool, link: bool) -> Result<Take, ApiError> {
+        // `processed()` adds the skipped entries onto this counter, so a link that never
+        // reaches the cap check must not increment it: it would be reported twice.
+        if link {
+            self.skip(rel, "SYMLINK");
+            return Ok(Take::Skip);
+        }
         self.progress.entries += 1;
         if self.progress.entries > MAX_ENTRIES {
             return Err(ApiError::new(
                 "TOO_MANY_ENTRIES",
                 format!("archive holds more than {MAX_ENTRIES} entries"),
             ));
-        }
-        if link {
-            self.skip(rel, "SYMLINK");
-            return Ok(Take::Skip);
         }
         let rel = self.unique_rel(rel);
         let full = self.temp.join(&rel);

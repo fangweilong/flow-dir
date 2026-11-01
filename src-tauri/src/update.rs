@@ -250,31 +250,37 @@ fn install_inner<R: Runtime>(app: &AppHandle<R>) -> Result<(), ApiError> {
     download(app, &slug, asset, &downloaded)?;
 
     let exe = std::env::current_exe().map_err(|e| ApiError::new("UPDATE_IO", e.to_string()))?;
-    let mut replaced = false;
+    let mut staged: Option<PathBuf> = None;
     let body = match flavor {
         Flavor::Portable => {
-            // Re-hash right before touching the running image so a file swapped after the
-            // download (TOCTOU) is rejected.
+            // Re-hash right before staging so a file swapped after the download (TOCTOU)
+            // is rejected.
             verify_file(&downloaded, asset)?;
-            replace_portable(&exe, &downloaded)?;
-            replaced = true;
+            // The staged copy is written now; the swap runs in the helper, after this
+            // process is gone. Writing the live image here would leave a half-copied
+            // executable behind if the shutdown were interrupted.
+            let path = stage_portable(&exe, &downloaded)?;
             let _ = fs::remove_file(&downloaded);
-            format!("start \"\" \"{}\"", batch_path(&exe))
+            let body = portable_body(&exe, &path);
+            staged = Some(path);
+            body
         }
         Flavor::Installer => {
             verify_file(&downloaded, asset)?;
+            // A failed installer must not relaunch the old image: the user would see the
+            // update "complete" while nothing changed. `start /wait` propagates the exit
+            // code, so stop the helper before the relaunch line when it is non-zero.
             format!(
-                "start \"\" /wait \"{}\" /S\nstart \"\" \"{}\"",
+                "start \"\" /wait \"{}\" /S\r\nif errorlevel 1 exit /b 1\r\nstart \"\" \"{}\"",
                 batch_path(&downloaded),
                 batch_path(&exe)
             )
         }
     };
     if let Err(err) = spawn_helper(&body) {
-        // The image was already swapped; without a helper nothing would ever relaunch it.
-        // Put the previous one back so the running build stays launchable.
-        if replaced {
-            rollback_portable(&exe);
+        // The live image is untouched; only the staged copy has to go.
+        if let Some(staged) = staged {
+            let _ = fs::remove_file(staged);
         }
         return Err(err);
     }
@@ -290,11 +296,13 @@ fn install_inner<R: Runtime>(app: &AppHandle<R>) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// Removes the `*.old.exe` left behind by a portable self-update. Fails harmlessly while
-/// the previous image is still mapped; the next launch retries.
+/// Removes the `*.old.exe` left behind by a portable self-update and any `*.new.exe` a
+/// helper never managed to move into place. Fails harmlessly while an image is still mapped;
+/// the next launch retries.
 pub fn cleanup_leftovers() {
     if let Ok(exe) = std::env::current_exe() {
         let _ = fs::remove_file(exe.with_extension("old.exe"));
+        let _ = fs::remove_file(exe.with_extension("new.exe"));
     }
     // Every update downloads into its own scratch folder; the installer flavor leaves a
     // full setup there. Only old folders are removed: a second copy of the app (dev and
@@ -650,17 +658,30 @@ fn verify_file(path: &Path, asset: &Asset) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// Moves the running image aside and copies the new one into its place. The old name is
-/// kept so a failed copy can be rolled back; the next launch deletes it.
-fn replace_portable(exe: &Path, downloaded: &Path) -> Result<(), ApiError> {
+/// Copies the verified download next to the running image as `*.new.exe` and returns that
+/// path. The live image is never touched from inside the process: the helper renames it
+/// once this process has exited, so an interrupted shutdown cannot leave a truncated exe.
+fn stage_portable(exe: &Path, downloaded: &Path) -> Result<PathBuf, ApiError> {
+    let staged = exe.with_extension("new.exe");
+    let _ = fs::remove_file(&staged);
+    fs::copy(downloaded, &staged).map_err(|e| ApiError::new("UPDATE_SWAP", e.to_string()))?;
+    Ok(staged)
+}
+
+/// Body of the relaunch helper for a portable update: move the current image aside, move the
+/// staged copy into its place, and start it. Every `move` is checked, because the running
+/// image may still be locked for a moment after the PID disappears; the previous image is
+/// restored in that case and always remains launchable.
+fn portable_body(exe: &Path, staged: &Path) -> String {
     let old = exe.with_extension("old.exe");
-    let _ = fs::remove_file(&old);
-    fs::rename(exe, &old).map_err(|e| ApiError::new("UPDATE_SWAP", e.to_string()))?;
-    if let Err(e) = fs::copy(downloaded, exe) {
-        let _ = fs::rename(&old, exe);
-        return Err(ApiError::new("UPDATE_SWAP", e.to_string()));
-    }
-    Ok(())
+    let exe = batch_path(exe);
+    let old = batch_path(&old);
+    let staged = batch_path(staged);
+    // CRLF matters here: `goto` searches forward for the label and a bare LF can hide it
+    // from the command processor.
+    format!(
+        "if exist \"{old}\" del /f /q \"{old}\"\r\nmove /Y \"{exe}\" \"{old}\"\r\nif errorlevel 1 goto launch\r\nmove /Y \"{staged}\" \"{exe}\"\r\nif errorlevel 1 move /Y \"{old}\" \"{exe}\"\r\n:launch\r\nstart \"\" \"{exe}\""
+    )
 }
 
 /// Writes a small batch helper that polls for this PID and only then starts the new
@@ -685,13 +706,6 @@ fn spawn_helper(body: &str) -> Result<(), ApiError> {
         .spawn()
         .map_err(|e| ApiError::new("UPDATE_LAUNCH", e.to_string()))?;
     Ok(())
-}
-
-/// Puts the previous image back when the relaunch helper could not be started.
-fn rollback_portable(exe: &Path) {
-    let old = exe.with_extension("old.exe");
-    let _ = fs::remove_file(exe);
-    let _ = fs::rename(&old, exe);
 }
 
 /// Renders a path for a line in the generated batch file. The path is quoted, so only `%`
@@ -967,16 +981,28 @@ mod tests {
     }
 
     #[test]
-    fn rollback_restores_the_previous_image() {
-        let dir = std::env::temp_dir().join(format!("flowdir-rollback-{}", std::process::id()));
+    fn portable_stage_never_touches_the_running_image() {
+        let dir = std::env::temp_dir().join(format!("flowdir-stage-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let exe = dir.join("FlowDir.exe");
-        fs::write(&exe, b"new").unwrap();
-        fs::write(dir.join("FlowDir.old.exe"), b"old").unwrap();
-        rollback_portable(&exe);
+        let downloaded = dir.join("new.exe");
+        fs::write(&exe, b"old").unwrap();
+        fs::write(&downloaded, b"new").unwrap();
+        let staged = stage_portable(&exe, &downloaded).unwrap();
+        assert_eq!(staged, dir.join("FlowDir.new.exe"));
+        assert_eq!(fs::read(&staged).unwrap(), b"new");
+        // The live image is untouched until the helper runs after exit.
         assert_eq!(fs::read(&exe).unwrap(), b"old");
-        assert!(!dir.join("FlowDir.old.exe").exists());
+        // Staging again replaces a leftover instead of appending to it.
+        fs::write(&staged, b"stale-bytes").unwrap();
+        let staged = stage_portable(&exe, &downloaded).unwrap();
+        assert_eq!(fs::read(&staged).unwrap(), b"new");
+        let body = portable_body(&exe, &staged);
+        assert!(body.starts_with("if exist \""));
+        assert!(body.contains("move /Y \""));
+        assert!(body.contains(":launch"));
+        assert!(body.ends_with(&format!("start \"\" \"{}\"", batch_path(&exe))));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1013,21 +1039,6 @@ mod tests {
         assert_eq!(manifest.version, "0.2.0");
         assert_eq!(manifest.portable.name, "FlowDir_0.2.0_x64_portable.exe");
         assert_eq!(manifest.installer.size, 20);
-    }
-
-    #[test]
-    fn portable_swap_keeps_previous_image() {
-        let dir = std::env::temp_dir().join(format!("flowdir-swap-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let exe = dir.join("FlowDir.exe");
-        let new = dir.join("new.exe");
-        fs::write(&exe, b"old").unwrap();
-        fs::write(&new, b"new").unwrap();
-        replace_portable(&exe, &new).unwrap();
-        assert_eq!(fs::read(&exe).unwrap(), b"new");
-        assert_eq!(fs::read(dir.join("FlowDir.old.exe")).unwrap(), b"old");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -96,7 +96,9 @@ pub fn is_archive_or_inner_dir(path: &str) -> bool {
 
 /// Checks whether `inner_path` represents a directory inside `archive_path`.
 pub fn is_inner_dir(archive_path: &Path, inner_path: &str) -> Result<bool, ApiError> {
-    let entries = backends::list(&archive_path.to_string_lossy(), 500_000)?;
+    // A capped listing keeps the previous best-effort answer: a directory whose members all
+    // sit past the cap stays invisible here, exactly as before, so truncation is ignored.
+    let (entries, _) = backends::list_with_truncated(&archive_path.to_string_lossy(), 500_000)?;
     let target = inner_path.replace('/', "\\");
     let target = target.trim_matches('\\').to_lowercase();
     if target.is_empty() {
@@ -125,7 +127,7 @@ pub fn enumerate_virtual(
     use std::collections::HashMap;
     use std::hash::{Hash, Hasher};
 
-    let entries = backends::list(&archive_path.to_string_lossy(), 500_000)?;
+    let (entries, truncated) = backends::list_with_truncated(&archive_path.to_string_lossy(), 500_000)?;
     let default_mtime = archive_path
         .metadata()
         .ok()
@@ -218,7 +220,7 @@ pub fn enumerate_virtual(
 
     Ok(crate::fs::ScanOutcome {
         entries: map.into_values().collect(),
-        truncated: false,
+        truncated,
     })
 }
 
@@ -317,14 +319,38 @@ pub fn extract_cached(
         if dest.is_dir() && dest_mtime >= arc_mtime && arc_mtime > 0 {
             return Ok(dest);
         }
+        let parent = dest.parent().unwrap_or(temp.as_path());
+        std::fs::create_dir_all(parent)
+            .map_err(|e| ApiError::from_io(&parent.to_string_lossy(), &e))?;
+        // Build the tree next to the destination and rename it in: a member that fails
+        // halfway must not leave a partial folder carrying a fresh mtime that the check
+        // above would then serve as complete.
+        let name = dest
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "entry".to_string());
+        let tmp = dest.with_file_name(format!(
+            ".{name}.{}.{}.tmp",
+            std::process::id(),
+            CACHE_TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).map_err(|e| ApiError::from_io(&tmp.to_string_lossy(), &e))?;
+        if let Err(err) =
+            backends::extract_dir(&archive_path.to_string_lossy(), &inner_norm, &tmp, false)
+        {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return Err(err);
+        }
         let _ = if dest.is_dir() {
             std::fs::remove_dir_all(&dest)
         } else {
             std::fs::remove_file(&dest)
         };
-        std::fs::create_dir_all(&dest)
-            .map_err(|e| ApiError::from_io(&dest.to_string_lossy(), &e))?;
-        backends::extract_dir(&archive_path.to_string_lossy(), &inner_norm, &dest, false)?;
+        std::fs::rename(&tmp, &dest).map_err(|e| {
+            let _ = std::fs::remove_dir_all(&tmp);
+            ApiError::from_io(&dest.to_string_lossy(), &e)
+        })?;
         return Ok(dest);
     }
 

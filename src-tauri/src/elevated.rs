@@ -28,10 +28,11 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, PIPE_READMODE_BYTE,
+    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows::Win32::System::Threading::{
-    CreateEventW, OpenEventW, SetEvent, TerminateProcess, WaitForMultipleObjects,
+    CreateEventW, GetProcessId, OpenEventW, SetEvent, TerminateProcess, WaitForMultipleObjects,
     WaitForSingleObject, INFINITE, SYNCHRONIZATION_SYNCHRONIZE,
 };
 use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
@@ -241,6 +242,9 @@ fn run_worker(
         // stall into an immediate, accurate error.
         let process = Some(fork.0);
         connect(pipe.0, event.0, process, &cancel, budget)?;
+        // The nonce hides the name, but a same-user process could still win the race to
+        // an instance; only the helper this GUI launched may send the request.
+        verify_client(pipe.0, fork.0)?;
         let payload = serde_json::to_vec(&Payload {
             nonce: nonce.to_string(),
             request,
@@ -252,23 +256,42 @@ fn run_worker(
             .map_err(|err| ApiError::new("ELEVATED_NO_RESULT", err.to_string()))
     })();
 
-    match &result {
-        Ok(_) => {
+    match result {
+        Ok(report) => {
             // The helper writes the report just before exiting; give it a moment.
             unsafe {
                 let _ = WaitForSingleObject(fork.0, 10_000);
             }
+            Ok(report)
         }
-        Err(_) => unsafe {
+        Err(err) => unsafe {
             // Cooperative stop first: `TerminateProcess` may be refused across integrity
             // levels, and the helper polls this event during the operation.
             let _ = SetEvent(cancel_event.0);
+            // The helper always writes a report after `run_headless` returns, even when the
+            // cancel flag aborted it mid-way. Reading again with a fresh budget and a fresh
+            // (unsignalled) cancel flag recovers the indices it already completed, so a
+            // cancelled batch does not lose its undo record.
+            let grace_cancel = AtomicBool::new(false);
+            let grace_budget = Instant::now() + Duration::from_secs(10);
+            let recovered = read_message(
+                pipe.0,
+                event.0,
+                Some(fork.0),
+                &grace_cancel,
+                grace_budget,
+            )
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<ops::ElevatedReport>(&bytes).ok());
             let _ = WaitForSingleObject(fork.0, 10_000);
+            if let Some(report) = recovered {
+                return Ok(report);
+            }
             let _ = TerminateProcess(fork.0, 1);
             let _ = WaitForSingleObject(fork.0, 5_000);
+            Err(err)
         },
     }
-    result
 }
 
 /// Named event the GUI sets when it gives up; the helper opens the same name and turns it
@@ -286,7 +309,9 @@ fn create_server(name: &str) -> Result<OwnedHandle, ApiError> {
         CreateNamedPipeW(
             PCWSTR(wide.as_ptr()),
             PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            // `PIPE_REJECT_REMOTE_CLIENTS` is a pipe-mode flag (dwPipeMode), not an open-mode
+            // one; putting it in dwOpenMode would silently drop the restriction.
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
             1,
             64 * 1024,
             64 * 1024,
@@ -298,6 +323,22 @@ fn create_server(name: &str) -> Result<OwnedHandle, ApiError> {
         return Err(ApiError::new("ELEVATED", "CreateNamedPipe failed"));
     }
     Ok(OwnedHandle(handle))
+}
+
+/// Compares the connected pipe client with the process `ShellExecuteEx` returned. A
+/// mismatch means some other process answered the pipe, so nothing must be written to it.
+fn verify_client(pipe: HANDLE, child: HANDLE) -> Result<(), ApiError> {
+    let mut client = 0u32;
+    unsafe { GetNamedPipeClientProcessId(pipe, &mut client) }
+        .map_err(|err| ApiError::new("ELEVATION_CLIENT", err.to_string()))?;
+    let expected = unsafe { GetProcessId(child) };
+    if expected == 0 || client != expected {
+        return Err(ApiError::new(
+            "ELEVATION_CLIENT",
+            format!("pipe client pid {client} does not match helper pid {expected}"),
+        ));
+    }
+    Ok(())
 }
 
 fn open_client(name: &str) -> Result<OwnedHandle, ApiError> {

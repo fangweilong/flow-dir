@@ -212,7 +212,7 @@ impl OpState {
         self.jobs.lock().unwrap().is_empty()
     }
 
-    fn record_denied(&self, request: &Request) {
+    pub(crate) fn record_denied(&self, request: &Request) {
         let mut denied = self.denied.lock().unwrap();
         denied.retain(|_, entry| entry.at.elapsed() < std::time::Duration::from_secs(600));
         denied.insert(
@@ -528,8 +528,29 @@ fn run(
     }
 }
 
+/// Prefixes long paths with the verbatim marker before they reach the shell. The shell
+/// rejects paths past MAX_PATH otherwise, and the manifest's `longPathAware` only covers
+/// the API surface, not every internal shell parser.
+fn shell_path(path: &str) -> String {
+    // Ordinary paths keep their usual form: the marker also disables `..`/`.` cleanup
+    // and trailing-dot trimming inside the shell, which would change their meaning.
+    if path.len() <= 240 || path.starts_with(r"\\?\") {
+        return path.to_string();
+    }
+    let bytes = path.as_bytes();
+    if let Some(rest) = path.strip_prefix(r"\\") {
+        return format!(r"\\?\UNC\{rest}");
+    }
+    // Drive-letter absolute path, e.g. `C:\dir\file`. A drive-relative `C:file` is left
+    // alone: the marker would make it absolute and point at a different location.
+    if bytes.len() > 2 && bytes[1] == b':' && matches!(bytes[2], b'\\' | b'/') {
+        return format!(r"\\?\{path}");
+    }
+    path.to_string()
+}
+
 fn shell_item(path: &str) -> Result<IShellItem, ApiError> {
-    let wide = HSTRING::from(path);
+    let wide = HSTRING::from(shell_path(path));
     unsafe {
         SHCreateItemFromParsingName::<_, Option<&windows::Win32::System::Com::IBindCtx>, IShellItem>(
             &wide,
@@ -1106,6 +1127,36 @@ mod tests {
         assert_eq!(error.code, "PANIC");
         assert!(error.detail.contains("boom"), "{}", error.detail);
         assert!(!outcome.aborted);
+    }
+
+    #[test]
+    fn shell_path_only_rewrites_long_absolute_paths() {
+        fn pad(base: &str) -> String {
+            let mut path = base.to_string();
+            while path.len() <= 240 {
+                path.push('x');
+            }
+            path
+        }
+
+        // Short paths keep their exact spelling: the verbatim marker would also disable
+        // `.`/`..` collapsing and trailing-dot trimming inside the shell.
+        assert_eq!(shell_path(r"C:\short\file.txt"), r"C:\short\file.txt");
+        assert_eq!(shell_path(r"relative\file.txt"), r"relative\file.txt");
+        assert_eq!(
+            shell_path(r"\\server\share\file.txt"),
+            r"\\server\share\file.txt"
+        );
+
+        let drive = pad(r"C:\dir\");
+        assert_eq!(shell_path(&drive), format!(r"\\?\{drive}"));
+
+        let unc = pad(r"\\server\share\");
+        assert_eq!(shell_path(&unc), format!(r"\\?\UNC\{}", &unc[2..]));
+
+        // Already verbatim, and drive-relative paths, are left alone.
+        assert_eq!(shell_path(&pad(r"\\?\C:\")), pad(r"\\?\C:\"));
+        assert_eq!(shell_path(&pad("C:relative")), pad("C:relative"));
     }
 
     #[test]

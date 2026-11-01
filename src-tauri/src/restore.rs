@@ -226,15 +226,17 @@ unsafe fn original_path(folder: &IShellFolder, item: *const ITEMIDLIST) -> Optio
     unsafe {
         let shell_item: IShellItem2 = SHCreateItemWithParent(None, folder, item).ok()?;
         let name_raw = shell_item.GetDisplayName(SIGDN_NORMALDISPLAY).ok()?;
-        let name = name_raw.to_string().ok()?;
+        // Convert before freeing: `?` on a failed conversion would leak the shell string.
+        let name = name_raw.to_string();
         CoTaskMemFree(Some(name_raw.0 as *const c_void));
+        let name = name.ok()?;
         if std::path::Path::new(&name).is_absolute() {
             return Some(name);
         }
         let from = shell_item.GetString(&PKEY_DISPLACED_FROM).ok()?;
-        let folder_path = from.to_string().ok()?;
+        let folder_path = from.to_string();
         CoTaskMemFree(Some(from.0 as *const c_void));
-        Some(join(&folder_path, &name))
+        Some(join(&folder_path.ok()?, &name))
     }
 }
 

@@ -7,6 +7,8 @@ use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::path::{Path as FsPath, PathBuf};
 
+use zip::result::ZipError;
+
 use crate::error::ApiError;
 
 use super::entry;
@@ -573,7 +575,7 @@ fn extract_zip(path: &str, sink: &mut Sink, password: Option<&str>) -> Result<()
         };
         let mut file = match opened {
             Ok(file) => file,
-            Err(_) if password.is_some() => {
+            Err(ZipError::InvalidPassword) => {
                 return Err(ApiError::new("WRONG_PASSWORD", "wrong password"))
             }
             Err(_) => {
@@ -670,14 +672,21 @@ fn extract_stream(archive: &str, format: Format, sink: &mut Sink) -> Result<(), 
 
 /// Entries for the preview panel. Listing is capped by the caller; the tar variants stop
 /// decompressing as soon as the cap is reached.
-pub fn list(path: &str, limit: usize) -> Result<Vec<ArchiveEntry>, ApiError> {
+///
+/// The boolean reports whether the archive held more members than the cap allowed, so a
+/// virtual directory listing can surface truncation instead of silently dropping entries.
+pub fn list_with_truncated(
+    path: &str,
+    limit: usize,
+) -> Result<(Vec<ArchiveEntry>, bool), ApiError> {
     let format = format::detect(path).ok_or_else(|| ApiError::new("UNSUPPORTED_FORMAT", path))?;
     if format == Format::Zip {
         let file = File::open(path).map_err(|e| ApiError::from_io(path, &e))?;
         let mut archive =
             zip::ZipArchive::new(file).map_err(|e| ApiError::new("ARCHIVE", e.to_string()))?;
+        let total = archive.len();
         let mut entries = Vec::new();
-        for index in 0..archive.len().min(limit) {
+        for index in 0..total.min(limit) {
             let Ok(file) = archive.by_index(index) else {
                 continue;
             };
@@ -693,17 +702,21 @@ pub fn list(path: &str, limit: usize) -> Result<Vec<ArchiveEntry>, ApiError> {
                 });
             }
         }
-        return Ok(entries);
+        return Ok((entries, total > limit));
     }
     if format == Format::SevenZ {
         use sevenz_rust2::{ArchiveReader, Password};
         let reader = ArchiveReader::open(path, Password::empty())
             .map_err(|err| ApiError::new("ARCHIVE", err.to_string()))?;
-        return Ok(reader
+        let files: Vec<_> = reader
             .archive()
             .files
             .iter()
             .filter(|file| !file.name.is_empty())
+            .collect();
+        let truncated = files.len() > limit;
+        let entries = files
+            .into_iter()
             .take(limit)
             .filter_map(|file| {
                 let is_dir = file.is_directory;
@@ -716,7 +729,8 @@ pub fn list(path: &str, limit: usize) -> Result<Vec<ArchiveEntry>, ApiError> {
                         mtime: 0,
                     })
             })
-            .collect());
+            .collect();
+        return Ok((entries, truncated));
     }
     if format == Format::Cab {
         let file = File::open(path).map_err(|err| ApiError::from_io(path, &err))?;
@@ -726,7 +740,8 @@ pub fn list(path: &str, limit: usize) -> Result<Vec<ArchiveEntry>, ApiError> {
         for folder in cabinet.folder_entries() {
             for item in folder.file_entries() {
                 if entries.len() >= limit {
-                    return Ok(entries);
+                    // Reached the cap with this item still unvisited: there is more to show.
+                    return Ok((entries, true));
                 }
                 if let Ok(name) = entry::decode_rar(item.name().as_bytes(), item.is_name_utf()) {
                     entries.push(ArchiveEntry {
@@ -738,13 +753,16 @@ pub fn list(path: &str, limit: usize) -> Result<Vec<ArchiveEntry>, ApiError> {
                 }
             }
         }
-        return Ok(entries);
+        return Ok((entries, false));
     }
     if format == Format::Rar {
         let archive = open_rar(path, None)?;
         let mut entries = Vec::new();
+        let mut truncated = false;
         for member in archive.entries() {
             if entries.len() >= limit {
+                // The cap was reached before this member, so the archive holds more.
+                truncated = true;
                 break;
             }
             let raw = member
@@ -761,25 +779,28 @@ pub fn list(path: &str, limit: usize) -> Result<Vec<ArchiveEntry>, ApiError> {
                 });
             }
         }
-        return Ok(entries);
+        return Ok((entries, truncated));
     }
     if format == Format::Iso {
         let mut file = File::open(path).map_err(|err| ApiError::from_io(path, &err))?;
         let root = isomage::detect_and_parse_filesystem(&mut file, name_of(path))
             .map_err(|err| ApiError::new("ARCHIVE", err.to_string()))?;
         let mut entries = Vec::new();
-        push_iso_entries(&root, "", limit, &mut entries);
-        return Ok(entries);
+        let truncated = push_iso_entries(&root, "", limit, &mut entries);
+        return Ok((entries, truncated));
     }
     if format.is_tar() {
         let mut entries = Vec::new();
         // Listing a compressed tar means decompressing it; stop after a bounded amount so
         // previewing a multi-gigabyte archive cannot stall the panel.
         let mut archive = tar::Archive::new(reader(path, format)?.take(PREVIEW_BYTES));
-        let Ok(items) = archive.entries() else {
-            return Ok(entries);
+        let Ok(mut items) = archive.entries() else {
+            return Ok((entries, false));
         };
-        for item in items.take(limit) {
+        let mut visited = 0usize;
+        let mut truncated = false;
+        for item in items.by_ref().take(limit) {
+            visited += 1;
             let Ok(item) = item else { break };
             let raw = item.path_bytes().to_vec();
             let Ok(name) = entry::decode(&raw, false) else {
@@ -794,20 +815,39 @@ pub fn list(path: &str, limit: usize) -> Result<Vec<ArchiveEntry>, ApiError> {
                 mtime,
             });
         }
-        return Ok(entries);
+        if visited == limit {
+            // The cap stopped the walk: one more header shows whether anything was hidden.
+            // `PREVIEW_BYTES` still bounds the decompressor, so this stays cheap.
+            truncated = items.next().is_some();
+        }
+        return Ok((entries, truncated));
     }
-    Ok(vec![ArchiveEntry {
-        name: format::output_name(name_of(path)),
-        size: 0,
-        is_dir: false,
-        mtime: 0,
-    }])
+    Ok((
+        vec![ArchiveEntry {
+            name: format::output_name(name_of(path)),
+            size: 0,
+            is_dir: false,
+            mtime: 0,
+        }],
+        false,
+    ))
 }
 
-fn push_iso_entries(node: &isomage::TreeNode, prefix: &str, limit: usize, out: &mut Vec<ArchiveEntry>) {
+/// Drop-in for callers that only need the entries and ignore truncation.
+pub fn list(path: &str, limit: usize) -> Result<Vec<ArchiveEntry>, ApiError> {
+    list_with_truncated(path, limit).map(|(entries, _)| entries)
+}
+
+/// Appends `node`'s descendants, stopping at `limit`. Returns true when the cap hid children.
+fn push_iso_entries(
+    node: &isomage::TreeNode,
+    prefix: &str,
+    limit: usize,
+    out: &mut Vec<ArchiveEntry>,
+) -> bool {
     for child in &node.children {
         if out.len() >= limit {
-            return;
+            return true;
         }
         let raw = if prefix.is_empty() {
             child.name.clone()
@@ -823,10 +863,11 @@ fn push_iso_entries(node: &isomage::TreeNode, prefix: &str, limit: usize, out: &
                 mtime: 0,
             });
         }
-        if child.is_directory {
-            push_iso_entries(child, &raw, limit, out);
+        if child.is_directory && push_iso_entries(child, &raw, limit, out) {
+            return true;
         }
     }
+    false
 }
 
 /// Extracts the directory `inner` from `archive` under `dest`, creating the tree.
@@ -1132,7 +1173,7 @@ fn name_of(path: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_dir, VolumeFamily};
+    use super::{extract_dir, list, list_with_truncated, VolumeFamily};
     use std::io::Write;
 
     #[test]
@@ -1199,5 +1240,45 @@ mod tests {
         assert_eq!(part.key("中文.rar"), None);
         assert_eq!(part.key("İ.part2.rar"), Some(2));
         assert_eq!(part.key("İ.part02.rar"), Some(2));
+    }
+
+    #[test]
+    fn listing_reports_when_the_cap_hid_entries() {
+        let dir = std::env::temp_dir().join(format!("flowdir-list-trunc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let zip_path = dir.join("tree.zip");
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            writer.start_file(name, options).unwrap();
+            writer.write_all(b"x").unwrap();
+        }
+        writer.finish().unwrap();
+
+        let tar_path = dir.join("tree.tar");
+        let mut builder = tar::Builder::new(std::fs::File::create(&tar_path).unwrap());
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(1);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, name, &b"x"[..]).unwrap();
+        }
+        builder.finish().unwrap();
+
+        for archive in [&zip_path, &tar_path] {
+            let path = archive.to_string_lossy().into_owned();
+            let (entries, truncated) = list_with_truncated(&path, 2).unwrap();
+            assert_eq!(entries.len(), 2, "{}", path);
+            assert!(truncated, "{}", path);
+            // Exactly the member count is not truncation; one less is.
+            let (entries, truncated) = list_with_truncated(&path, 3).unwrap();
+            assert_eq!(entries.len(), 3, "{}", path);
+            assert!(!truncated, "{}", path);
+            assert_eq!(list(&path, 2).unwrap().len(), 2, "{}", path);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

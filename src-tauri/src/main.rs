@@ -842,6 +842,7 @@ async fn op_retry_elevated(
             "no denied operation matches this retry",
         ));
     }
+    let original = request.clone();
     let token = state.begin_external(&request.op_id);
     let cancel = token.clone();
     let finish_token = token.clone();
@@ -852,6 +853,53 @@ async fn op_retry_elevated(
     .await
     .map_err(|err| ApiError::new("THREAD", err.to_string()))?;
     state.finish_external(&op_id, &finish_token);
+    // The record was consumed before the UAC prompt appeared, so a cancelled prompt or a
+    // partial run would leave the still-visible retry button permanently refused. Re-bind
+    // whatever the helper did not complete; a rejected prompt keeps the original request.
+    let retryable = match &result {
+        Err(_) => Some(original.clone()),
+        Ok(report) if report.error.is_some() || report.aborted => Some(original.clone()),
+        Ok(report) if report.failed_total == 0 => None,
+        Ok(report) => {
+            let failed: std::collections::HashSet<String> = report
+                .failed
+                .iter()
+                .map(|failure| failure.path.to_lowercase())
+                .collect();
+            let kept: Vec<usize> = if report.failed_indices.is_empty() {
+                original
+                    .sources
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, source)| failed.contains(&source.to_lowercase()))
+                    .map(|(index, _)| index)
+                    .collect()
+            } else {
+                report
+                    .failed_indices
+                    .iter()
+                    .map(|index| *index as usize)
+                    .filter(|index| *index < original.sources.len())
+                    .collect()
+            };
+            if kept.is_empty() {
+                None
+            } else {
+                let mut next = original.clone();
+                next.sources = kept
+                    .iter()
+                    .map(|index| original.sources[*index].clone())
+                    .collect();
+                if let Some(names) = &original.new_names {
+                    next.new_names = Some(kept.iter().map(|index| names[*index].clone()).collect());
+                }
+                Some(next)
+            }
+        }
+    };
+    if let Some(next) = retryable {
+        state.record_denied(&next);
+    }
     result
 }
 
@@ -1672,8 +1720,17 @@ fn main() {
             if let Err(err) = init_tray(app.handle()) {
                 eprintln!("tray init failed: {err}");
             }
-            for code in shell_integration::apply(app.handle(), &saved) {
-                log::warn!(target: "flowdir::shell", "integration: {code}");
+            if settings::load_failed() {
+                // A transient read failure must not be mistaken for "every switch is off":
+                // applying defaults here deletes the user's Explorer entries and autostart.
+                log::warn!(
+                    target: "flowdir::settings",
+                    "settings unreadable; shell integration left unchanged"
+                );
+            } else {
+                for code in shell_integration::apply(app.handle(), &saved) {
+                    log::warn!(target: "flowdir::shell", "integration: {code}");
+                }
             }
             Ok(())
         })

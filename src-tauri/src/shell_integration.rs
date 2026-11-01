@@ -7,6 +7,8 @@
 //! Development builds use their own key namespace (`FlowDirDev`), so they cannot overwrite
 //! the release integration.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Mutex;
@@ -164,8 +166,11 @@ pub fn apply(app: &AppHandle, settings: &Settings) -> Vec<String> {
                 }
             }
         } else {
-            delete_tree(HKEY_CURRENT_USER, &file_menu);
-            delete_tree(HKEY_CURRENT_USER, &dir_menu);
+            for key in [&file_menu, &dir_menu] {
+                if delete_tree(HKEY_CURRENT_USER, key).is_err() {
+                    push_once(&mut warnings, "INTEGRATION_FAILED");
+                }
+            }
         }
 
         // Folder/drive association: an "Open with" ProgID, never the default verb.
@@ -209,9 +214,13 @@ pub fn apply(app: &AppHandle, settings: &Settings) -> Vec<String> {
                 push_once(&mut warnings, "INTEGRATION_FAILED");
             }
         } else {
-            delete_tree(HKEY_CURRENT_USER, &format!(r"Software\Classes\{progid}"));
+            if delete_tree(HKEY_CURRENT_USER, &format!(r"Software\Classes\{progid}")).is_err() {
+                push_once(&mut warnings, "INTEGRATION_FAILED");
+            }
             for key in OPEN_WITH_PROGIDS {
-                delete_value(HKEY_CURRENT_USER, key, &progid);
+                if delete_value(HKEY_CURRENT_USER, key, &progid).is_err() {
+                    push_once(&mut warnings, "INTEGRATION_FAILED");
+                }
             }
         }
 
@@ -220,8 +229,8 @@ pub fn apply(app: &AppHandle, settings: &Settings) -> Vec<String> {
             if write_string(HKEY_CURRENT_USER, RUN_KEY, Some(ns), &value).is_err() {
                 push_once(&mut warnings, "INTEGRATION_FAILED");
             }
-        } else {
-            delete_value(HKEY_CURRENT_USER, RUN_KEY, ns);
+        } else if delete_value(HKEY_CURRENT_USER, RUN_KEY, ns).is_err() {
+            push_once(&mut warnings, "INTEGRATION_FAILED");
         }
     }
 
@@ -518,17 +527,30 @@ fn split_target(
 
 // ---------------------------------------------------------------- tray
 
+/// Fingerprint of the recent-directory list as displayed, so an id only resolves against
+/// the list it was built from. Order matters: [`MAX_RECENT`] entries are hashed in order.
+fn recent_token(dirs: &[String]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for dir in dirs.iter().take(MAX_RECENT) {
+        dir.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 /// Tray menu shared by the initial build and the recent-directory rebuild.
 pub fn tray_menu(app: &AppHandle, recent: &[String]) -> tauri::Result<Menu<tauri::Wry>> {
     let show = MenuItem::with_id(app, "show", "显示窗口 / Show", true, None::<&str>)?;
     let search = MenuItem::with_id(app, "search", "快速搜索 / Search", true, None::<&str>)?;
     let mut entries = Vec::new();
     if !recent.is_empty() {
+        // The token pins every entry to this exact list: a menu that stays open across a
+        // `set_recent` carries ids the new list no longer matches.
+        let token = recent_token(recent);
         for (index, dir) in recent.iter().enumerate().take(MAX_RECENT) {
             // A literal `&` would become a mnemonic and lose its underline target.
             entries.push(MenuItem::with_id(
                 app,
-                format!("recent:{index}"),
+                format!("recent:{token:x}:{index}"),
                 dir.replace('&', "&&"),
                 true,
                 None::<&str>,
@@ -590,10 +612,29 @@ pub fn on_menu_event(app: &AppHandle, id: &str) {
         let _ = app.emit("flowdir:search", ());
         return;
     }
-    let Some(index) = id.strip_prefix("recent:").and_then(|rest| rest.parse::<usize>().ok()) else {
+    let Some((token, index)) = id
+        .strip_prefix("recent:")
+        .and_then(|rest| rest.split_once(':'))
+        .and_then(|(token, index)| {
+            Some((
+                u64::from_str_radix(token, 16).ok()?,
+                index.parse::<usize>().ok()?,
+            ))
+        })
+    else {
         return;
     };
-    let path = app.state::<Integration>().recent.lock().unwrap().get(index).cloned();
+    // `set_recent` may have replaced the list while this menu was open; the index then names
+    // a different folder (or none), so a mismatching token drops the click instead.
+    let path = {
+        let state = app.state::<Integration>();
+        let recent = state.recent.lock().unwrap();
+        if recent_token(&recent) == token {
+            recent.get(index).cloned()
+        } else {
+            None
+        }
+    };
     if let Some(path) = path {
         crate::show_main(app);
         let request = LaunchRequest {
@@ -661,12 +702,21 @@ fn write_string(
     }
 }
 
-fn delete_tree(root: HKEY, subkey: &str) {
-    let subkey = wide(subkey);
-    let _ = unsafe { RegDeleteTreeW(root, PCWSTR(subkey.as_ptr())) };
+/// `ERROR_FILE_NOT_FOUND` (2) and `ERROR_PATH_NOT_FOUND` (3) mean the key was already
+/// absent, which is exactly the state `apply` wants; anything else is a real failure.
+fn delete_status(status: WIN32_ERROR) -> Result<(), i32> {
+    match status.0 {
+        0 | 2 | 3 => Ok(()),
+        code => Err(code as i32),
+    }
 }
 
-fn delete_value(root: HKEY, subkey: &str, name: &str) {
+fn delete_tree(root: HKEY, subkey: &str) -> Result<(), i32> {
+    let subkey = wide(subkey);
+    delete_status(unsafe { RegDeleteTreeW(root, PCWSTR(subkey.as_ptr())) })
+}
+
+fn delete_value(root: HKEY, subkey: &str, name: &str) -> Result<(), i32> {
     let subkey = wide(subkey);
     let mut key = HKEY::default();
     let status = unsafe {
@@ -679,11 +729,13 @@ fn delete_value(root: HKEY, subkey: &str, name: &str) {
         )
     };
     if status != WIN32_ERROR(0) {
-        return;
+        // The parent key is gone, so the value is gone too.
+        return delete_status(status);
     }
     let name = wide(name);
-    let _ = unsafe { RegDeleteValueW(key, PCWSTR(name.as_ptr())) };
+    let status = unsafe { RegDeleteValueW(key, PCWSTR(name.as_ptr())) };
     let _ = unsafe { RegCloseKey(key) };
+    delete_status(status)
 }
 
 #[cfg(test)]
@@ -770,5 +822,23 @@ mod tests {
         );
         assert_eq!(request.path.as_deref(), Some(r"D:\dir\sub"));
         assert_eq!(request.select.as_deref(), Some("report.txt"));
+    }
+
+    /// Menu ids embed this fingerprint, so any visible change to the list invalidates the
+    /// ids of a menu that was already open.
+    #[test]
+    fn recent_token_follows_the_visible_list() {
+        let dirs = vec![r"D:\a".to_string(), r"D:\b".to_string()];
+        assert_eq!(recent_token(&dirs), recent_token(&dirs.clone()));
+
+        let mut reordered = dirs.clone();
+        reordered.reverse();
+        assert_ne!(recent_token(&dirs), recent_token(&reordered));
+        assert_ne!(recent_token(&dirs), recent_token(&dirs[..1]));
+
+        // Only the entries the submenu can show take part.
+        let long: Vec<String> = (0..MAX_RECENT + 5).map(|i| format!("D:\\{i}")).collect();
+        assert_eq!(recent_token(&long), recent_token(&long[..MAX_RECENT]));
+        assert_ne!(recent_token(&long), recent_token(&long[1..]));
     }
 }

@@ -974,13 +974,25 @@ fn scale_to_bgra(
             ));
         }
         let scale = (max_width as f64 / width as f64).min(1.0);
-        let target_w = ((width as f64 * scale).round() as u32).max(1);
-        let target_h = ((height as f64 * scale).round() as u32).max(1);
-        // A malformed header can claim enormous dimensions; refuse before allocating so
-        // the multiplication below cannot wrap (release) or panic (debug).
-        let stride = target_w
+        let mut target_w = ((width as f64 * scale).round() as u32).max(1);
+        let mut target_h = ((height as f64 * scale).round() as u32).max(1);
+        // A malformed header can claim enormous dimensions; compute the stride with a
+        // checked multiply so the arithmetic below cannot wrap (release) or panic (debug).
+        let mut stride = target_w
             .checked_mul(4)
             .ok_or_else(|| ApiError::new("IMAGE_TOO_LARGE", "stride overflow"))?;
+        // Width alone leaves a long image free to grow taller than the render budget, which
+        // used to be rejected outright. Derive the affordable height from the stride and
+        // shrink both axes proportionally when the scaled image exceeds it.
+        let max_h = (MAX_RENDER_BYTES / stride as usize).max(1) as u32;
+        if target_h > max_h {
+            let fit = f64::from(max_h) / f64::from(target_h);
+            target_w = ((f64::from(target_w) * fit).round() as u32).max(1);
+            target_h = max_h;
+            stride = target_w
+                .checked_mul(4)
+                .ok_or_else(|| ApiError::new("IMAGE_TOO_LARGE", "stride overflow"))?;
+        }
         let total = stride
             .checked_mul(target_h)
             .and_then(|bytes| usize::try_from(bytes).ok())
@@ -1008,7 +1020,6 @@ fn scale_to_bgra(
             )
             .map_err(|e| ApiError::new("WIC", e.to_string()))?;
 
-        let stride = target_w * 4;
         let mut pixels = vec![0u8; total];
         converter
             .CopyPixels(std::ptr::null(), stride, &mut pixels)

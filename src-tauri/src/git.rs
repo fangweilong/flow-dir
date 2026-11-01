@@ -28,6 +28,10 @@ const CHILD_TIMEOUT: Duration = Duration::from_secs(3);
 /// Folders holding more repositories than this keep the plain marker on the rest.
 const CHILD_REPO_LIMIT: usize = 64;
 const CHILD_WORKERS: usize = 4;
+/// Whole-batch budget for the child probes. Each probe is capped by `CHILD_TIMEOUT`, but
+/// four workers over sixteen repositories could still keep a listing waiting for the better
+/// part of a minute on a slow disk; the remaining children then keep the plain marker.
+const CHILD_BUDGET: Duration = Duration::from_secs(3);
 
 #[derive(Serialize, Clone, Debug)]
 pub struct GitFile {
@@ -90,7 +94,13 @@ struct RootData {
     tracked: Arc<Vec<String>>,
 }
 
-type ChildCacheEntry = (Instant, Vec<GitRepo>);
+struct ChildCacheEntry {
+    at: Instant,
+    /// The child names this summary was built from, so a folder whose repository set
+    /// changed is re-probed even when the count happens to match.
+    names: Vec<String>,
+    repos: Vec<GitRepo>,
+}
 
 static ROOT_CACHE: LazyLock<Mutex<HashMap<String, RootData>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -314,7 +324,12 @@ fn toplevel(git: &PathBuf, dir: &str) -> Option<String> {
         return None;
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    let root = text.trim().trim_end_matches(['/', '\\']).replace('/', "\\");
+    // `--show-toplevel` prints `D:/` for a drive root; trimming the separator there would
+    // leave `D:`, which is a drive-relative path, not the root.
+    let mut root = text.trim().replace('/', "\\");
+    if root.len() > 3 {
+        root = root.trim_end_matches(['/', '\\']).to_string();
+    }
     (!root.is_empty()).then_some(root)
 }
 
@@ -366,17 +381,18 @@ fn unchecked_repos(names: Vec<String>) -> Vec<GitRepo> {
 }
 
 /// Summarises every direct child repository, four at a time so a folder full of projects
-/// still answers quickly. The first `CHILD_REPO_LIMIT` are probed; the rest keep the plain
-/// marker instead of a state badge. Order follows the sorted input.
+/// still answers quickly. The first `CHILD_REPO_LIMIT` are probed within `CHILD_BUDGET`;
+/// the rest and anything the budget cut off keep the plain marker instead of a state badge.
+/// Order follows the sorted input.
 fn repo_states(git: &Path, parent: &str, names: Vec<String>) -> Vec<GitRepo> {
     let mut repos = unchecked_repos(names.clone());
     // Re-entering a folder must not re-probe every child repository: a short TTL keeps
     // navigation instant while still catching edits made outside the app.
     let key = path_key(parent);
     if let Ok(cache) = CHILD_CACHE.lock() {
-        if let Some((at, cached)) = cache.get(&key) {
-            if at.elapsed() < CHILD_CACHE_TTL && cached.len() == names.len() {
-                return cached.clone();
+        if let Some(entry) = cache.get(&key) {
+            if entry.at.elapsed() < CHILD_CACHE_TTL && same_names(&entry.names, &names) {
+                return entry.repos.clone();
             }
         }
     }
@@ -386,15 +402,23 @@ fn repo_states(git: &Path, parent: &str, names: Vec<String>) -> Vec<GitRepo> {
     }
     let parent = Path::new(parent);
     let workers = CHILD_WORKERS.min(checked);
-    let names = &names;
+    let pending = &names;
+    let deadline = Instant::now() + CHILD_BUDGET;
     std::thread::scope(|scope| {
         let handles: Vec<_> = (0..workers)
             .map(|worker| {
                 scope.spawn(move || {
-                    (worker..checked)
-                        .step_by(workers)
-                        .map(|index| (index, repo_state(git, &parent.join(&names[index]))))
-                        .collect::<Vec<_>>()
+                    // The deadline is shared by the whole batch: a repository whose probe has
+                    // not started in time is left unchecked instead of stretching the
+                    // listing, because the state badge is cosmetic and is retried later.
+                    let mut states: Vec<(usize, GitRepo)> = Vec::new();
+                    for index in (worker..checked).step_by(workers) {
+                        if Instant::now() >= deadline {
+                            break;
+                        }
+                        states.push((index, repo_state(git, &parent.join(&pending[index]))));
+                    }
+                    states
                 })
             })
             .collect();
@@ -407,13 +431,30 @@ fn repo_states(git: &Path, parent: &str, names: Vec<String>) -> Vec<GitRepo> {
         }
     });
     if let Ok(mut cache) = CHILD_CACHE.lock() {
-        cache.retain(|_, (at, _)| at.elapsed() < CHILD_CACHE_TTL);
+        cache.retain(|_, entry| entry.at.elapsed() < CHILD_CACHE_TTL);
         if cache.len() >= CACHE_ENTRIES {
             cache.clear();
         }
-        cache.insert(key, (Instant::now(), repos.clone()));
+        cache.insert(
+            key,
+            ChildCacheEntry {
+                at: Instant::now(),
+                names,
+                repos: repos.clone(),
+            },
+        );
     }
     repos
+}
+
+/// Child folders are a set, not a count: a folder that swapped one repository for another
+/// must be re-probed even though the number of entries stayed the same.
+fn same_names(cached: &[String], names: &[String]) -> bool {
+    cached.len() == names.len()
+        && cached
+            .iter()
+            .zip(names)
+            .all(|(left, right)| left.eq_ignore_ascii_case(right))
 }
 
 fn repo_state(git: &Path, dir: &Path) -> GitRepo {
@@ -473,12 +514,14 @@ fn output_with_timeout(command: &mut Command, timeout: Duration) -> Option<Outpu
             Ok(Some(status)) => {
                 // A descendant (fsmonitor daemon, detached hook) can keep the inherited
                 // pipe open after `git` exits; an unbounded `join` would pin this thread
-                // forever, so the drain gets a short grace window.
-                let drain = deadline.max(Instant::now()) + Duration::from_millis(250);
+                // forever, so the drain gets a short grace window. The window starts once
+                // the child is gone: the status is already known, and a still-blocked
+                // reader must not turn a finished command into "no answer at all".
+                let drain = Instant::now() + Duration::from_millis(250);
                 return Some(Output {
                     status,
-                    stdout: collect_within(out, drain)?,
-                    stderr: collect_within(err, drain)?,
+                    stdout: collect_within(out, drain),
+                    stderr: collect_within(err, drain),
                 });
             }
             Ok(None) if Instant::now() >= deadline => {
@@ -493,18 +536,20 @@ fn output_with_timeout(command: &mut Command, timeout: Duration) -> Option<Outpu
 }
 
 /// Joins a pipe reader only if it finished before `deadline`; otherwise the thread is left
-/// to drain (or block) on its own instead of holding the caller.
-fn collect_within(
-    handle: std::thread::JoinHandle<Vec<u8>>,
-    deadline: Instant,
-) -> Option<Vec<u8>> {
+/// to drain (or block) on its own instead of holding the caller. A timeout yields empty
+/// bytes rather than `None`: the caller already has the exit status, and dropping the whole
+/// answer because a descendant still holds the pipe would report a healthy command as
+/// failed.
+fn collect_within(handle: std::thread::JoinHandle<Vec<u8>>, deadline: Instant) -> Vec<u8> {
     while !handle.is_finished() {
         if Instant::now() >= deadline {
-            return None;
+            // Dropping the handle detaches the reader, which ends on its own once the
+            // pipe is closed.
+            return Vec::new();
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    handle.join().ok()
+    handle.join().unwrap_or_default()
 }
 
 /// Splits pruned status paths into direct children and child folders, dropping duplicates

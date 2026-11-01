@@ -259,6 +259,11 @@ fn scan(
             if next < name_offset + name_len || next >= available {
                 break;
             }
+            // Records are DWORD aligned (`FILE_ID_BOTH_DIR_INFO`), so an odd `next` would
+            // hand the next iteration an unaligned `u16` slice and read undefined memory.
+            if !next.is_multiple_of(4) {
+                break;
+            }
             offset += next;
         }
         // One call per buffer chunk: enough for a progress readout without flooding IPC.

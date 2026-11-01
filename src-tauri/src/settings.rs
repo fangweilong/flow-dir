@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Runtime};
@@ -11,6 +12,16 @@ use crate::store;
 /// Set when `settings.toml` could not be parsed and the user is running on the fallback
 /// chain. The frontend asks once and shows a single toast.
 pub static CONFIG_REJECTED: AtomicBool = AtomicBool::new(false);
+
+/// Set when `settings.toml` (and its backup) existed but could not be read. Nothing is
+/// written in that case: the file is intact, only temporarily inaccessible, and replacing
+/// it with the template would discard the user's configuration.
+static LOAD_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// Whether [`load`] had to fall back to defaults because the file could not be read.
+pub fn load_failed() -> bool {
+    LOAD_FAILED.load(Ordering::Relaxed)
+}
 
 /// User-added quick-access entry.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -904,31 +915,45 @@ pub fn load<R: Runtime>(app: &AppHandle<R>) -> Settings {
     // `settings.toml` → `settings.toml.bak` → defaults. `store::write_atomic` keeps the
     // previous file under `<name>.bak`. A parse failure never writes: overwriting a
     // hand-edited file with the template loses the user's settings for good.
-    match parse_file(&path) {
+    //
+    // A *read* failure is different from both: the content may be perfectly fine and only
+    // momentarily inaccessible (another process holding it, a scanner, a disconnected
+    // profile). Defaults are returned for this run, but nothing is written, so the next
+    // launch reads the real file again.
+    let mut unreadable = false;
+    match read_settings(&path) {
         Parse::Ok(settings) => return *settings,
         Parse::Invalid => {
             CONFIG_REJECTED.store(true, Ordering::Relaxed);
             let _ = std::fs::copy(&path, dir.join("settings.rejected.toml"));
         }
+        Parse::Failed => unreadable = true,
         Parse::Missing => {}
     }
-    if let Parse::Ok(settings) = parse_file(&dir.join("settings.toml.bak")) {
-        return *settings;
+    match parse_file(&dir.join("settings.toml.bak")) {
+        Parse::Ok(settings) => return *settings,
+        Parse::Failed => unreadable = true,
+        _ => {}
     }
-    // One-time conversion from the JSON file used before TOML support.
+    // One-time conversion from the JSON file used before TOML support. Skipped while the
+    // TOML file is unreadable: `save` would rewrite a file we could not open.
     let legacy = dir.join("settings.json");
-    if let Ok(bytes) = std::fs::read(&legacy) {
-        if let Ok(settings) = serde_json::from_slice::<Settings>(&bytes) {
-            let settings = settings.normalize();
-            if save(app, &settings).is_ok() {
-                let _ = std::fs::remove_file(&legacy);
+    if !unreadable {
+        if let Ok(bytes) = std::fs::read(&legacy) {
+            if let Ok(settings) = serde_json::from_slice::<Settings>(&bytes) {
+                let settings = settings.normalize();
+                if save(app, &settings).is_ok() {
+                    let _ = std::fs::remove_file(&legacy);
+                }
+                return settings;
             }
-            return settings;
         }
     }
-    // Materialize the commented template only when there is nothing to protect.
     let defaults = Settings::default();
-    if !path.exists() {
+    if unreadable {
+        LOAD_FAILED.store(true, Ordering::Relaxed);
+    } else if !path.exists() {
+        // Materialize the commented template only when there is nothing to protect.
         let _ = save(app, &defaults);
     }
     defaults
@@ -938,6 +963,24 @@ enum Parse {
     Ok(Box<Settings>),
     Invalid,
     Missing,
+    /// The file exists (or access was denied) but could not be read.
+    Failed,
+}
+
+/// Retries a transient read failure before giving up: settings are read once at startup,
+/// when a backup agent or antivirus is the most likely momentary holder of the file.
+fn read_settings(path: &std::path::Path) -> Parse {
+    const RETRIES: usize = 3;
+    const RETRY_DELAY: Duration = Duration::from_millis(40);
+    let mut parsed = parse_file(path);
+    for _ in 0..RETRIES {
+        if !matches!(parsed, Parse::Failed) {
+            break;
+        }
+        std::thread::sleep(RETRY_DELAY);
+        parsed = parse_file(path);
+    }
+    parsed
 }
 
 fn parse_file(path: &std::path::Path) -> Parse {
@@ -946,7 +989,8 @@ fn parse_file(path: &std::path::Path) -> Parse {
             Ok(file) => Parse::Ok(Box::new(Settings::from(file).normalize())),
             Err(_) => Parse::Invalid,
         },
-        Err(_) => Parse::Missing,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Parse::Missing,
+        Err(_) => Parse::Failed,
     }
 }
 
@@ -960,7 +1004,18 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), A
     let dir = store::config_dir(app)?;
     std::fs::create_dir_all(&dir).map_err(|e| ApiError::new("CONFIG_DIR", e.to_string()))?;
     let path = dir.join(FILE);
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|_| TEMPLATE.to_string());
+    // Only a missing file starts from the template. Falling back on *any* read error would
+    // write the template over a file that merely could not be opened, wiping real settings.
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => TEMPLATE.to_string(),
+        Err(err) => {
+            return Err(ApiError::new(
+                "CONFIG_READ",
+                format!("{}: {err}", path.display()),
+            ));
+        }
+    };
     let mut doc = match text.parse::<DocumentMut>() {
         Ok(doc) => doc,
         Err(_) => {

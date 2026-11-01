@@ -15,6 +15,8 @@ use crate::error::ApiError;
 const BATCH: usize = 50;
 const ATTR_HIDDEN: u32 = 0x2;
 const ATTR_SYSTEM: u32 = 0x4;
+/// `FILE_ATTRIBUTE_REPARSE_POINT`; set on junctions, volume mount points and symlinks.
+const ATTR_REPARSE_POINT: u32 = 0x400;
 
 #[derive(Default)]
 pub struct SearchState {
@@ -206,9 +208,27 @@ fn content_snippet(path: &Path, regex: &Regex, max_bytes: u64, cancel: &AtomicBo
     if crate::preview::is_cloud_placeholder(&meta) {
         return None;
     }
-    let file = std::fs::File::open(path).ok()?;
+    let mut file = std::fs::File::open(path).ok()?;
+    // A single `read_to_end` on a large file cannot be interrupted, so the buffer is filled
+    // in blocks and the cancel flag is sampled between them; a search abandoned over a slow
+    // disk therefore stops within one block instead of after the whole file.
     let mut bytes = Vec::new();
-    file.take(max_bytes).read_to_end(&mut bytes).ok()?;
+    let mut chunk = [0u8; 64 * 1024];
+    let mut remaining = max_bytes;
+    while remaining > 0 {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        let want = remaining.min(chunk.len() as u64) as usize;
+        match file.read(&mut chunk[..want]) {
+            Ok(0) => break,
+            Ok(read) => {
+                bytes.extend_from_slice(&chunk[..read]);
+                remaining -= read as u64;
+            }
+            Err(_) => break,
+        }
+    }
     if cancel.load(Ordering::Relaxed) {
         return None;
     }
@@ -357,16 +377,27 @@ pub fn run(
             .skip_hidden(false)
             .follow_links(false)
             .process_read_dir(move |_depth, _path, _state, children| {
-                if hidden {
-                    return;
-                }
                 children.retain(|child| {
                     child
                         .as_ref()
                         .map(|entry| {
                             entry
                                 .metadata()
-                                .map(|meta| meta.file_attributes() & (ATTR_HIDDEN | ATTR_SYSTEM) == 0)
+                                .map(|meta| {
+                                    // A reparse-point directory is an alias for another
+                                    // subtree: `AppData\Local\Application Data` points at
+                                    // its own parent, and a volume mount would silently
+                                    // cross into another drive. Prune the directory, but
+                                    // keep reparse-point *files* (plain shortcuts/links),
+                                    // which cannot cause a runaway walk.
+                                    if meta.is_dir()
+                                        && meta.file_attributes() & ATTR_REPARSE_POINT != 0
+                                    {
+                                        return false;
+                                    }
+                                    hidden
+                                        || meta.file_attributes() & (ATTR_HIDDEN | ATTR_SYSTEM) == 0
+                                })
                                 .unwrap_or(true)
                         })
                         .unwrap_or(true)
