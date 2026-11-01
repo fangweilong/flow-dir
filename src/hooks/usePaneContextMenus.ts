@@ -4,6 +4,7 @@ import type { MenuItem } from '../ContextMenu'
 import type { MenuPoint } from '../PaneView'
 import type { Drive, Entry, Lang, ListData } from '../types'
 import { filterMatches } from '../types'
+import { samePath } from '../workspace'
 import type { Workspace } from '../workspace'
 import type { ShortcutId } from '../shortcuts'
 import type { Translate } from '../i18n'
@@ -111,6 +112,8 @@ export function usePaneContextMenus({
   const [pendingNew, setPendingNew] = useState<{
     paneId: string
     tabId: string
+    /** Folder the shell menu was opened in; navigating away invalidates the marker. */
+    path: string
     before: Set<string>
   } | null>(null)
 
@@ -124,8 +127,15 @@ export function usePaneContextMenus({
 
   useEffect(() => {
     if (!pendingNew) return
-    const entries = listData[pendingNew.tabId]?.entries
-    if (!entries) return
+    const live = wsRef.current?.tabs[pendingNew.tabId]
+    // The tab may be closed or sent elsewhere while the shell dialog is open; a rescan of
+    // a different folder must not be read as the created item.
+    if (!live || !samePath(live.path, pendingNew.path)) return
+    const listing = listData[pendingNew.tabId]
+    // Wait for the finished scan: a partial listing cannot tell a new entry from one the
+    // enumeration has simply not reached yet.
+    if (!listing || listing.loading) return
+    const entries = listing.entries
     const created = entries.filter((entry) => !pendingNew.before.has(entry.name))
     if (!created.length) return
     setPendingNew(null)
@@ -139,7 +149,7 @@ export function usePaneContextMenus({
       anchor: entry.name,
     }))
     startRename(pendingNew.paneId, entry.name)
-  }, [listData, pendingNew, startRename, update])
+  }, [listData, pendingNew, startRename, update, wsRef])
 
   const rowFallback = useCallback(
     (paneId: string, entry: Entry, paths: string[]): MenuItem[] => {
@@ -458,10 +468,12 @@ export function usePaneContextMenus({
         blankFallbackMenu(paneId, point)
         return
       }
+      // Captured once: the shell dialog is modal and this folder is what the marker means.
+      const dir = tab.path
       const dpr = window.devicePixelRatio || 1
       const before = new Set((listData[tab.id]?.entries ?? []).map((entry) => entry.name))
       void shellMenuBackgroundShow(
-        tab.path,
+        dir,
         Math.round(point.screenX * dpr),
         Math.round(point.screenY * dpr),
         point.shiftKey,
@@ -471,10 +483,10 @@ export function usePaneContextMenus({
       )
         .then((outcome) => {
           if (outcome.action === 'toggleHidden') toggleHidden(paneId)
-          else if (outcome.action === 'findDuplicates') setFileTools({ mode: 'dup', root: tab.path })
+          else if (outcome.action === 'findDuplicates') setFileTools({ mode: 'dup', root: dir })
           else if (outcome.action === 'compare') setCompareOpen(true)
           else if (outcome.action === 'newItem') {
-            setPendingNew({ paneId, tabId: tab.id, before })
+            setPendingNew({ paneId, tabId: tab.id, path: dir, before })
             refreshPanes()
           } else if (outcome.invoked) refreshPanes()
         })

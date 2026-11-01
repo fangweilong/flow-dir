@@ -807,7 +807,7 @@ export default function App() {
               else openTarget(item.path)
             }}
             onOpen={(folder) => navigate(activeTab.id, folder)}
-            onDelete={(paths) => runOp('delete', paths)}
+            onDelete={(paths, done) => runOp('delete', paths, { onDone: done })}
           />
         </Suspense>
       )}

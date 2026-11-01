@@ -1,4 +1,4 @@
-import type { Translate } from '../../i18n'
+import { describeError, type Translate } from '../../i18n'
 import type { CompareCount, CompareEntry, CompareHashResult, CompareStatus } from '../../types'
 import { FileIcon } from '../../icons'
 import { formatSize, joinPath } from '../../paths'
@@ -67,8 +67,15 @@ export function CompareTableView({
           {entry.name}
         </span>
         {side === 'left' && count && (
-          <span className="shrink-0 text-[0.625rem] text-muted-2" title={t('compare.countsHint')}>
-            {count.leftOnly}/{count.different}/{count.rightOnly}
+          <span
+            className={`shrink-0 text-[0.625rem] ${
+              count.error ? 'text-rose-600 dark:text-rose-400' : 'text-muted-2'
+            }`}
+            title={count.error ? describeError(t, count.error) : t('compare.countsHint')}
+          >
+            {/* A failed recursive count must not read as "0/0/0" — that looks like an
+                empty folder instead of a level that could not be scanned. */}
+            {count.error ? '!' : `${count.leftOnly}/${count.different}/${count.rightOnly}`}
           </span>
         )}
         {side === 'left' && canEnter && (

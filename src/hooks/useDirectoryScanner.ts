@@ -16,7 +16,7 @@ import { EMPTY_LIST, emptyList } from '../types'
 import type { Drive, Entry, GitStatus, ListData, SortState } from '../types'
 import type { Settings } from '../persist'
 import { isDir, markVirtualRoot, pathKey } from '../paths'
-import { pushHistory, stepHistory } from '../workspace'
+import { pushHistory, samePath, stepHistory } from '../workspace'
 import type { Workspace } from '../workspace'
 
 const KEEP_TABS = 8
@@ -108,8 +108,13 @@ export function useDirectoryScanner({
         }))
       }
       void cancelDir(tabId).catch(() => undefined)
+      // A tab that was live when this enumeration started and has since been closed must
+      // not get its late batches written back into `listData`. A tab that appeared after
+      // the scan began (a launch, before `wsRef` caught up) is not checked this way.
+      const liveAtStart = Boolean(wsRef.current?.tabs[tabId])
       listDir(path, tabId, gen, sort.key, sort.dir, hidden, (batch) => {
         if (gens.current[tabId] !== gen) return
+        if (liveAtStart && !wsRef.current?.tabs[tabId]) return
         // `list_dir` returns as soon as it detaches the enumeration, so the IPC promise
         // settles before any batch arrives: only the final batch means the scan is over.
         if (batch.done) scanning.current.delete(tabId)
@@ -175,7 +180,7 @@ export function useDirectoryScanner({
         }))
       })
     },
-    [],
+    [wsRef],
   )
 
   const update = useCallback((tabId: string, fn: (d: ListData) => ListData) => {
@@ -189,7 +194,7 @@ export function useDirectoryScanner({
       const pane = Object.values(current.panes).find((p) => p.tabIds.includes(tabId))
       const tab = current.tabs[tabId]
       if (!pane || !tab) return
-      if (tab.path === next) return
+      if (samePath(tab.path, next)) return
       setWs((prev) => {
         const live = prev?.tabs[tabId]
         if (!prev || !live) return prev

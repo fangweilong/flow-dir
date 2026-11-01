@@ -172,9 +172,14 @@ export function useLaunchAndTray({
   }, [ws])
 
   const recentKey = recentDirs.join('\n')
+  // The list is rebuilt on every workspace change, but the tray only cares when the
+  // contents change: read it from a ref so focusing panes or switching tabs does not
+  // rebuild the native menu.
+  const recentDirsRef = useRef(recentDirs)
+  recentDirsRef.current = recentDirs
   useEffect(() => {
-    void trayRecent(recentDirs).catch(() => undefined)
-  }, [recentKey, recentDirs])
+    void trayRecent(recentDirsRef.current).catch(() => undefined)
+  }, [recentKey])
 
   return {
     pendingSelect,

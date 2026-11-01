@@ -190,7 +190,8 @@ export function useDragAndDrop({
       const finish = (e: PointerEvent | null) => {
         detach()
         setRowDrag(null)
-        if (!e) return
+        // A click without any pointermove is a selection, not a drop.
+        if (!started || !e) return
         const target = resolveDropTarget(e.clientX, e.clientY)
         if (!target) return
         const forced = e.ctrlKey || e.metaKey ? 'copy' : e.shiftKey ? 'move' : null

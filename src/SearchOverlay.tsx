@@ -41,8 +41,8 @@ type Props = {
   onActivate: (item: SearchItem) => void
   /** Reveals the containing folder (Alt+Enter). */
   onOpen: (folder: string) => void
-  /** Recycle-bin delete with the app's undo stack behind it. */
-  onDelete: (paths: string[]) => void
+  /** Recycle-bin delete with the app's undo stack behind it; reports success through `onDone`. */
+  onDelete: (paths: string[], onDone?: (ok: boolean) => void) => void
 }
 
 export function SearchOverlay({
@@ -156,8 +156,9 @@ export function SearchOverlay({
     }
     return sortResults(items, sort, collator)
   }, [items, sort, collator, permutation])
-  const activeIndex = Math.max(0, ordered.findIndex((item) => item.path === activePath))
-  const current = ordered[activeIndex]
+  /** -1 while no row is active (cleared query, deleted hit); never a fake first row. */
+  const activeIndex = ordered.findIndex((item) => item.path === activePath)
+  const current = activeIndex >= 0 ? ordered[activeIndex] : undefined
 
   useEffect(() => store(FILTER_KEY, uiFilter), [uiFilter])
   useEffect(() => store(LIMIT_KEY, limit), [limit])
@@ -242,9 +243,10 @@ export function SearchOverlay({
           }
           if (batch.items.length) {
             // Rows deleted from this panel are gone from disk; the accumulator must not
-            // resurrect them when a later batch of the same scan arrives.
+            // resurrect them when a later batch of the same scan arrives, and rows queued
+            // for deletion mid-scan must disappear from the visible set as well.
             acc.push(...batch.items.filter((item) => !doomed.current.has(item.path)))
-            setItems(acc.slice())
+            setItems(acc.filter((item) => !doomed.current.has(item.path)))
           }
           setProvider(batch.provider)
           if (batch.done) setLoading(false)
@@ -318,13 +320,17 @@ export function SearchOverlay({
   const deleteSelected = () => {
     if (!selectedPaths.length) return
     if (!window.confirm(t('search.deleteConfirm', { count: selectedPaths.length }))) return
-    onDelete(selectedPaths)
-    // The rows are gone from disk; keeping them would allow a second delete or an
-    // activate that fails with NOT_FOUND.
-    const gone = new Set(selectedPaths)
-    for (const path of selectedPaths) doomed.current.add(path)
-    setItems((prev) => prev.filter((item) => !gone.has(item.path)))
-    setSelected(new Set())
+    const targets = selectedPaths
+    onDelete(targets, (ok) => {
+      // Only a confirmed delete drops the rows: a failure leaves the hits on screen so the
+      // user can retry, and the undo entry stays alive in the delete stack.
+      if (!ok) return
+      const gone = new Set(targets)
+      for (const path of targets) doomed.current.add(path)
+      setItems((prev) => prev.filter((item) => !gone.has(item.path)))
+      setSelected(new Set())
+      if (activePath !== null && gone.has(activePath)) setActivePath(null)
+    })
   }
 
   const chips: { label: string; clear: () => void }[] = []

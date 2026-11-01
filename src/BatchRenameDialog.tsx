@@ -28,9 +28,14 @@ function splitName(name: string): { stem: string; ext: string } {
 }
 
 function invalidName(name: string): boolean {
-  const { stem } = splitName(name)
+  // Windows reserves a device name when the segment before the *first* dot matches, so
+  // `con.tar.gz` is as blocked as `con`; the archive writer resolves the stem the same way.
+  const stem = name.split('.')[0]
   return (
     !name ||
+    // The backend measures the same limit in UTF-16 code units (`encode_utf16`), which is
+    // what JS `length` counts, so a 256-unit name would fail after the preview said "ok".
+    name.length > 255 ||
     ILLEGAL.test(name) ||
     /[ .]$/.test(name) ||
     name === '.' ||
@@ -56,6 +61,8 @@ export function BatchRenameDialog({ dir, names, lang, onConfirm, onClose }: Prop
   const [conflicts, setConflicts] = useState<Set<number>>(new Set())
   /** False until the existence probe for the current preview has answered. */
   const [probed, setProbed] = useState(false)
+  /** True when the last existence probe failed, so confirmation stays disabled visibly. */
+  const [probeError, setProbeError] = useState(false)
   const findRef = useRef<HTMLInputElement>(null)
   const templateRef = useRef<HTMLInputElement>(null)
 
@@ -118,6 +125,7 @@ export function BatchRenameDialog({ dir, names, lang, onConfirm, onClose }: Prop
   useEffect(() => {
     let stale = false
     setProbed(false)
+    setProbeError(false)
     if (!changedTargets.length) {
       setConflicts(new Set())
       setProbed(true)
@@ -140,10 +148,14 @@ export function BatchRenameDialog({ dir, names, lang, onConfirm, onClose }: Prop
       })
       setConflicts(hit)
       setProbed(true)
+      setProbeError(false)
     }).catch(() => {
       // Without an answer an overwrite cannot be ruled out; stay disabled rather than
-      // rename blind.
-      if (!stale) setProbed(false)
+      // rename blind, but record why so the footer can say it.
+      if (!stale) {
+        setProbed(false)
+        setProbeError(true)
+      }
     })
     return () => {
       stale = true
@@ -365,11 +377,13 @@ export function BatchRenameDialog({ dir, names, lang, onConfirm, onClose }: Prop
               ? t('batch.invalid')
               : needsDecision
                 ? t('batch.conflictBlocked')
-                : effective.length === 0
-                  ? t('batch.unchanged')
-                  : names.length > effective.length
-                    ? t('batch.skipped', { count: names.length - effective.length })
-                    : ''}
+                : probeError
+                  ? t('batch.probeFailed')
+                  : effective.length === 0
+                    ? t('batch.unchanged')
+                    : names.length > effective.length
+                      ? t('batch.skipped', { count: names.length - effective.length })
+                      : ''}
           </span>
           <button
             type="button"

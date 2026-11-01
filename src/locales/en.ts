@@ -603,6 +603,7 @@ export const en: Record<BaseKey, string> = {
   'batch.conflictSkip': 'Skip conflicting',
   'batch.conflictNumber': 'Append a number',
   'batch.conflictBlocked': 'Choose how to resolve conflicts (nothing is overwritten)',
+  'batch.probeFailed': 'Could not check whether the target exists; please retry',
   'confirm.recycleTitle': 'Move to Recycle Bin',
   'confirm.recycle': 'Move {count} item(s) to the Recycle Bin? They can be restored from there.',
   'confirm.recycleAction': 'Move to Recycle Bin',

@@ -53,16 +53,20 @@ export function SyncPreviewModal({
               <option value="both">{t('compare.strategyBoth')}</option>
             </select>
           </label>
-          <label className="flex items-center gap-1">
-            <input
-              type="checkbox"
-              checked={deleteExtras}
-              onChange={(e) => {
-                setDeleteExtras(e.target.checked)
-              }}
-            />
-            {t('compare.deleteExtra')}
-          </label>
+          {/* "Both" has no extra to remove: a two-way merge keeps whatever is on each
+              side, so the toggle would only invite data loss. */}
+          {strategy !== 'both' && (
+            <label className="flex items-center gap-1">
+              <input
+                type="checkbox"
+                checked={deleteExtras}
+                onChange={(e) => {
+                  setDeleteExtras(e.target.checked)
+                }}
+              />
+              {t('compare.deleteExtra')}
+            </label>
+          )}
           <span className="ml-auto">
             {t('compare.actionCount', { count: plan.actions.length })}
             {plan.conflicts ? ` · ${t('compare.conflicts', { count: plan.conflicts })}` : ''}

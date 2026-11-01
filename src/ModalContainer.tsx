@@ -321,7 +321,7 @@ export function ModalContainer({
             dupConcurrency={settings.dupConcurrency}
             dupMaxMbPerSec={settings.dupMaxMbPerSec}
             dupExclude={settings.dupExclude}
-            onDelete={(paths) => runOp('delete', paths)}
+            onDelete={(paths, done) => runOp('delete', paths, { onDone: done })}
             onToast={showToast}
             onClose={() => setFileTools(null)}
           />

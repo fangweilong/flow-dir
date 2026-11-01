@@ -371,6 +371,32 @@ export function useFileOperations({
                 failed: report.failedTotal,
               }),
             )
+            // A second "retry elevated" click must only replay what still failed, or the
+            // items that already landed would run a second time.
+            const landed = new Set(keep)
+            const failedIdxNew = retry.sources
+              .map((_, index) => index)
+              .filter((index) => !landed.has(index))
+            opRequests.current[opId] = {
+              ...retry,
+              sources: failedIdxNew.map((index) => retry.sources[index]),
+              newNames: retry.newNames
+                ? failedIdxNew.map((index) => retry.newNames![index])
+                : undefined,
+            }
+            setOps((prev) => {
+              const current = prev[opId]
+              if (!current) return prev
+              return {
+                ...prev,
+                [opId]: {
+                  ...current,
+                  failed: report.failed,
+                  failedCount: report.failedTotal,
+                  failedIndices: failedIdxNew,
+                },
+              }
+            })
           } else {
             showToast(t('op.done'))
             delete opRequests.current[opId]
@@ -628,19 +654,22 @@ export function useFileOperations({
         case 'delete': {
           try {
             const report = await restoreRecycle(entry.paths)
-            // `missing` means the item left the bin; `failed` means it is still there but
-            // the shell verb refused (locked target, permissions), so a retry can work.
-            const failedCount = report.missing.length + report.failed.length
-            if (failedCount) {
-              showToast(t('undo.partial', { ok: report.restored.length, failed: failedCount }))
+            // `missing` means the item left the bin and no retry can bring it back, so it
+            // counts as handled; `failed` means it is still there but the shell verb
+            // refused (locked target, permissions), so a retry can work.
+            const handled = report.missing.length
+            const retryable = report.failed.length
+            if (handled + retryable > 0) {
+              showToast(t('undo.partial', { ok: report.restored.length, failed: handled + retryable }))
             } else {
               showToast(t('undo.done'))
             }
             for (const path of report.restored) invalidateTree(parentPath(path))
             refreshPanes()
-            // Entries that no longer exist in the Recycle Bin can never be restored;
-            // reporting failure would block every older entry behind this one.
-            return true
+            // A retryable failure keeps the entry on the undo stack: popping it here would
+            // drop the only handle on items still sitting in the bin. Missing entries never
+            // block older history, since no later attempt could restore them.
+            return retryable === 0
           } catch (e: unknown) {
             showToast(t('op.failed', { code: t(errorKey(errorCode(e))) }))
             return false
@@ -666,7 +695,11 @@ export function useFileOperations({
     void applyUndo(entry)
       .then((ok) => {
         if (!ok) return
-        undoStack.current.pop()
+        // The stack can grow or be trimmed while the reversal is in flight; removing by
+        // identity keeps a stale pop from dropping the wrong entry.
+        const at = undoStack.current.lastIndexOf(entry)
+        if (at < 0) return
+        undoStack.current.splice(at, 1)
         redoStack.current.push(entry)
         while (redoStack.current.length > undoLimit()) redoStack.current.shift()
         setHistoryEpoch((epoch) => epoch + 1)
@@ -700,7 +733,9 @@ export function useFileOperations({
     })
       .then((ok: boolean) => {
         if (!ok) return
-        redoStack.current.pop()
+        const at = redoStack.current.lastIndexOf(entry)
+        if (at < 0) return
+        redoStack.current.splice(at, 1)
         undoStack.current.push(entry)
         while (undoStack.current.length > undoLimit()) undoStack.current.shift()
         setHistoryEpoch((epoch) => epoch + 1)
@@ -717,13 +752,16 @@ export function useFileOperations({
       if (index === -1) return
       undoBusy.current = true
       try {
-        const count = undoStack.current.length - index
-        for (let i = 0; i < count; i += 1) {
+        // Undo newest-first down to the requested entry. `targetId` is re-resolved every
+        // round: the stack may have been trimmed while the previous reversal was in flight.
+        for (;;) {
+          if (!undoStack.current.some((entry) => entry.id === targetId)) break
           const entry = undoStack.current[undoStack.current.length - 1]
           if (!entry) break
           const ok = await applyUndo(entry)
           if (!ok) break
-          undoStack.current.pop()
+          const current = undoStack.current.lastIndexOf(entry)
+          if (current >= 0) undoStack.current.splice(current, 1)
           redoStack.current.push(entry)
           while (redoStack.current.length > undoLimit()) redoStack.current.shift()
         }

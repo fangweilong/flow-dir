@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { NumberField } from './components/NumberField'
 import { dupStart, exportText, hashStart, pickFolder, toolCancel, toolPause } from './api'
-import { errorKey, makeT, type Translate } from './i18n'
+import { describeError, makeT, type Translate } from './i18n'
 import type { DupGroup, DupProgress, HashProgress } from './types'
 import type { Lang } from './types'
 
@@ -16,7 +16,11 @@ type Props = {
   dupConcurrency: number
   dupMaxMbPerSec: number
   dupExclude: string[]
-  onDelete: (paths: string[]) => void
+  /**
+   * Recycle-bin delete. `onDone` carries the operation's success flag so a caller can drop
+   * its own rows only when the items are really gone; this panel closes on confirm instead.
+   */
+  onDelete: (paths: string[], onDone?: (ok: boolean) => void) => void
   onToast: (text: string) => void
   onClose: () => void
 }
@@ -148,11 +152,7 @@ export function FileToolsPanel({
       }
     } catch (err) {
       setRunning(false)
-      setError(
-        err && typeof err === 'object' && 'code' in err
-          ? t(errorKey(String((err as { code: string }).code)))
-          : String(err),
-      )
+      setError(describeError(t, err))
     }
   }
 
@@ -246,7 +246,7 @@ export function FileToolsPanel({
       const written = await exportText(dir, name, content)
       onToast(t('tools.exported', { path: written }))
     } catch (err) {
-      setError(String(err))
+      setError(describeError(t, err))
     } finally {
       setExporting(false)
     }

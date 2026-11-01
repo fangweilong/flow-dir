@@ -35,7 +35,9 @@ export function FolderPickerDialog({ title, initial, lang, onPick, onClose }: Pr
     let alive = true
     void drives()
       .then((list) => {
-        if (alive) setRoots(list.filter((drive) => drive.available))
+        // Locations are always listed: they carry no volume, so `available` is false by
+        // construction and a dead share only surfaces when opening it fails.
+        if (alive) setRoots(list.filter((drive) => drive.available || drive.kind === 'location'))
       })
       .catch(() => undefined)
     return () => {

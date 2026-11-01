@@ -89,6 +89,9 @@ export function DrivesOverview({
         const usedRatio = sized ? Math.min(1, used / drive.total) : 0
         const low = sized && drive.free / drive.total < 0.1
         const isSelected = selectedRoot === drive.root
+        // Locations (shares/URLs) report `available: false` because they have no volume to
+        // probe; they are not unavailable media, so availability must not dim them.
+        const unavailable = drive.kind !== 'location' && !drive.available
         return (
           <div
             key={`${drive.kind}:${drive.name}`}
@@ -101,17 +104,17 @@ export function DrivesOverview({
               setSelectedRoot(drive.root)
               onDriveRowMenu(drive, pointOf(ev))
             }}
-            title={drive.available ? drive.root : `${drive.root} · ${t('drive.unavailable')}`}
+            title={unavailable ? `${drive.root} · ${t('drive.unavailable')}` : drive.root}
             style={{ height: rowHeight, gridTemplateColumns: driveGrid }}
             className={`grid cursor-default items-center gap-2 border-b border-row-line px-1.5 transition-colors ${
               isSelected
                 ? 'bg-surface-3 ring-1 ring-inset ring-blue-500/50'
                 : 'hover:bg-surface-3'
-            } ${drive.available ? '' : 'text-muted-2'}`}
+            } ${unavailable ? 'text-muted-2' : ''}`}
           >
             <div className="flex min-w-0 items-center gap-1.5">
               <FileIcon name={drive.name} dir path={drive.root} scale={listScale} size={iconPx} />
-              <span className={`truncate font-medium ${drive.available ? 'text-fg-strong' : 'text-muted'}`}>
+              <span className={`truncate font-medium ${unavailable ? 'text-muted' : 'text-fg-strong'}`}>
                 {drive.name}
               </span>
             </div>

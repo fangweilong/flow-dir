@@ -128,6 +128,9 @@ export function useAppSettings({
   const updateSettings = useCallback((next: Settings) => {
     setSettings(next)
     settingsRef.current = next
+    // Until the bootstrap load resolves, `settings` is still DEFAULT_SETTINGS; saving a
+    // change now would write those defaults over every field already on disk.
+    if (!optionsRef.current.readyRef.current) return
     pendingSettings.current = next
     if (settingsSaveTimer.current !== null) window.clearTimeout(settingsSaveTimer.current)
     settingsSaveTimer.current = window.setTimeout(() => {

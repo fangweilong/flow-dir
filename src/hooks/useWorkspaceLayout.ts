@@ -515,22 +515,38 @@ export function useWorkspaceLayout({
       const startY = ev.clientY
       let started = false
 
+      let detach = () => {}
       const move = (e: PointerEvent) => {
         if (!started && Math.hypot(e.clientX - startX, e.clientY - startY) < 6) return
         started = true
         setDrag({ tabId, fromPane, x: e.clientX, y: e.clientY, started: true, target: hitTest(e.clientX, e.clientY) })
       }
-      const up = (e: PointerEvent) => {
-        window.removeEventListener('pointermove', move)
-        window.removeEventListener('pointerup', up)
-        if (started) {
-          const target = hitTest(e.clientX, e.clientY)
+      // `point` is null for Escape and OS-driven pointercancel: those cancel the gesture
+      // and must never drop the tab.
+      const finish = (point: { x: number; y: number } | null) => {
+        detach()
+        if (point && started) {
+          const target = hitTest(point.x, point.y)
           if (target) dropTab(tabId, fromPane, target)
         }
+        started = false
         setDrag(null)
+      }
+      const up = (e: PointerEvent) => finish({ x: e.clientX, y: e.clientY })
+      const cancel = () => finish(null)
+      const onKey = (e: KeyboardEvent) => {
+        if (e.key === 'Escape') finish(null)
+      }
+      detach = () => {
+        window.removeEventListener('pointermove', move)
+        window.removeEventListener('pointerup', up)
+        window.removeEventListener('pointercancel', cancel)
+        window.removeEventListener('keydown', onKey)
       }
       window.addEventListener('pointermove', move)
       window.addEventListener('pointerup', up)
+      window.addEventListener('pointercancel', cancel)
+      window.addEventListener('keydown', onKey)
     },
     [hitTest, dropTab],
   )

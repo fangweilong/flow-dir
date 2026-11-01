@@ -72,6 +72,9 @@ export function usePaneKeyboard({
   const [typed, setTyped] = useState('')
   const typeAheadRef = useRef<HTMLInputElement>(null)
   const typeAheadTimer = useRef<number | null>(null)
+  // Keyboard cursor. Once Shift+Arrow extends the range the selection anchor stays put,
+  // so the row the arrows travel from must be tracked separately from `anchorIdx`.
+  const cursorRef = useRef<{ tabId: string; name: string } | null>(null)
 
   useEffect(
     () => () => {
@@ -86,6 +89,14 @@ export function usePaneKeyboard({
     setTyped('')
   }, [])
 
+  const cursorIndex = useCallback(() => {
+    const cursor = cursorRef.current
+    // A cleared selection (blank click, external reset) also drops the cursor.
+    if (!cursor || !visibleSelected.size || !tab || cursor.tabId !== tab.id) return anchorIdx
+    const index = view.findIndex((e) => e.name === cursor.name)
+    return index >= 0 ? index : anchorIdx
+  }, [anchorIdx, tab, view, visibleSelected])
+
   const typeAhead = useCallback(
     (char: string) => {
       if (!tab) return
@@ -99,6 +110,7 @@ export function usePaneKeyboard({
       )
       const entry = view[hit]
       if (!entry) return
+      cursorRef.current = { tabId: tab.id, name: entry.name }
       update(tab.id, (d) => ({
         ...d,
         anchor: entry.name,
@@ -106,13 +118,16 @@ export function usePaneKeyboard({
       }))
       virtualizer.scrollToIndex(hit, { align: 'auto' })
     },
-    [anchorIdx, clearTypeAhead, tab, typed, update, view, virtualizer],
+    [clearTypeAhead, tab, typed, update, view, virtualizer],
   )
 
   const selectRow = useCallback(
     (index: number, ev: React.MouseEvent) => {
       const entry = view[index]
       if (!entry || !tab) return
+      // A click places the keyboard cursor on the clicked row, while Shift+click keeps
+      // the anchor so the range can be re-extended from the same origin.
+      cursorRef.current = { tabId: tab.id, name: entry.name }
       update(tab.id, (d) => {
         if (ev.shiftKey && anchorIdx >= 0) {
           const [a, b] = [Math.min(anchorIdx, index), Math.max(anchorIdx, index)]
@@ -211,6 +226,7 @@ export function usePaneKeyboard({
 
       if (matchBinding(ev, keys.selectAll)) {
         ev.preventDefault()
+        cursorRef.current = view[0] ? { tabId: tab.id, name: view[0].name } : null
         update(tab.id, (d) => ({
           ...d,
           selected: new Set(view.map((e) => e.name)),
@@ -222,18 +238,23 @@ export function usePaneKeyboard({
       const moveTo = (next: number, extend: boolean) => {
         if (!view.length) return
         const target = Math.max(0, Math.min(view.length - 1, next))
-        const base = anchorIdx < 0 ? target : anchorIdx
-        update(tab.id, (d) => {
-          if (!extend) {
-            return { ...d, anchor: view[target].name, selected: new Set([view[target].name]) }
-          }
+        const name = view[target].name
+        if (!extend) {
+          cursorRef.current = { tabId: tab.id, name }
+          update(tab.id, (d) => ({ ...d, anchor: name, selected: new Set([name]) }))
+        } else {
+          // Extend from the original anchor: the cursor moves, the anchor does not, so
+          // repeated Shift+Arrow keeps growing the range instead of shifting it. With no
+          // anchor at all the first extend seeds it once, otherwise it never grows.
+          const anchored = anchorIdx >= 0
+          const base = anchored ? anchorIdx : target
           const [a, b] = [Math.min(base, target), Math.max(base, target)]
-          return {
-            ...d,
-            anchor: view[target].name,
-            selected: new Set(view.slice(a, b + 1).map((e) => e.name)),
-          }
-        })
+          const selection = new Set(view.slice(a, b + 1).map((e) => e.name))
+          cursorRef.current = { tabId: tab.id, name }
+          update(tab.id, (d) =>
+            anchored ? { ...d, selected: selection } : { ...d, anchor: name, selected: selection },
+          )
+        }
         virtualizer.scrollToIndex(target, { align: 'auto' })
       }
 
@@ -241,7 +262,8 @@ export function usePaneKeyboard({
         ev.preventDefault()
         if (!view.length) return
         const step = ev.key === 'ArrowDown' ? 1 : -1
-        const current = anchorIdx < 0 ? (step > 0 ? -1 : 0) : anchorIdx
+        const at = cursorIndex()
+        const current = at < 0 ? (step > 0 ? -1 : 0) : at
         moveTo(current + step, ev.shiftKey)
         return
       }
@@ -257,7 +279,8 @@ export function usePaneKeyboard({
           1,
           Math.floor((scrollRef.current?.clientHeight ?? rowHeight * 10) / rowHeight) - 1,
         )
-        const current = anchorIdx < 0 ? 0 : anchorIdx
+        const at = cursorIndex()
+        const current = at < 0 ? 0 : at
         const next =
           ev.key === 'Home'
             ? 0
@@ -276,6 +299,7 @@ export function usePaneKeyboard({
 
       if (ev.key === 'Escape') {
         ev.preventDefault()
+        cursorRef.current = null
         update(tab.id, (d) => ({ ...d, selected: new Set(), anchor: '' }))
         return
       }
@@ -331,6 +355,7 @@ export function usePaneKeyboard({
           const rect = scrollRef.current?.getBoundingClientRect()
           if (rect) {
             ev.preventDefault()
+            cursorRef.current = null
             update(tab.id, (d) => ({ ...d, selected: new Set(), anchor: '' }))
             onBlankContextMenu({
               clientX: rect.left + 40,
@@ -367,6 +392,7 @@ export function usePaneKeyboard({
         const inverted = view
           .map((e) => e.name)
           .filter((name) => !current.has(name))
+        cursorRef.current = inverted[0] ? { tabId: tab.id, name: inverted[0] } : null
         update(tab.id, (d) => ({
           ...d,
           selected: new Set(inverted),
@@ -388,6 +414,7 @@ export function usePaneKeyboard({
       visibleSelected,
       view,
       anchorIdx,
+      cursorIndex,
       onProperties,
       onHistoryMove,
       onNavigate,

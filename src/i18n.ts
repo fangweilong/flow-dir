@@ -64,3 +64,12 @@ export function driveKindLabel(t: Translate, kind: string): string {
       return ''
   }
 }
+
+/** Localized text for an `ApiError`-shaped rejection; non-API values keep `String(err)`. */
+export function describeError(t: Translate, err: unknown): string {
+  const code =
+    err && typeof err === 'object' && 'code' in err && typeof err.code === 'string'
+      ? err.code
+      : null
+  return code ? t(errorKey(code)) : String(err)
+}

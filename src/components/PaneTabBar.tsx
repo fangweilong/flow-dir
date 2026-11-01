@@ -40,6 +40,12 @@ export function PaneTabBar({
   pointOf,
   draggingTabId,
 }: PaneTabBarProps) {
+  // Tabs that fit again leave no trigger behind; the dropdown and its backdrop must not
+  // linger invisibly and reappear on the next overflow.
+  React.useEffect(() => {
+    if (!stripOverflow) setTabListOpen(false)
+  }, [stripOverflow, setTabListOpen])
+
   return (
     <div
       data-tabbar
@@ -161,7 +167,7 @@ export function PaneTabBar({
           <path d="M8 3.5v9M3.5 8h9" strokeLinecap="round" />
         </svg>
       </button>
-      {tabListOpen && (
+      {stripOverflow && tabListOpen && (
         <>
           <div className="fixed inset-0 z-40" onMouseDown={() => setTabListOpen(false)} />
           <div

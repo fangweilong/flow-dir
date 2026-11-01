@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { compareCountsStart, compareHashStart, compareLevel, exportText, pickFolder, toolCancel } from './api'
 import type { CompareOptions } from './api'
-import { makeT, errorKey } from './i18n'
+import { makeT, describeError } from './i18n'
 import { joinPath } from './paths'
 import { BASE_FONT_SIZE, clampFontSize, clampIconSize } from './fonts'
 import { SyncPreviewModal } from './components/compare/SyncPreviewModal'
@@ -88,14 +88,6 @@ export function ComparePanel({
   onSync,
 }: Props) {
   const t = makeT(lang)
-  /** `invoke` rejects with `{ code, detail }`; `String(e)` would show `[object Object]`. */
-  const describeError = (err: unknown) => {
-    const code =
-      err && typeof err === 'object' && 'code' in err && typeof err.code === 'string'
-        ? err.code
-        : null
-    return code ? t(errorKey(code)) : String(err)
-  }
   const iconScale = clampFontSize(fontSize) / BASE_FONT_SIZE
   const iconPx = iconSize ? clampIconSize(iconSize) : undefined
   const [leftRoot, setLeftRoot] = useState(initialLeft)
@@ -246,7 +238,9 @@ export function ComparePanel({
         latest = event
         for (const result of event.results) {
           results[result.rel] = result
-          if (!result.equal) changed.add(result.rel)
+          // A pair that could not be read is not "different": marking it so would make the
+          // sync plan overwrite an unreadable file.
+          if (!result.equal && !result.error) changed.add(result.rel)
         }
         if (event.done) {
           if (frame) {
@@ -301,7 +295,7 @@ export function ComparePanel({
   )
 
   const loadLevel = useCallback(
-    async (rel: string, active: Session, refresh: boolean) => {
+    async (rel: string, active: Session) => {
       // Bumped whenever the roots/options change: a reply from the previous session must
       // not overwrite the new one's cache or counts.
       const seq = sessionSeq.current
@@ -318,8 +312,9 @@ export function ComparePanel({
         const result = await compareLevel(left, right, rel, active.options)
         if (nav !== navSeq.current || seq !== sessionSeq.current) return
         const entries = result.entries
+        // The counts and hash jobs below run on `entries`, so the layer must be replaced
+        // even when it was cached: keeping older rows on screen would contradict them.
         setCache((prev) => {
-          if (!refresh && prev.has(rel)) return prev
           const next = new Map(prev)
           next.set(rel, entries)
           return next
@@ -329,7 +324,7 @@ export function ComparePanel({
         startHash(entries, active)
       } catch (e: unknown) {
         if (nav !== navSeq.current || seq !== sessionSeq.current) return
-        setError(describeError(e))
+        setError(describeError(t, e))
       } finally {
         if (nav === navSeq.current && seq === sessionSeq.current) setLoading(false)
       }
@@ -357,7 +352,7 @@ export function ComparePanel({
     setPreviewOpen(false)
     const active: Session = { left, right, options }
     setSession(active)
-    void loadLevel('', active, true)
+    void loadLevel('', active)
   }, [cancelCounts, cancelHash, leftRoot, loadLevel, options, rightRoot])
 
   // Entering compare from two panes with folders already open should show a result
@@ -440,6 +435,9 @@ export function ComparePanel({
     }
     if (entry.left && entry.right) {
       if (entry.status === 'same') return null
+      // Verification failed on one side: the copy would overwrite a file we could not
+      // read, so keep the pair out of the plan.
+      if (hashResultsRef.current[entry.rel]?.error) return null
       // A side the filters hide is only shown because the other side matched; copying
       // from it would propagate a file the user scoped out.
       const leftUsable = entry.leftCompared !== false
@@ -509,7 +507,7 @@ export function ComparePanel({
       hashResultsRef.current = {}
       setHashResults({})
       setCache(new Map())
-      await loadLevel(levelRel, session, true)
+      await loadLevel(levelRel, session)
       onToast(t('compare.done'))
     } finally {
       setExecuting(false)
@@ -544,7 +542,7 @@ export function ComparePanel({
       const written = await exportText(dir, `flowdir-compare-${stamp}.csv`, rows.join('\r\n'))
       onToast(t('tools.exported', { path: written }))
     } catch (e: unknown) {
-      onToast(describeError(e))
+      onToast(describeError(t, e))
     } finally {
       setExporting(false)
     }
@@ -587,7 +585,7 @@ export function ComparePanel({
       if (side === 'left') setLeftRoot(dir)
       else setRightRoot(dir)
     } catch (e: unknown) {
-      onToast(describeError(e))
+      onToast(describeError(t, e))
     }
   }
 
@@ -767,7 +765,7 @@ export function ComparePanel({
         <div className="flex items-center gap-1.5 border-b border-line px-3 py-1 text-[0.65625rem]">
           <button
             type="button"
-            onClick={() => void loadLevel('', session as Session, false)}
+            onClick={() => void loadLevel('', session as Session)}
             disabled={!session}
             className="rounded px-1.5 py-0.5 text-muted hover:bg-surface-3 hover:text-fg"
           >
@@ -777,7 +775,7 @@ export function ComparePanel({
             <button
               key={crumb.rel}
               type="button"
-              onClick={() => session && void loadLevel(crumb.rel, session, false)}
+              onClick={() => session && void loadLevel(crumb.rel, session)}
               className="truncate rounded px-1.5 py-0.5 text-muted hover:bg-surface-3 hover:text-fg"
             >
               ‹ {crumb.label}
@@ -817,7 +815,7 @@ export function ComparePanel({
               rightPath={session?.right ?? ''}
               counts={counts}
               hashResults={hashResults}
-              onEnter={(rel) => session && void loadLevel(rel, session, false)}
+              onEnter={(rel) => session && void loadLevel(rel, session)}
               iconScale={iconScale}
               iconPx={iconPx}
               statusLabel={statusLabel}

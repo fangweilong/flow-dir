@@ -51,14 +51,16 @@ export function useGlobalShortcuts({
 }: UseGlobalShortcutsOptions) {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (overlayOpen) return
-      // Claimed before the text-input guard: F5 is WebView2's reload accelerator, and a
-      // focused address bar or filter box must not turn it back into a full SPA reload.
+      // A pane-level handler already claimed this chord (F5/F6), so do not run it twice.
+      if (event.defaultPrevented) return
+      // Claimed before the overlay and text-input guards: F5 is WebView2's reload
+      // accelerator and must stay swallowed even while an overlay is open.
       if (refreshActive && matchBinding(event, keys.refresh)) {
         event.preventDefault()
-        refreshActive()
+        if (!overlayOpen) refreshActive()
         return
       }
+      if (overlayOpen) return
       const bare = !event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey
       if (bare && isTextInput(event.target)) return
 

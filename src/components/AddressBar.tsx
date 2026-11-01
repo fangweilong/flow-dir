@@ -88,10 +88,16 @@ export const AddressBar = forwardRef<AddressBarHandle, AddressBarProps>(function
     setAddressDraft(tab.path || '')
   }
 
-  const closeAddressEdit = () => {
-    addressSeq.current += 1
+  /** Leaves the edit state without touching the in-flight commit it may have started. */
+  const endAddressEdit = () => {
     setAddressDraft(null)
     setAddressBad(false)
+  }
+
+  /** Abandons the typed text and cancels any commit still awaiting a result. */
+  const abortAddressEdit = () => {
+    addressSeq.current += 1
+    endAddressEdit()
   }
   useImperativeHandle(ref, () => ({
     startAddressEdit,
@@ -102,11 +108,11 @@ export const AddressBar = forwardRef<AddressBarHandle, AddressBarProps>(function
     if (addressDraft === null || !tab) return
     const raw = addressDraft.trim()
     if (!raw) {
-      closeAddressEdit()
+      endAddressEdit()
       return
     }
     if (raw.toLowerCase() === 'this pc' || raw === t('sidebar.thisPc')) {
-      closeAddressEdit()
+      endAddressEdit()
       if (tab.path) onNavigate(tab.id, '')
       return
     }
@@ -116,13 +122,13 @@ export const AddressBar = forwardRef<AddressBarHandle, AddressBarProps>(function
         if (seq !== addressSeq.current) return
         const next = resolveAddress(tab.path, expanded)
         if (pathKey(next) === pathKey(tab.path)) {
-          closeAddressEdit()
+          endAddressEdit()
           return
         }
         const isDir = await pathIsDir(next).catch(() => false)
         if (seq !== addressSeq.current) return
         if (isDir) {
-          closeAddressEdit()
+          endAddressEdit()
           onNavigate(tab.id, next)
           return
         }
@@ -135,7 +141,7 @@ export const AddressBar = forwardRef<AddressBarHandle, AddressBarProps>(function
           .catch(() => false)
         if (seq !== addressSeq.current) return
         if (executed) {
-          closeAddressEdit()
+          endAddressEdit()
           return
         }
         setAddressBad(true)
@@ -224,7 +230,7 @@ export const AddressBar = forwardRef<AddressBarHandle, AddressBarProps>(function
             setAddressDraft(ev.target.value)
             setAddressBad(false)
           }}
-          onBlur={closeAddressEdit}
+          onBlur={endAddressEdit}
           onKeyDown={(ev) => {
             if (ev.nativeEvent.isComposing) return
             if (ev.key === 'Enter') {
@@ -232,7 +238,7 @@ export const AddressBar = forwardRef<AddressBarHandle, AddressBarProps>(function
               commitAddress()
             } else if (ev.key === 'Escape') {
               ev.preventDefault()
-              closeAddressEdit()
+              abortAddressEdit()
             }
           }}
           placeholder={root ? t('sidebar.thisPc') : undefined}

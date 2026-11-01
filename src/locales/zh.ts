@@ -600,6 +600,7 @@ export const zh = {
   'batch.conflictSkip': '跳过冲突项',
   'batch.conflictNumber': '自动追加序号',
   'batch.conflictBlocked': '请选择冲突处理方式（默认不覆盖）',
+  'batch.probeFailed': '无法确认目标是否已存在，请重试',
   'confirm.recycleTitle': '移到回收站',
   'confirm.recycle': '将 {count} 项移到回收站？可以从回收站还原。',
   'confirm.recycleAction': '移到回收站',

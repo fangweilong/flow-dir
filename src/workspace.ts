@@ -1,3 +1,4 @@
+import { pathKey } from './paths'
 import type { SortState } from './types'
 
 export type TabState = {
@@ -28,6 +29,15 @@ export type Workspace = {
 export type DropMode = 'center' | 'left' | 'right' | 'top' | 'bottom'
 
 /**
+ * Windows paths for one folder have many spellings (`C:\Dir`, `c:\dir\`, `C:/dir`).
+ * Compare them with unified separators, case-folded, and without a trailing separator;
+ * a drive root keeps its colon (`c:`), which is still unique enough for identity checks.
+ */
+export const samePath = (a: string, b: string) =>
+  pathKey(a.replace(/\//g, '\\')).replace(/\\+$/, '') ===
+  pathKey(b.replace(/\//g, '\\')).replace(/\\+$/, '')
+
+/**
  * Back/forward moves only the cursor: the stack is the record of visited folders, so a
  * step never appends. Returns null at either edge instead of clamping silently.
  */
@@ -43,9 +53,10 @@ export function stepHistory(tab: TabState, delta: number): TabState | null {
  * rather than duplicating the entry.
  */
 export function pushHistory(tab: TabState, path: string): TabState {
-  if (tab.path === path) return tab
+  // A rescan of the folder already open (`C:\Dir` vs `c:\dir\`) is not a navigation.
+  if (samePath(tab.path, path)) return tab
   const stack = tab.history.slice(0, tab.histIdx + 1)
-  if (stack[stack.length - 1] !== path) stack.push(path)
+  if (!stack.length || !samePath(stack[stack.length - 1], path)) stack.push(path)
   return { ...tab, path, history: stack, histIdx: stack.length - 1 }
 }
 
