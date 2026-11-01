@@ -206,6 +206,25 @@ export function ComparePanel({
       cancelHash()
       const jobId = `cmp-hash-${++seq.current}`
       hashJob.current = jobId
+      let latest: CompareHashEvent | null = null
+      const results: Record<string, CompareHashResult> = {}
+      const changed = new Set<string>()
+      let frame = 0
+      const flush = () => {
+        frame = 0
+        if (hashJob.current !== jobId) return
+        if (latest) setHashProgress(latest)
+        const batch = Object.keys(results)
+        if (batch.length) {
+          const picked = { ...results }
+          for (const key of batch) delete results[key]
+          setHashResults((prev) => ({ ...prev, ...picked }))
+        }
+        if (changed.size) {
+          for (const rel of changed) patchStatus(rel, 'different')
+          changed.clear()
+        }
+      }
       setHashProgress({
         jobId,
         current: 0,
@@ -221,22 +240,30 @@ export function ComparePanel({
       })
       compareHashStart(jobId, pairs, hashRateBytes, (event) => {
         if (hashJob.current !== jobId) return
-        setHashProgress(event)
-        if (event.results.length) {
-          setHashResults((prev) => {
-            const next = { ...prev }
-            for (const result of event.results) next[result.rel] = result
-            return next
-          })
-          for (const result of event.results) {
-            if (!result.equal) patchStatus(result.rel, 'different')
-          }
+        // One event per pair; committing each one copied the whole result map and
+        // re-rendered the table, which made enabling verification on a large folder take
+        // minutes. Accumulate and publish at most once per frame (and on the final event).
+        latest = event
+        for (const result of event.results) {
+          results[result.rel] = result
+          if (!result.equal) changed.add(result.rel)
         }
         if (event.done) {
+          if (frame) {
+            window.cancelAnimationFrame(frame)
+            frame = 0
+          }
+          flush()
           if (hashJob.current === jobId) hashJob.current = null
           if (event.aborted) setHashProgress(null)
+          return
         }
+        if (!frame) frame = window.requestAnimationFrame(flush)
       }).catch(() => {
+        if (frame) {
+          window.cancelAnimationFrame(frame)
+          frame = 0
+        }
         if (hashJob.current === jobId) hashJob.current = null
         setHashProgress(null)
       })
@@ -258,8 +285,14 @@ export function ComparePanel({
       const left = rel ? joinPath(active.left, rel) : active.left
       const right = rel ? joinPath(active.right, rel) : active.right
       compareCountsStart(jobId, left, right, rel, active.options, (event) => {
+        if (countsJob.current !== jobId) return
+        // The terminal event carries the level's own name and zero counts; storing it put
+        // a "0/0/0" badge on that folder until the restarted recount reached it again.
+        if (event.done) {
+          countsJob.current = null
+          return
+        }
         setCounts((prev) => ({ ...prev, [event.name]: event }))
-        if (event.done && countsJob.current === jobId) countsJob.current = null
       }).catch(() => {
         if (countsJob.current === jobId) countsJob.current = null
       })
@@ -308,7 +341,11 @@ export function ComparePanel({
   const begin = useCallback(() => {
     const left = leftRoot.trim()
     const right = rightRoot.trim()
-    if (!left || !right || left.toLowerCase() === right.toLowerCase()) return
+    if (!left || !right) return
+    if (left.toLowerCase() === right.toLowerCase()) {
+      setError(t('compare.sameRoot'))
+      return
+    }
     sessionSeq.current += 1
     cancelCounts()
     cancelHash()
@@ -341,7 +378,13 @@ export function ComparePanel({
   // Toggling hashes on after a level is already open should start verifying it rather
   // than wait for a refresh.
   useEffect(() => {
-    if (hashOn && session) startHash(cache.get(levelRel) ?? [], session)
+    if (!hashOn) {
+      // Unticking used to leave the backend job reading every remaining pair and its
+      // results kept patching rows to "different".
+      cancelHash()
+      return
+    }
+    if (session) startHash(cache.get(levelRel) ?? [], session)
     // Only on the switch: `startHash` already skips pairs it verified before.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hashOn])

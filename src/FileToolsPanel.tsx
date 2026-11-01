@@ -98,8 +98,11 @@ export function FileToolsPanel({
     setPaused(false)
     setCanceled(false)
     // Selections refer to paths from the previous scan; keeping them would let the delete
-    // button act on files this run never listed.
+    // button act on files this run never listed. The progress payload is stale the same
+    // way: its table would show old digests under the newly chosen algorithm.
     setSelected(new Set())
+    setHashProgress(null)
+    setDupProgress(null)
     started.current = Date.now()
     sample.current = { at: Date.now(), bytes: 0, speed: 0 }
     try {

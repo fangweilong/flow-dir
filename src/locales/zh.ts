@@ -406,6 +406,7 @@ export const zh = {
   'compare.root': '根目录',
   'compare.loading': '比较中…',
   'compare.error': '比较失败：',
+  'compare.sameRoot': '两侧目录相同，无法比较',
   'compare.name': '名称',
   'compare.leftSize': '左侧',
   'compare.rightSize': '右侧',

@@ -409,6 +409,7 @@ export const en: Record<BaseKey, string> = {
   'compare.root': 'Root',
   'compare.loading': 'Comparing…',
   'compare.error': 'Compare failed:',
+  'compare.sameRoot': 'The two folders are the same',
   'compare.name': 'Name',
   'compare.leftSize': 'Left',
   'compare.rightSize': 'Right',
