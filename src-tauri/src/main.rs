@@ -1479,9 +1479,15 @@ fn main() {
     }
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            // `argv` includes the executable, as `std::env::args` does.
-            let request = shell_integration::parse_launch(argv.into_iter().skip(1));
+        .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+            // `argv` includes the executable, as `std::env::args` does. Relative paths were
+            // resolved against the second instance's folder, not this process's cwd.
+            let base = if cwd.is_empty() {
+                None
+            } else {
+                Some(std::path::Path::new(&cwd))
+            };
+            let request = shell_integration::parse_launch(argv.into_iter().skip(1), base);
             if request.autostart {
                 // The Run entry firing while the app is already up: stay in the tray.
                 return;
@@ -1516,7 +1522,8 @@ fn main() {
             update::cleanup_leftovers();
             // The frontend asks for this once its workspace is restored, so a path from
             // Explorer or the command line lands on a ready list.
-            let launch = shell_integration::parse_launch(std::env::args().skip(1));
+            let launch =
+                shell_integration::parse_launch(std::env::args().skip(1), None);
             app.state::<shell_integration::Integration>()
                 .set_launch(launch.clone());
             let saved = settings::load(app.handle());

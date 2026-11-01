@@ -366,7 +366,9 @@ export function PaneView({
   useEffect(() => {
     if (revealId === undefined || revealedId.current === revealId) return
     revealedId.current = revealId
-    const index = view.findIndex((entry) => entry.name === revealName)
+    const index = view.findIndex(
+      (entry) => entry.name.toLowerCase() === (revealName ?? '').toLowerCase(),
+    )
     if (index >= 0) virtualizer.scrollToIndex(index, { align: 'center' })
     // `view` comes from the render that delivered the request; depending on it would
     // re-run on every filter change and fight the user's scrolling.

@@ -185,6 +185,23 @@ export function isInsideArchive(path: string): boolean {
   return false
 }
 
+/**
+ * True when an ancestor folder name carries an archive extension.
+ *
+ * Only for clipboard paths restored after a restart, where the in-session virtual roots
+ * are gone. A real folder named `data.zip` also matches, so the caller must confirm the
+ * path itself does not exist before treating it as an archive member.
+ */
+export function hasArchiveAncestor(path: string): boolean {
+  let cur = pathKey(path).replace(/\\+$/, '')
+  for (;;) {
+    const cut = cur.lastIndexOf('\\')
+    if (cut <= 0) return false
+    cur = cur.slice(0, cut)
+    if (isArchiveName(cur.slice(cur.lastIndexOf('\\') + 1))) return true
+  }
+}
+
 export const formatSize = (n: number, dir: boolean) => {
   if (dir) return ''
   if (!Number.isFinite(n) || n < 0 || n > 1e15) return '—'

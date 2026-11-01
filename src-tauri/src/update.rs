@@ -287,6 +287,34 @@ pub fn cleanup_leftovers() {
     if let Ok(exe) = std::env::current_exe() {
         let _ = fs::remove_file(exe.with_extension("old.exe"));
     }
+    // Every update downloads into its own scratch folder; the installer flavor leaves a
+    // full setup there. Only old folders are removed: a second copy of the app (dev and
+    // release can run together) may be updating right now.
+    let now = SystemTime::now();
+    if let Ok(entries) = fs::read_dir(std::env::temp_dir()) {
+        for entry in entries.flatten() {
+            let modified = entry.metadata().ok().and_then(|meta| meta.modified().ok());
+            if stale_update_dir(&entry.file_name(), modified, now) {
+                let _ = fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+}
+
+const UPDATE_SCRATCH_PREFIX: &str = "FlowDir-update-";
+/// Long enough that an update in progress is never touched, short enough to bound `%TEMP%`.
+const UPDATE_SCRATCH_TTL: Duration = Duration::from_secs(30 * 60);
+
+fn stale_update_dir(
+    name: &std::ffi::OsStr,
+    modified: Option<SystemTime>,
+    now: SystemTime,
+) -> bool {
+    name.to_string_lossy().starts_with(UPDATE_SCRATCH_PREFIX)
+        && modified.is_some_and(|time| {
+            now.duration_since(time)
+                .is_ok_and(|age| age >= UPDATE_SCRATCH_TTL)
+        })
 }
 
 /// Background checker: runs once shortly after launch, then wakes every 30 minutes and
@@ -893,6 +921,23 @@ fn is_newer(latest: &str, current: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_old_update_scratch_dirs_are_reclaimed() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000_000);
+        let fresh = now - Duration::from_secs(60);
+        let old = now - Duration::from_secs(3 * 60 * 60);
+        let name = std::ffi::OsStr::new("FlowDir-update-abc123");
+        assert!(stale_update_dir(name, Some(old), now));
+        assert!(!stale_update_dir(name, Some(fresh), now));
+        // A live download has a fresh mtime; a missing one or a foreign name is kept.
+        assert!(!stale_update_dir(name, None, now));
+        assert!(!stale_update_dir(
+            std::ffi::OsStr::new("FlowDir-update"),
+            Some(old),
+            now
+        ));
+    }
 
     #[test]
     fn newer_versions_win() {

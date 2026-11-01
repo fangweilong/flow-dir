@@ -4,13 +4,14 @@ import {
   archiveExtractItems,
   clipboardCopy,
   clipboardPaste,
+  pathsExist,
   shellProperties,
   uniquePaths,
 } from '../api'
 import type { ListData } from '../types'
 import type { Translate } from '../i18n'
 import type { Workspace } from '../workspace'
-import { baseName, isInsideArchive, joinPath } from '../paths'
+import { baseName, hasArchiveAncestor, isInsideArchive, joinPath } from '../paths'
 
 const errorCode = (err: unknown): string =>
   err && typeof err === 'object' && 'code' in err && typeof err.code === 'string'
@@ -196,18 +197,38 @@ export function useFileActionHandlers({
             showToast(t('toast.noClipboard'))
             return
           }
-          if (clip.paths.some(isInsideArchive) && !isInsideArchive(tab.path)) {
-            void archiveExtractItems(clip.paths, tab.path)
-              .then((extracted) => {
-                invalidateTree(tab.path)
-                invalidateGit(tab.path)
-                refreshPanes()
-                showToast(t('toast.copied', { count: extracted.length }))
-              })
-              .catch(() => showToast(t('toast.copyFailed')))
+          const archived = clip.paths.filter(isInsideArchive)
+          const maybeArchived = clip.paths.filter(
+            (path) => !isInsideArchive(path) && hasArchiveAncestor(path),
+          )
+          const copyRest = (extra: string[]) => {
+            const archives = archived.concat(extra)
+            if (archives.length && !isInsideArchive(tab.path)) {
+              void archiveExtractItems(archives, tab.path)
+                .then((extracted) => {
+                  invalidateTree(tab.path)
+                  invalidateGit(tab.path)
+                  refreshPanes()
+                  showToast(t('toast.copied', { count: extracted.length }))
+                })
+                .catch(() => showToast(t('toast.copyFailed')))
+              const rest = clip.paths.filter((path) => !archives.includes(path))
+              if (rest.length) runOp(clip.cut ? 'move' : 'copy', rest, { targetDir: tab.path })
+              return
+            }
+            runOp(clip.cut ? 'move' : 'copy', clip.paths, { targetDir: tab.path })
+          }
+          if (!maybeArchived.length) {
+            copyRest([])
             return
           }
-          runOp(clip.cut ? 'move' : 'copy', clip.paths, { targetDir: tab.path })
+          // Clipboard content survives a restart: an archive member copied earlier is no
+          // longer in `virtualRoots`, but it also cannot exist on disk.
+          void pathsExist(maybeArchived)
+            .then((flags) =>
+              copyRest(maybeArchived.filter((_, index) => !flags[index])),
+            )
+            .catch(() => copyRest([]))
         })
         .catch(() => showToast(t('toast.noClipboard')))
     },

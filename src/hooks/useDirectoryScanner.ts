@@ -62,6 +62,9 @@ export function useDirectoryScanner({
   const sortGens = useRef<Record<string, number>>({})
   const watched = useRef(new Map<string, string>())
   const lastScan = useRef(new Map<string, number>())
+  // Generation of the enumeration currently running per tab; `loading` only covers
+  // foreground scans and cannot tell the focus guard that a background refresh is busy.
+  const scanning = useRef(new Map<string, number>())
   const tabUsed = useRef(new Map<string, number>())
   const lastActiveTab = useRef(new Map<string, string>())
   const rescanTimers = useRef(new Map<string, number>())
@@ -81,6 +84,7 @@ export function useDirectoryScanner({
     (tabId: string, path: string, sort: SortState, hidden: boolean, keep = false) => {
       if (!path) {
         gens.current[tabId] = (gens.current[tabId] ?? 0) + 1
+        scanning.current.delete(tabId)
         lastScan.current.set(tabId, Date.now())
         void cancelDir(tabId).catch(() => undefined)
         setListData((prev) => {
@@ -94,6 +98,7 @@ export function useDirectoryScanner({
       }
       const gen = (gens.current[tabId] ?? 0) + 1
       gens.current[tabId] = gen
+      scanning.current.set(tabId, gen)
       lastScan.current.set(tabId, Date.now())
       const acc: Entry[] = []
       if (!keep) {
@@ -164,6 +169,8 @@ export function useDirectoryScanner({
             error: { code: 'IPC', detail: String(e) },
           },
         }))
+      }).finally(() => {
+        if (scanning.current.get(tabId) === gen) scanning.current.delete(tabId)
       })
     },
     [],
@@ -448,7 +455,7 @@ export function useDirectoryScanner({
         const scannedAt = lastScan.current.get(tab.id) ?? 0
         // `lastScan` is stamped when a scan starts; a slow share can still be enumerating
         // after three seconds, and rescanning it would cancel and restart the work.
-        if (now - scannedAt > 3_000 && !listDataRef.current[tab.id]?.loading) {
+        if (now - scannedAt > 3_000 && !scanning.current.has(tab.id)) {
           startScan(tab.id, tab.path, pane.sort, pane.hidden, true)
         }
       }

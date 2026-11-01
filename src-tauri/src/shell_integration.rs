@@ -7,7 +7,7 @@
 //! Development builds use their own key namespace (`FlowDirDev`), so they cannot overwrite
 //! the release integration.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -413,7 +413,13 @@ fn virtual_key(token: &str) -> Option<u32> {
 
 /// Parses the arguments after the executable. Paths may be relative; `--select` names a
 /// file and is split into its parent folder plus the row to select.
-pub fn parse_launch<I: IntoIterator<Item = String>>(args: I) -> LaunchRequest {
+///
+/// `cwd` is the working directory the arguments were resolved against: a second instance
+/// launched from another folder must not resolve `..\other` against this process's cwd.
+pub fn parse_launch<I: IntoIterator<Item = String>>(
+    args: I,
+    cwd: Option<&Path>,
+) -> LaunchRequest {
     let mut request = LaunchRequest::default();
     let mut path_arg: Option<String> = None;
     let mut select_arg: Option<String> = None;
@@ -437,7 +443,7 @@ pub fn parse_launch<I: IntoIterator<Item = String>>(args: I) -> LaunchRequest {
     }
 
     if let Some(path) = path_arg {
-        let (dir, file) = split_target(&path, false);
+        let (dir, file) = split_target(&path, false, cwd);
         request.path = Some(dir);
         if file.is_some() {
             request.select = file;
@@ -448,10 +454,10 @@ pub fn parse_launch<I: IntoIterator<Item = String>>(args: I) -> LaunchRequest {
             // `flowdir D:\dir --select report.txt`
             request.select = Some(select);
         } else {
-            let (dir, file) = split_target(&select, true);
-            if request.path.is_none() {
-                request.path = Some(dir);
-            }
+            // The `--select` target defines the folder even when a folder argument was
+            // given: dropping its parent here silently lost the rows below it.
+            let (dir, file) = split_target(&select, true, cwd);
+            request.path = Some(dir);
             request.select = file;
         }
     }
@@ -460,11 +466,18 @@ pub fn parse_launch<I: IntoIterator<Item = String>>(args: I) -> LaunchRequest {
 
 /// Splits a command-line target into a folder and an optional row name. `as_file` treats
 /// the input as a file even when it does not exist yet (`--select`).
-fn split_target(path: &str, as_file: bool) -> (String, Option<String>) {
+fn split_target(
+    path: &str,
+    as_file: bool,
+    cwd: Option<&Path>,
+) -> (String, Option<String>) {
     let mut target = PathBuf::from(path);
     if !target.is_absolute() {
-        if let Ok(cwd) = std::env::current_dir() {
-            target = cwd.join(target);
+        let base = cwd
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok());
+        if let Some(base) = base {
+            target = base.join(target);
         }
     }
     if !as_file && (target.is_dir() || (!target.exists() && target.extension().is_none())) {
@@ -680,13 +693,17 @@ mod tests {
             ["--new-window", "--verbose", "--autostart"]
                 .iter()
                 .map(|value| value.to_string()),
+            None,
         );
         assert!(request.new_window);
         assert!(request.autostart);
         assert!(request.path.is_none());
         assert!(!request.is_empty());
 
-        let bare = parse_launch(["--verbose"].iter().map(|value| value.to_string()));
+        let bare = parse_launch(
+            ["--verbose"].iter().map(|value| value.to_string()),
+            None,
+        );
         assert!(bare.is_empty());
     }
 
@@ -697,9 +714,35 @@ mod tests {
             ["--select", r"D:\folder\missing.txt"]
                 .iter()
                 .map(|value| value.to_string()),
+            None,
         );
         assert_eq!(request.path.as_deref(), Some(r"D:\folder"));
         assert_eq!(request.select.as_deref(), Some("missing.txt"));
         assert!(!request.is_empty());
+    }
+
+    /// The second instance resolves relative arguments against its own folder.
+    #[test]
+    fn launch_resolves_relative_paths_against_the_given_cwd() {
+        let request = parse_launch(
+            ["other"].iter().map(|value| value.to_string()),
+            Some(Path::new(r"D:\work\sub")),
+        );
+        assert_eq!(request.path.as_deref(), Some(r"D:\work\sub\other"));
+    }
+
+    /// A `--select` target with a folder component keeps that folder even when another
+    /// folder argument was passed; it used to be replaced by the folder argument and the
+    /// row below it silently disappeared.
+    #[test]
+    fn launch_select_with_a_folder_argument_keeps_the_select_parent() {
+        let request = parse_launch(
+            [r"D:\dir", "--select", r"D:\dir\sub\report.txt"]
+                .iter()
+                .map(|value| value.to_string()),
+            None,
+        );
+        assert_eq!(request.path.as_deref(), Some(r"D:\dir\sub"));
+        assert_eq!(request.select.as_deref(), Some("report.txt"));
     }
 }

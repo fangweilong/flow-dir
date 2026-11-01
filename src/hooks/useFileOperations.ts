@@ -83,7 +83,7 @@ export function useFileOperations({
   const redoStack = useRef<UndoEntry[]>([])
   const undoCounter = useRef(0)
   const lastIrreversible = useRef(false)
-  const opRequests = useRef<Record<string, OpRequestShape & { opId: string }>>({})
+  const opRequests = useRef<Record<string, OpRequestShape & { opId: string; record?: boolean }>>({})
   const taskbarWant = useRef<{ state: string; done: number; total: number } | null>(null)
   const taskbarTimer = useRef<number | null>(null)
   const taskbarSentAt = useRef(0)
@@ -123,7 +123,7 @@ export function useFileOperations({
         permanent: options?.permanent,
         overwrite: options?.overwrite,
       }
-      opRequests.current[opId] = { opId, ...request }
+      opRequests.current[opId] = { opId, ...request, record: options?.record }
       const recordEntry = (payload: UndoPayload | null, dirs: string[]) => {
         if (options?.record === false) return
         if (!payload) {
@@ -253,7 +253,8 @@ export function useFileOperations({
           const succeeded = retry.sources.filter((source) => !failed.has(source))
           // The elevated run does not go through `runOp`, so its history entry has to be
           // recorded here or Ctrl+Z would skip over it.
-          if (!report.error && !report.aborted && succeeded.length) {
+          // An inverse operation replayed by undo/redo must not add a new history entry.
+          if (!report.error && !report.aborted && succeeded.length && request.record !== false) {
             const dirs = Array.from(
               new Set([
                 ...(retry.targetDir ? [retry.targetDir] : []),

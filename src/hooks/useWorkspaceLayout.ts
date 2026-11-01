@@ -286,8 +286,9 @@ export function useWorkspaceLayout({
       const live = prev.panes[paneId]
       if (!live) return prev
       const liveKeep = live.tabIds.filter((id) => id === tabId || prev.tabs[id]?.pinned)
-      const tabs: Record<string, TabState> = {}
-      for (const id of liveKeep) tabs[id] = prev.tabs[id]
+      // Only this pane's closed tabs leave the record; other panes keep theirs.
+      const tabs = { ...prev.tabs }
+      for (const id of live.tabIds) if (!liveKeep.includes(id)) delete tabs[id]
       return {
         ...prev,
         tabs,
@@ -312,9 +313,16 @@ export function useWorkspaceLayout({
       const at = live.tabIds.indexOf(tabId)
       if (at < 0) return prev
       const liveKeep = live.tabIds.filter((id, index) => index <= at || prev.tabs[id]?.pinned)
-      const tabs: Record<string, TabState> = {}
-      for (const id of liveKeep) tabs[id] = prev.tabs[id]
-      return { ...prev, tabs, panes: { ...prev.panes, [paneId]: { ...live, tabIds: liveKeep } } }
+      const tabs = { ...prev.tabs }
+      for (const id of live.tabIds) if (!liveKeep.includes(id)) delete tabs[id]
+      // The active tab may have been to the right of the clicked one; falling back to the
+      // clicked tab keeps `activeTabId` pointing at a tab that still exists.
+      const activeTabId = liveKeep.includes(live.activeTabId) ? live.activeTabId : tabId
+      return {
+        ...prev,
+        tabs,
+        panes: { ...prev.panes, [paneId]: { ...live, tabIds: liveKeep, activeTabId } },
+      }
     })
   }, [dropTabs])
 

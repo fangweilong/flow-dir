@@ -893,6 +893,8 @@ fn render_image(path: &str, max_width: u32, bg: u32) -> Result<Vec<u8>, ApiError
     }
 }
 fn probe_image_dimensions(path: &str) -> Option<(u32, u32)> {
+    // Called from `spawn_blocking`, which is not COM-initialised like `render_image` is.
+    let _com = ComMtaGuard::new();
     unsafe {
         let factory: IWICImagingFactory =
             CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
@@ -1354,6 +1356,35 @@ mod tests {
     fn command_label_uses_the_program_stem() {
         assert_eq!(command_label(r#""C:\Tools\WINWORD.EXE" "{path}""#), "WINWORD");
         assert_eq!(command_label("notepad"), "notepad");
+    }
+
+    /// The dimension probe runs on a blocking thread, so it must initialise COM itself.
+    #[test]
+    fn image_dimensions_are_probed_without_a_prior_com_apartment() {
+        let width = 2u32;
+        let height = 3u32;
+        let row = (width * 3).div_ceil(4) * 4;
+        let pixels = vec![0u8; (row * height) as usize];
+        let mut bmp = Vec::new();
+        bmp.extend_from_slice(b"BM");
+        bmp.extend_from_slice(&(54u32 + pixels.len() as u32).to_le_bytes());
+        bmp.extend_from_slice(&[0; 4]);
+        bmp.extend_from_slice(&54u32.to_le_bytes());
+        bmp.extend_from_slice(&40u32.to_le_bytes());
+        bmp.extend_from_slice(&(width as i32).to_le_bytes());
+        bmp.extend_from_slice(&(height as i32).to_le_bytes());
+        bmp.extend_from_slice(&1u16.to_le_bytes());
+        bmp.extend_from_slice(&24u16.to_le_bytes());
+        bmp.extend_from_slice(&0u32.to_le_bytes());
+        bmp.extend_from_slice(&(pixels.len() as u32).to_le_bytes());
+        bmp.extend_from_slice(&[0; 16]);
+        bmp.extend_from_slice(&pixels);
+
+        let path = std::env::temp_dir().join("flowdir_preview_dimensions.bmp");
+        std::fs::write(&path, &bmp).unwrap();
+        let dimensions = probe_image_dimensions(path.to_str().unwrap());
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(dimensions, Some((width, height)));
     }
 
     #[test]

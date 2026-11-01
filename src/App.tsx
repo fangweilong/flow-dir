@@ -33,7 +33,8 @@ import {
   titlebarMenu,
 } from './api'
 import type { Drive, Lang, ListData, Place } from './types'
-import { errorKey, makeT } from './i18n'
+import { errorKey, makeT, setUiLanguage } from './i18n'
+import type { Translate } from './i18n'
 import { DEFAULT_SETTINGS } from './persist'
 import type { Settings } from './persist'
 import { isDir, isFsPath, isInsideArchive, joinPath } from './paths'
@@ -99,13 +100,18 @@ export default function App() {
     toastTimer.current = window.setTimeout(() => setToast(null), ms)
   }, [])
 
+  // The layout hook runs before settings are loaded, so it gets a stable translator that
+  // reads the current language when it is actually called.
+  const tRef = useRef<Translate>(makeT('zh-CN'))
+  const earlyT = useCallback<Translate>((key, vars) => tRef.current(key, vars), [])
+
   // Hook: workspace & layout
   const layout = useWorkspaceLayout({
     settingsRef,
     listDataRef,
     setListData: (action) => setListDataRef.current(action),
     showToast,
-    t: makeT('zh-CN'),
+    t: earlyT,
     onCancelDir: (tabId) => cancelDirRef.current(tabId),
   })
 
@@ -162,7 +168,10 @@ export default function App() {
   } = appSettings
 
   const lang: Lang = settings.language
+  // Keeps the crash screen (rendered outside this tree) in the same language.
+  setUiLanguage(lang)
   const t = useMemo(() => makeT(lang), [lang])
+  tRef.current = t
   const keys = useMemo(() => resolveShortcuts(settings.shortcuts), [settings.shortcuts])
 
   // Hook: tree & git
@@ -240,13 +249,18 @@ export default function App() {
     const data = listData[pending.tabId]
     if (!data || data.loading) return
     pendingSelect.current = null
-    if (!data.entries.some((entry) => entry.name === pending.name)) return
+    // Shell arguments keep the user's spelling; Windows names are case-insensitive.
+    const match = data.entries.find(
+      (entry) => entry.name.toLowerCase() === pending.name.toLowerCase(),
+    )
+    if (!match) return
+    const name = match.name
     revealSeq.current += 1
     update(pending.tabId, (d) => ({
       ...d,
-      selected: new Set([pending.name]),
-      anchor: pending.name,
-      reveal: { name: pending.name, id: revealSeq.current },
+      selected: new Set([name]),
+      anchor: name,
+      reveal: { name, id: revealSeq.current },
     }))
   }, [listData, pendingSelect, pendingSelectTick, update])
 
@@ -391,7 +405,7 @@ export default function App() {
           const code = errorCode(err)
           if (code === 'NO_ASSOCIATION') {
             void openWith(targetPath).catch((e: unknown) => {
-              showToast(t('op.failed', { code: errorCode(e) }))
+              showToast(t('op.failed', { code: t(errorKey(errorCode(e))) }))
             })
             return
           }
