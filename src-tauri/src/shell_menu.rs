@@ -396,10 +396,14 @@ pub fn show_background(
 
 /// Runs the menu on its own STA thread: shell extensions expect one and the IPC thread must
 /// stay free for the whole time the modal menu is open.
+///
+/// The wait only exists so a wedged shell extension cannot hold the blocking thread
+/// forever. A 15-minute cap discarded the action of a menu the user had left open; a menu
+/// that really is stuck still leaks one thread, exactly as it did before.
 fn run_on_menu_thread(
     work: impl FnOnce() -> Result<Outcome, ApiError> + Send + 'static,
 ) -> Result<Outcome, ApiError> {
-    run_offthread("flowdir-shell-menu", Duration::from_secs(900), work)?
+    run_offthread("flowdir-shell-menu", Duration::from_secs(24 * 3600), work)?
 }
 
 /// Runs a blocking shell call off the IPC thread and waits for its result.

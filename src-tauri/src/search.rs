@@ -200,6 +200,12 @@ fn decode_for_search(bytes: &[u8]) -> Option<String> {
 /// Reads at most `max_bytes`, rejects binary content, and returns the line around the
 /// first match. `None` means "no match or unreadable".
 fn content_snippet(path: &Path, regex: &Regex, max_bytes: u64, cancel: &AtomicBool) -> Option<String> {
+    // Opening a cloud placeholder's data stream forces a download; content search must
+    // not hydrate files the user never asked for (the same rule the preview follows).
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if crate::preview::is_cloud_placeholder(&meta) {
+        return None;
+    }
     let file = std::fs::File::open(path).ok()?;
     let mut bytes = Vec::new();
     file.take(max_bytes).read_to_end(&mut bytes).ok()?;

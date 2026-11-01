@@ -360,6 +360,9 @@ pub fn export_bundle(
     use zip::ZipWriter;
 
     let target_dir = Path::new(target);
+    if !target_dir.is_absolute() {
+        return Err(ApiError::new("INVALID_DEST", target));
+    }
     fs::create_dir_all(target_dir)
         .map_err(|e| ApiError::from_io(&target_dir.to_string_lossy(), &e))?;
     let stamp = timestamp().replace([':', '.'], "-");
@@ -374,14 +377,22 @@ pub fn export_bundle(
             .map_err(|e| ApiError::new("ZIP", e.to_string()))
     };
 
-    for name in log_files(log_dir) {
-        if let Ok(bytes) = fs::read(log_dir.join(&name)) {
-            write(&mut zip, &name, &bytes)?;
+    let built = (|| -> Result<(), ApiError> {
+        for name in log_files(log_dir) {
+            if let Ok(bytes) = fs::read(log_dir.join(&name)) {
+                write(&mut zip, &name, &bytes)?;
+            }
         }
+        write(&mut zip, "info.json", info.to_string().as_bytes())?;
+        write(&mut zip, "settings.json", settings.to_string().as_bytes())?;
+        zip.finish().map_err(|e| ApiError::new("ZIP", e.to_string()))?;
+        Ok(())
+    })();
+    if let Err(err) = built {
+        // A half-written bundle looks like a valid report; drop it instead of leaving it.
+        let _ = fs::remove_file(&path);
+        return Err(err);
     }
-    write(&mut zip, "info.json", info.to_string().as_bytes())?;
-    write(&mut zip, "settings.json", settings.to_string().as_bytes())?;
-    zip.finish().map_err(|e| ApiError::new("ZIP", e.to_string()))?;
     log::info!("diagnostics bundle written to {}", path.display());
     Ok(path.to_string_lossy().into_owned())
 }

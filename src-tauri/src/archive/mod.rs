@@ -374,6 +374,8 @@ pub fn start(
     // Registered in the shared op state so `op_cancel` and the quit guard already know
     // about extraction jobs.
     let token = state.begin_external(&job_id);
+    let finish_token = token.clone();
+    let err_token = finish_token.clone();
     let err_job_id = job_id.clone();
     let err_state = state.clone();
     let state = state.clone();
@@ -381,11 +383,11 @@ pub fn start(
         .name(format!("flowdir-extract-{job_id}"))
         .spawn(move || {
             run(job_id.clone(), archive, dest, password, token, channel);
-            state.finish_external(&job_id);
+            state.finish_external(&job_id, &finish_token);
         });
     // Spawn failure would otherwise leave a ghost job that blocks `wait_idle` forever.
     if spawned.is_err() {
-        err_state.finish_external(&err_job_id);
+        err_state.finish_external(&err_job_id, &err_token);
     }
     spawned.map(|_| ()).map_err(|e| ApiError::new("THREAD", e.to_string()))
 }

@@ -188,7 +188,15 @@ export function useWorkspaceLayout({
           prev
             ? {
                 ...prev,
-                tabs: { ...prev.tabs, [freshId]: { id: freshId, path: '', history: [''], histIdx: 0 } },
+                tabs: (() => {
+                  // The closed tab must be dropped here too; this branch used to add the
+                  // replacement and leave the old record (and its history) orphaned in
+                  // `ws.tabs`, where it leaked into layout.json and the compare pickers.
+                  const tabs = { ...prev.tabs }
+                  delete tabs[tabId]
+                  tabs[freshId] = { id: freshId, path: '', history: [''], histIdx: 0 }
+                  return tabs
+                })(),
                 panes: {
                   ...prev.panes,
                   [paneId]: { ...prev.panes[paneId], tabIds: [freshId], activeTabId: freshId },

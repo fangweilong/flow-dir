@@ -238,7 +238,7 @@ fn has_ads_or_device(path: &str) -> bool {
 
 /// True when the bytes for this file are still in the cloud. Reading such a file would
 /// pull the whole thing down, so the preview stops at a "download first" state instead.
-fn is_cloud_placeholder(meta: &std::fs::Metadata) -> bool {
+pub(crate) fn is_cloud_placeholder(meta: &std::fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
     meta.file_attributes() & (ATTR_OFFLINE | ATTR_RECALL_ON_OPEN | ATTR_RECALL_ON_DATA_ACCESS) != 0
 }

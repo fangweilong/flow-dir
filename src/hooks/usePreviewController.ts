@@ -34,7 +34,30 @@ export function usePreviewController({
   showToast,
   t,
 }: UsePreviewControllerOptions) {
-  const [previewOpen, setPreviewOpen] = useState(true)
+  const [previewOpen, setOpen] = useState(settings.previewOpen)
+  /** Mirrors the live panel state so `setPreviewOpen` can compare without a stale closure. */
+  const openRef = useRef(previewOpen)
+  openRef.current = previewOpen
+  const settingsRef = useRef(settings)
+  settingsRef.current = settings
+  // Settings owns the value: a toggle in Settings must reach the live panel, and a toggle
+  // from the title bar or the panel's X must survive a restart.
+  useEffect(() => {
+    if (settings.previewOpen === openRef.current) return
+    openRef.current = settings.previewOpen
+    setOpen(settings.previewOpen)
+  }, [settings.previewOpen])
+  const setPreviewOpen = useCallback<React.Dispatch<React.SetStateAction<boolean>>>(
+    (next) => {
+      const value =
+        typeof next === 'function' ? (next as (open: boolean) => boolean)(openRef.current) : next
+      if (value === openRef.current) return
+      openRef.current = value
+      setOpen(value)
+      updateSettings({ ...settingsRef.current, previewOpen: value })
+    },
+    [updateSettings],
+  )
   const [previewWidth, setPreviewWidth] = useState(settings.previewWidth)
   const [preview, setPreview] = useState<{
     info: PreviewInfo | null

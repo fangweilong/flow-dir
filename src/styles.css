@@ -166,6 +166,13 @@ body {
   overflow: hidden;
 }
 
+/* The window disables selection globally; preview surfaces opt back in so code, CSV,
+ * JSON, hex and markdown text can be selected and copied. */
+[data-selectable] {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 /*
  * Per-surface typography: tabs, file list and navigation bar own their family and size.
  * An empty family leaves `--font-<region>` unset, so it falls back to the global UI font.

@@ -76,6 +76,9 @@ pub fn set<R: Runtime>(
     let handle = app.clone();
     let id = pane_id.clone();
     let watched_path = path.clone();
+    // The key never changes for the lifetime of this watcher; canonicalising it per event
+    // delayed every notification during a build.
+    let git_key = crate::pathkey::path_key(&path);
     let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
         let event = match result {
             Ok(event) => event,
@@ -107,7 +110,7 @@ pub fn set<R: Runtime>(
             structural: is_structural(event.kind),
         };
         // The status cache is keyed by repository root; drop it before the pane rescans.
-        crate::git::invalidate(&watched_path);
+        crate::git::invalidate_key(&git_key);
         let _ = if git_only {
             handle.emit("flowdir:git-changed", payload)
         } else {

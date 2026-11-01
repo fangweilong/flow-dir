@@ -162,12 +162,17 @@ impl OpState {
         self.begin(op_id)
     }
 
-    pub(crate) fn finish_external(&self, op_id: &str) {
-        self.finish(op_id);
+    pub(crate) fn finish_external(&self, op_id: &str, token: &Arc<AtomicBool>) {
+        self.finish(op_id, token);
     }
 
-    fn finish(&self, op_id: &str) {
-        self.jobs.lock().unwrap().remove(op_id);
+    /// Removes `op_id` only when it still belongs to `token`. A reused id installs a new
+    /// token; the older thread must not delete (and hide) the newer job.
+    fn finish(&self, op_id: &str, token: &Arc<AtomicBool>) {
+        let mut jobs = self.jobs.lock().unwrap();
+        if jobs.get(op_id).is_some_and(|current| Arc::ptr_eq(current, token)) {
+            jobs.remove(op_id);
+        }
     }
 
     pub fn cancel(&self, op_id: &str) {
@@ -371,6 +376,8 @@ pub fn start(
         .ok_or_else(|| ApiError::new("BAD_KIND", format!("unknown operation {}", request.kind)))?;
     validate(&request, kind)?;
     let token = state.begin(&request.op_id);
+    let finish_token = token.clone();
+    let err_token = finish_token.clone();
     let op_id = request.op_id.clone();
     let err_op_id = op_id.clone();
     let err_state = state.clone();
@@ -433,12 +440,12 @@ pub fn start(
             if denied {
                 state.record_denied(&request);
             }
-            state.finish(&op_id);
+            state.finish(&op_id, &finish_token);
         });
     // Without this the token would stay in `jobs` forever: a ghost operation that
     // keeps `wait_idle` timing out and never sends the frontend a `done` progress.
     if spawned.is_err() {
-        err_state.finish(&err_op_id);
+        err_state.finish(&err_op_id, &err_token);
     }
     spawned.map(|_| ()).map_err(|e| ApiError::new("THREAD", e.to_string()))
 }
@@ -1134,6 +1141,21 @@ mod tests {
         };
         let error = start(&OpState::default(), request, None, channel).unwrap_err();
         assert_eq!(error.code, "BAD_ARGS");
+    }
+
+    #[test]
+    fn a_stale_finish_does_not_remove_the_reused_id() {
+        let state = OpState::default();
+        let first = state.begin("same");
+        let second = state.begin("same");
+        assert!(
+            first.load(std::sync::atomic::Ordering::Relaxed),
+            "replacing an id must cancel the job it belonged to"
+        );
+        state.finish("same", &first);
+        assert_eq!(state.active(), vec!["same".to_string()]);
+        state.finish("same", &second);
+        assert!(state.active().is_empty());
     }
 
     /// The sink maps each completed item back to its source index; an aborted batch uses

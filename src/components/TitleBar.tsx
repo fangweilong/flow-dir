@@ -130,7 +130,7 @@ export function TitleBar({
       className="flex h-8 shrink-0 items-center gap-2 border-b border-line bg-surface/90 pl-2"
     >
       <div className="flex items-center gap-2" data-tauri-drag-region>
-        <img src={iconUrl} alt="" className="h-5 w-5 select-none" draggable={false} />
+        <img src={iconUrl} alt="" data-tauri-drag-region className="h-5 w-5 select-none" draggable={false} />
         <span data-tauri-drag-region className="text-[0.8125rem] font-semibold tracking-tight">
           {t('app.name')}
         </span>

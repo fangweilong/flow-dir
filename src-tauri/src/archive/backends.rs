@@ -841,6 +841,11 @@ pub fn extract_dir(
     dest: &std::path::Path,
     uniquify: bool,
 ) -> Result<Vec<String>, ApiError> {
+    // A zip central directory allows one pass; the generic loop below re-opens the archive
+    // for every member, which is quadratic for a big folder dragged out of a big zip.
+    if format::detect(archive) == Some(Format::Zip) {
+        return extract_zip_dir(archive, inner, dest, uniquify);
+    }
     let mut written = Vec::new();
     for entry in list(archive, 500_000)? {
         let norm = entry.name.replace('/', "\\");
@@ -869,6 +874,63 @@ pub fn extract_dir(
             target
         };
         extract_single(archive, norm, &target, None, None)?;
+        written.push(target.to_string_lossy().into_owned());
+    }
+    Ok(written)
+}
+
+/// One-pass folder extraction for zip: the archive is opened once and every matching
+/// member is streamed to disk in central-directory order.
+fn extract_zip_dir(
+    archive: &str,
+    inner: &str,
+    dest: &std::path::Path,
+    uniquify: bool,
+) -> Result<Vec<String>, ApiError> {
+    let inner_norm = inner.replace('/', "\\");
+    let inner_norm = inner_norm.trim_matches('\\');
+    let file = File::open(archive).map_err(|e| ApiError::from_io(archive, &e))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| ApiError::new("ARCHIVE", e.to_string()))?;
+    let mut written = Vec::new();
+    for index in 0..zip.len() {
+        // Encrypted or damaged members are skipped like the generic path does; the folder
+        // is still extracted with everything readable.
+        let Ok(mut member) = zip.by_index(index) else {
+            continue;
+        };
+        let raw = member.name_raw().to_vec();
+        let utf8 = member.flags().as_u16() & 0x800 != 0;
+        let Ok(name) = entry::decode(&raw, utf8) else {
+            continue;
+        };
+        let Some(rel) = crate::pathkey::strip_prefix_dir(&name, inner_norm) else {
+            continue;
+        };
+        let rel = rel.trim_matches('\\');
+        if rel.is_empty() {
+            continue;
+        }
+        let target = dest.join(rel);
+        if member.is_dir() {
+            std::fs::create_dir_all(&target)
+                .map_err(|e| ApiError::from_io(&target.to_string_lossy(), &e))?;
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| ApiError::from_io(&parent.to_string_lossy(), &e))?;
+        }
+        let target = if uniquify {
+            let path = target.to_string_lossy().into_owned();
+            std::path::PathBuf::from(crate::naming::unique(std::slice::from_ref(&path)).remove(0))
+        } else {
+            target
+        };
+        let mut out = File::create(&target)
+            .map_err(|e| ApiError::from_io(&target.to_string_lossy(), &e))?;
+        std::io::copy(&mut member, &mut out)
+            .map_err(|e| ApiError::from_io(&target.to_string_lossy(), &e))?;
+        out.flush().map_err(|e| ApiError::from_io(&target.to_string_lossy(), &e))?;
         written.push(target.to_string_lossy().into_owned());
     }
     Ok(written)

@@ -29,7 +29,7 @@ const CHILD_TIMEOUT: Duration = Duration::from_secs(3);
 const CHILD_REPO_LIMIT: usize = 64;
 const CHILD_WORKERS: usize = 4;
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 pub struct GitFile {
     /// Work-tree relative path with `\` separators, so the UI only joins.
     pub path: String,
@@ -106,15 +106,14 @@ fn is_within(path: &str, root: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('\\'))
 }
 
-/// Drops cached status for a repository root, called when the watcher reports a change
-/// there so the next listing is fresh instead of waiting out the TTL.
-pub fn invalidate(path: &str) {
-    let key = path_key(path);
+/// Drops cached status for a canonical repository-root key, called when the watcher
+/// reports a change there so the next listing is fresh instead of waiting out the TTL.
+pub fn invalidate_key(key: &str) {
     if let Ok(mut cache) = ROOT_CACHE.lock() {
-        cache.retain(|root, _| !is_within(&key, root));
+        cache.retain(|root, _| !is_within(key, root));
     }
     if let Ok(mut cache) = CHILD_CACHE.lock() {
-        cache.remove(&key);
+        cache.remove(key);
     }
 }
 
@@ -453,16 +452,19 @@ fn output_with_timeout(command: &mut Command, timeout: Duration) -> Option<Outpu
         .stderr(Stdio::piped())
         .spawn()
         .ok()?;
-    let mut stdout = child.stdout.take()?;
-    let mut stderr = child.stderr.take()?;
+    let stdout = child.stdout.take()?;
+    let stderr = child.stderr.take()?;
+    /// A descendant can keep the inherited pipe open after `git` exits; the reader is
+    /// abandoned in that case, so it must stop growing on its own.
+    const MAX_GIT_OUTPUT: u64 = 64 * 1024 * 1024;
     let out = std::thread::spawn(move || {
         let mut bytes = Vec::new();
-        let _ = stdout.read_to_end(&mut bytes);
+        let _ = stdout.take(MAX_GIT_OUTPUT).read_to_end(&mut bytes);
         bytes
     });
     let err = std::thread::spawn(move || {
         let mut bytes = Vec::new();
-        let _ = stderr.read_to_end(&mut bytes);
+        let _ = stderr.take(MAX_GIT_OUTPUT).read_to_end(&mut bytes);
         bytes
     });
     let deadline = Instant::now() + timeout;
@@ -584,18 +586,29 @@ fn has_changes(bytes: &[u8]) -> bool {
 }
 
 /// Unmerged porcelain states: `UU`, `AA`, `DD`, or any side marked `U`.
+///
+/// Renames/copies carry their source path as one extra bare record: reading that path as
+/// an `XY` pair made any source starting with `U` look like a conflict.
 fn has_conflict(bytes: &[u8]) -> bool {
-    bytes.split(|byte| *byte == 0).any(|record| {
+    let mut records = bytes.split(|byte| *byte == 0).filter(|r| !r.is_empty());
+    while let Some(record) = records.next() {
         if record.len() < 4 || record.starts_with(b"## ") {
-            return false;
+            continue;
         }
         let index = record[0] as char;
         let worktree = record[1] as char;
-        index == 'U'
+        if matches!(index, 'R' | 'C') || matches!(worktree, 'R' | 'C') {
+            records.next();
+        }
+        if index == 'U'
             || worktree == 'U'
             || (index == 'A' && worktree == 'A')
             || (index == 'D' && worktree == 'D')
-    })
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Parses `--porcelain=v1 -z`: NUL separated `XY path` records, where renames and copies
@@ -616,7 +629,12 @@ fn parse(bytes: &[u8], prefix: Option<&str>) -> Vec<GitFile> {
         // even `--untracked-files=all` does not descend into). The separator is kept so
         // `split_direct` can give that row a folder marker instead of a status letter.
         let path = String::from_utf8_lossy(&record[3..]).replace('/', "\\").to_string();
-        if status.starts_with('R') || status.starts_with('C') {
+        // Rename/copy sources follow as a bare path record, in either column (`R ` and
+        // ` R` are both renames). Without consuming it the source path was parsed as a
+        // phantom entry with a mangled path.
+        let index = record[0] as char;
+        let worktree = record[1] as char;
+        if matches!(index, 'R' | 'C') || matches!(worktree, 'R' | 'C') {
             records.next();
         }
         let relative = match prefix {
@@ -683,6 +701,19 @@ mod tests {
         assert_eq!(strip_prefix_dir("İ\\İ.txt", "i\u{307}"), Some("İ.txt"));
         assert_eq!(strip_prefix_dir("other\\x.txt", "über"), None);
         assert_eq!(strip_prefix_dir("Über", "über"), None);
+    }
+
+    #[test]
+    fn rename_sources_are_not_status_records() {
+        // A rename source whose path starts with `U` used to be read as an unmerged pair.
+        assert!(!has_conflict(b"## main\0R  Renamed.txt\0UtilsFile.txt\0"));
+        // Worktree renames (` R`) carry the source record too; it must not become a row.
+        let files = parse(b"## main\0 R Renamed.txt\0UtilsFile.txt\0", None);
+        assert_eq!(files.len(), 1, "{files:?}");
+        assert_eq!(files[0].path, "Renamed.txt");
+        // Real conflicts still report.
+        assert!(has_conflict(b"UU merge.txt\0"));
+        assert!(has_conflict(b"## main\0R  a.txt\0b.txt\0UU keep.txt\0"));
     }
 
     #[test]
@@ -838,7 +869,7 @@ mod tests {
         std::fs::write(root.join("newdir").join("a.txt"), "a").unwrap();
         std::fs::write(root.join("newdir").join("deep").join("b.txt"), "b").unwrap();
         // The watcher normally drops the cached status; the test writes directly.
-        invalidate(root.to_str().unwrap());
+        invalidate_key(&path_key(root.to_str().unwrap()));
 
         let inside = status(root.join("newdir").to_str().unwrap());
         assert!(inside.dirty);

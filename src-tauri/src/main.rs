@@ -843,13 +843,14 @@ async fn op_retry_elevated(
     }
     let token = state.begin_external(&request.op_id);
     let cancel = token.clone();
+    let finish_token = token.clone();
     let op_id = request.op_id.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         elevated::request_elevated(&app, request, cancel)
     })
     .await
     .map_err(|err| ApiError::new("THREAD", err.to_string()))?;
-    state.finish_external(&op_id);
+    state.finish_external(&op_id, &finish_token);
     result
 }
 
@@ -913,17 +914,40 @@ async fn shell_menu_background_show(
 
 /// Writes an exported report into a user-picked folder and returns its full path.
 #[tauri::command]
-fn export_text(dir: String, name: String, content: String) -> Result<String, ApiError> {
-    let clean: String = name
-        .chars()
-        .map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c })
-        .collect();
-    if clean.trim().is_empty() {
-        return Err(ApiError::new("INVALID_NAME", "empty export name"));
-    }
-    let path = std::path::Path::new(&dir).join(&clean);
-    std::fs::write(&path, content).map_err(|e| ApiError::from_io(&path.display().to_string(), &e))?;
-    Ok(path.display().to_string())
+async fn export_text(dir: String, name: String, content: String) -> Result<String, ApiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        /// A report larger than this is a bug or an abuse of the IPC surface; the compare
+        /// tables that use it stay far below.
+        const MAX_EXPORT_BYTES: usize = 256 * 1024 * 1024;
+        if content.len() > MAX_EXPORT_BYTES {
+            return Err(ApiError::new("TOO_LARGE", name));
+        }
+        let dir_path = std::path::Path::new(&dir);
+        if !dir_path.is_absolute() || !dir_path.is_dir() {
+            return Err(ApiError::new("INVALID_DEST", dir));
+        }
+        let clean: String = name
+            .chars()
+            .map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c })
+            .collect();
+        if clean.trim().is_empty() || clean == "." || clean == ".." {
+            return Err(ApiError::new("INVALID_NAME", "empty export name"));
+        }
+        let path = dir_path.join(&clean);
+        // Write beside the target and rename: an interrupted export must not leave a
+        // truncated report where the previous one was.
+        let tmp = dir_path.join(format!(".{clean}.{}.tmp", std::process::id()));
+        let result = std::fs::write(&tmp, content).and_then(|()| std::fs::rename(&tmp, &path));
+        match result {
+            Ok(()) => Ok(path.display().to_string()),
+            Err(err) => {
+                let _ = std::fs::remove_file(&tmp);
+                Err(ApiError::from_io(&path.display().to_string(), &err))
+            }
+        }
+    })
+    .await
+    .map_err(|e| ApiError::new("THREAD", e.to_string()))?
 }
 
 include!(concat!(env!("OUT_DIR"), "/deps.rs"));
@@ -1230,40 +1254,49 @@ fn config_warnings() -> Vec<&'static str> {
 }
 
 #[tauri::command]
-fn open_path(path: String) -> Result<(), ApiError> {
-    let target_path = if let Some((archive_path, inner_path)) = archive::resolve_archive_path(&path) {
-        if !inner_path.is_empty() {
-            archive::extract_cached(&archive_path, &inner_path, None)?.to_string_lossy().into_owned()
-        } else {
-            path
+async fn open_path(path: String) -> Result<(), ApiError> {
+    // A member inside an archive is decompressed first; that and the shell hand-off can
+    // take seconds, and a sync command body runs on the WebView2 thread.
+    tauri::async_runtime::spawn_blocking(move || {
+        let target_path =
+            if let Some((archive_path, inner_path)) = archive::resolve_archive_path(&path) {
+                if !inner_path.is_empty() {
+                    archive::extract_cached(&archive_path, &inner_path, None)?
+                        .to_string_lossy()
+                        .into_owned()
+                } else {
+                    path
+                }
+            } else {
+                path
+            };
+        let wide: Vec<u16> = target_path.encode_utf16().chain(std::iter::once(0)).collect();
+        let result = unsafe {
+            ShellExecuteW(
+                None,
+                w!("open"),
+                PCWSTR(wide.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        // ShellExecuteW reports failure through its return value, not GetLastError.
+        let code = result.0 as isize;
+        if code > 32 {
+            return Ok(());
         }
-    } else {
-        path
-    };
-    let wide: Vec<u16> = target_path.encode_utf16().chain(std::iter::once(0)).collect();
-    let result = unsafe {
-        ShellExecuteW(
-            None,
-            w!("open"),
-            PCWSTR(wide.as_ptr()),
-            PCWSTR::null(),
-            PCWSTR::null(),
-            SW_SHOWNORMAL,
-        )
-    };
-    // ShellExecuteW reports failure through its return value, not GetLastError.
-    let code = result.0 as isize;
-    if code > 32 {
-        return Ok(());
-    }
-    Err(match code {
-        // The shell has no default handler for this extension; the caller offers the
-        // system "Open with" dialog instead of leaving the double-click silent.
-        31 => ApiError::new("NO_ASSOCIATION", target_path),
-        2 => ApiError::new("NOT_FOUND", target_path),
-        5 => ApiError::new("ACCESS_DENIED", target_path),
-        _ => ApiError::new("SHELL_FAILED", format!("ShellExecuteW 返回 {code}")),
+        Err(match code {
+            // The shell has no default handler for this extension; the caller offers the
+            // system "Open with" dialog instead of leaving the double-click silent.
+            31 => ApiError::new("NO_ASSOCIATION", target_path),
+            2 => ApiError::new("NOT_FOUND", target_path),
+            5 => ApiError::new("ACCESS_DENIED", target_path),
+            _ => ApiError::new("SHELL_FAILED", format!("ShellExecuteW 返回 {code}")),
+        })
     })
+    .await
+    .map_err(|e| ApiError::new("THREAD", e.to_string()))?
 }
 fn parse_command_line(input: &str) -> (String, Option<String>) {
     let text = input.trim();
@@ -1342,16 +1375,21 @@ async fn open_with(path: String) -> Result<(), ApiError> {
     use windows::Win32::UI::Shell::{
         SHOpenWithDialog, OAIF_ALLOW_REGISTRATION, OAIF_EXEC, OPENASINFO,
     };
-    let target_path = if let Some((archive_path, inner_path)) = archive::resolve_archive_path(&path) {
-        if !inner_path.is_empty() {
-            archive::extract_cached(&archive_path, &inner_path, None)?.to_string_lossy().into_owned()
-        } else {
-            path
-        }
-    } else {
-        path
-    };
     tauri::async_runtime::spawn_blocking(move || {
+        // Extraction belongs to the blocking task: doing it before `spawn_blocking` ran it
+        // on a runtime worker, and a big archive member starved that pool.
+        let target_path =
+            if let Some((archive_path, inner_path)) = archive::resolve_archive_path(&path) {
+                if !inner_path.is_empty() {
+                    archive::extract_cached(&archive_path, &inner_path, None)?
+                        .to_string_lossy()
+                        .into_owned()
+                } else {
+                    path
+                }
+            } else {
+                path
+            };
         shell_menu::run_offthread("flowdir-open-with", std::time::Duration::from_secs(600), move || {
             let wide: Vec<u16> = target_path.encode_utf16().chain(std::iter::once(0)).collect();
             unsafe {
@@ -1663,6 +1701,10 @@ fn main() {
                             let _ = win.close();
                         }
                     });
+                } else {
+                    // A second click during the flush/confirm window must not destroy the
+                    // window: that path skipped the busy check and killed in-flight work.
+                    api.prevent_close();
                 }
             }
         })

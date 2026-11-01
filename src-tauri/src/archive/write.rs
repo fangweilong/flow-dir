@@ -86,6 +86,9 @@ struct Progress {
     bytes_total: u64,
     current: Option<String>,
     last: Instant,
+    /// Entries the walk could not read (deny-ACL folder, vanished path). Reported with the
+    /// final message instead of aborting the whole archive.
+    failed: Vec<crate::ops::OpFailure>,
 }
 
 impl Progress {
@@ -98,8 +101,8 @@ impl Progress {
             name: self.current.clone(),
             work: self.bytes,
             work_total: self.bytes_total,
-            failed_count: 0,
-            failed: Vec::new(),
+            failed_count: self.failed.len() as u32,
+            failed: if done { self.failed.clone() } else { Vec::new() },
             succeeded: Vec::new(),
             done,
             aborted: false,
@@ -147,6 +150,8 @@ pub fn start(
     let level = request.level.min(9);
 
     let token = state.begin_external(&request.job_id);
+    let finish_token = token.clone();
+    let err_token = finish_token.clone();
     let err_state = state.clone();
     let state = state.clone();
     let err_job_id = request.job_id.clone();
@@ -155,11 +160,11 @@ pub fn start(
         .spawn(move || {
             let job_id = request.job_id.clone();
             let _ = run(request, format, level, token, channel);
-            state.finish_external(&job_id);
+            state.finish_external(&job_id, &finish_token);
         });
     // Spawn failure would otherwise leave a ghost job that blocks `wait_idle` forever.
     if spawned.is_err() {
-        err_state.finish_external(&err_job_id);
+        err_state.finish_external(&err_job_id, &err_token);
     }
     spawned.map(|_| ()).map_err(|err| ApiError::new("THREAD", err.to_string()))
 }
@@ -182,7 +187,8 @@ fn run(
     );
     let tmp = temporary(&dest);
     let result: Result<Progress, ApiError> = (|| {
-        let sources = collect(&request.paths, &dest, &tmp, &cancel)?;
+        let mut skipped = Vec::new();
+        let sources = collect(&request.paths, &dest, &tmp, &cancel, &mut skipped)?;
         let bytes_total = sources.iter().map(|source| source.size).sum();
         let mut progress = Progress {
             job_id: request.job_id.clone(),
@@ -193,6 +199,7 @@ fn run(
             bytes_total,
             current: None,
             last: Instant::now(),
+            failed: skipped,
         };
         write_archive(format, &tmp, &sources, level, request.password.as_deref(), &mut progress, &cancel)?;
         fs::rename(&tmp, &dest).map_err(|err| ApiError::from_io(&request.dest, &err))?;
@@ -263,7 +270,22 @@ fn collect(
     dest: &Path,
     tmp: &Path,
     cancel: &AtomicBool,
+    skipped: &mut Vec<crate::ops::OpFailure>,
 ) -> Result<Vec<Source>, ApiError> {
+    /// One unreadable child must not fail the whole archive: record it and keep walking,
+    /// the same way extraction reports per-entry failures.
+    fn record(skipped: &mut Vec<crate::ops::OpFailure>, path: &Path, err: std::io::Error) {
+        let text = path.display().to_string();
+        let error = ApiError::from_io(&text, &err);
+        log::warn!(target: "flowdir::archive", "compress skip {text}: {}", error.code);
+        if skipped.len() < 200 {
+            skipped.push(crate::ops::OpFailure {
+                path: text,
+                code: error.code,
+                detail: error.detail,
+            });
+        }
+    }
     // Compared as lowercased text: both sides are absolute and this runs once per child,
     // where a `canonicalize` syscall per entry would dominate the walk.
     let skip: Vec<String> = [dest, tmp]
@@ -301,8 +323,13 @@ fn collect(
                 if !seen_dirs.insert(key) {
                     continue;
                 }
-                let entries = fs::read_dir(&disk)
-                    .map_err(|err| ApiError::from_io(&disk.display().to_string(), &err))?;
+                let entries = match fs::read_dir(&disk) {
+                    Ok(entries) => entries,
+                    Err(err) => {
+                        record(skipped, &disk, err);
+                        continue;
+                    }
+                };
                 sources.push(Source {
                     disk: disk.clone(),
                     name: name.clone(),
@@ -314,13 +341,24 @@ fn collect(
                 }
                 let mut children: Vec<(PathBuf, String, fs::Metadata)> = Vec::new();
                 for entry in entries {
-                    let entry = entry.map_err(|err| ApiError::from_io(&disk.display().to_string(), &err))?;
+                    let entry = match entry {
+                        Ok(entry) => entry,
+                        Err(err) => {
+                            record(skipped, &disk, err);
+                            continue;
+                        }
+                    };
                     let child = entry.path();
-                    if skip.iter().any(|skipped| *skipped == child.to_string_lossy().to_lowercase()) {
+                    if skip.iter().any(|seen| *seen == child.to_string_lossy().to_lowercase()) {
                         continue;
                     }
-                    let meta = fs::symlink_metadata(&child)
-                        .map_err(|err| ApiError::from_io(&child.display().to_string(), &err))?;
+                    let meta = match fs::symlink_metadata(&child) {
+                        Ok(meta) => meta,
+                        Err(err) => {
+                            record(skipped, &child, err);
+                            continue;
+                        }
+                    };
                     if meta.is_dir() && is_link(&meta) {
                         continue;
                     }
@@ -687,6 +725,7 @@ mod tests {
             bytes_total: 0,
             current: None,
             last: Instant::now(),
+            failed: Vec::new(),
         };
         let cancel = AtomicBool::new(false);
         let data = b"abcdef".as_slice();
