@@ -125,15 +125,19 @@ export function usePaneContextMenus({
     if (!pendingNew) return
     const entries = listData[pendingNew.tabId]?.entries
     if (!entries) return
-    const created = entries.find((entry) => !pendingNew.before.has(entry.name))
-    if (!created) return
+    const created = entries.filter((entry) => !pendingNew.before.has(entry.name))
+    if (!created.length) return
     setPendingNew(null)
+    // Another process (build, download, sync) can add a file in the same window. Renaming
+    // the wrong one is worse than skipping the convenience prompt.
+    if (created.length > 1) return
+    const [entry] = created
     update(pendingNew.tabId, (data) => ({
       ...data,
-      selected: new Set([created.name]),
-      anchor: created.name,
+      selected: new Set([entry.name]),
+      anchor: entry.name,
     }))
-    startRename(pendingNew.paneId, created.name)
+    startRename(pendingNew.paneId, entry.name)
   }, [listData, pendingNew, startRename, update])
 
   const rowFallback = useCallback(

@@ -133,11 +133,15 @@ type ParsedBinding = { ctrl: boolean; alt: boolean; shift: boolean; key: string 
 
 /** Parses `ctrl+shift+f`; returns null for text that is not a binding. */
 export function parseBinding(binding: string): ParsedBinding | null {
-  const tokens = binding
+  // A trailing `+` is the key itself (`ctrl+shift++`); splitting blindly dropped it and
+  // read the previous modifier as the key, so that binding could never fire.
+  const trimmed = binding.trim().toLowerCase()
+  const plusKey = trimmed.endsWith('+')
+  const tokens = (plusKey ? trimmed.slice(0, -1) : trimmed)
     .split('+')
-    .map((token) => token.trim().toLowerCase())
+    .map((token) => token.trim())
     .filter(Boolean)
-  const last = tokens.pop()
+  const last = plusKey ? '+' : tokens.pop()
   if (!last) return null
   let ctrl = false
   let alt = false

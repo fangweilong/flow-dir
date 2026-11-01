@@ -110,6 +110,12 @@ export function ComparePanel({
   const [error, setError] = useState<string | null>(null)
   const [includeHiddenOn, setIncludeHiddenOn] = useState(includeHidden)
   const [hashOn, setHashOn] = useState(false)
+  // `startHash` runs from stale closures (the level loaded before a Refresh, the toggle
+  // effect), so it reads the live values through refs instead of captured props.
+  const hashOnRef = useRef(hashOn)
+  hashOnRef.current = hashOn
+  const hashResultsRef = useRef(hashResults)
+  hashResultsRef.current = hashResults
   const [toleranceSec, setToleranceSec] = useState('2')
   const [exts, setExts] = useState('')
   const [minMb, setMinMb] = useState('')
@@ -180,7 +186,7 @@ export function ComparePanel({
 
   const startHash = useCallback(
     (entries: CompareEntry[], active: Session) => {
-      if (!hashOn) return
+      if (!hashOnRef.current) return
       const pairs = entries
         .filter(
           (entry) =>
@@ -189,7 +195,7 @@ export function ComparePanel({
             entry.right &&
             !entry.left.isDir &&
             !entry.right.isDir &&
-            !hashResults[entry.rel],
+            !hashResultsRef.current[entry.rel],
         )
         .map((entry) => ({
           rel: entry.rel,
@@ -308,6 +314,7 @@ export function ComparePanel({
     cancelHash()
     setCache(new Map())
     setCounts({})
+    hashResultsRef.current = {}
     setHashResults({})
     setPlan(null)
     setPreviewOpen(false)
@@ -456,6 +463,7 @@ export function ComparePanel({
       // the cache now, so do not clear it with results for the old pair.
       if (runSeq !== sessionSeq.current) return
       setCounts({})
+      hashResultsRef.current = {}
       setHashResults({})
       setCache(new Map())
       await loadLevel(levelRel, session, true)

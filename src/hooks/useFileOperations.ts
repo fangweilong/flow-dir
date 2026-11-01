@@ -124,15 +124,27 @@ export function useFileOperations({
         overwrite: options?.overwrite,
       }
       opRequests.current[opId] = { opId, ...request, record: options?.record }
-      const recordEntry = (payload: UndoPayload | null, dirs: string[]) => {
+      const recordEntry = (
+        payload: UndoPayload | null,
+        dirs: string[],
+        recorded: OpRequestShape = request,
+      ) => {
         if (options?.record === false) return
         if (!payload) {
           if (kind === 'delete' && options?.permanent) lastIrreversible.current = true
           return
         }
         lastIrreversible.current = false
-        pushUndo(payload, request, dirs)
+        pushUndo(payload, recorded, dirs)
       }
+      // Redo replays `request.sources`, so a partial or cancelled batch must record only
+      // the items that landed. Otherwise Ctrl+Y re-runs items the user never completed,
+      // and the extra effects are missing from the entry pushed back onto the stack.
+      const narrow = (keep: number[]): OpRequestShape => ({
+        ...request,
+        sources: keep.map((index) => sources[index]),
+        newNames: request.newNames ? keep.map((index) => request.newNames![index]) : undefined,
+      })
       setOps((prev) => ({
         ...prev,
         [opId]: {
@@ -195,14 +207,16 @@ export function useFileOperations({
             // Items that finished before the cancel are already on disk; without a record
             // Ctrl+Z cannot reverse them. `succeeded` is authoritative (the failure list
             // is capped), and `undoEntryFor` keeps positional rename names aligned.
-            const done = new Set(progress.succeeded ?? [])
-            if (done.size) {
+            const done = [...new Set(progress.succeeded ?? [])].sort((a, b) => a - b)
+            if (done.length) {
+              const landed = new Set(done)
               recordEntry(
                 undoEntryFor(kind, sources, {
                   ...options,
-                  skip: sources.filter((_, index) => !done.has(index)),
+                  skip: sources.filter((_, index) => !landed.has(index)),
                 }),
                 options?.dirsAfter ?? [],
+                narrow(done),
               )
             }
             options?.after?.()
@@ -216,12 +230,24 @@ export function useFileOperations({
             const failed = progress.failedCount
             const ok = Math.max(0, progress.total - failed)
             announce(t('op.partial', { ok, failed }))
+            // The backend caps the failure list; past that point the index list is the
+            // only way to know which items landed (and must not be recorded as undoable).
+            const succeeded = progress.succeeded
+            let keep = succeeded ?? []
+            if (!keep.length) {
+              const failedSet = new Set(progress.failed.map((failure) => failure.path.toLowerCase()))
+              keep = sources
+                .map((_, index) => index)
+                .filter((index) => !failedSet.has(sources[index].toLowerCase()))
+            }
+            const landed = new Set(keep)
             recordEntry(
               undoEntryFor(kind, sources, {
                 ...options,
-                skip: progress.failed.map((failure) => failure.path),
+                skip: sources.filter((_, index) => !landed.has(index)),
               }),
               options?.dirsAfter ?? [],
+              narrow(keep),
             )
             options?.after?.()
             refreshPanes()
@@ -251,10 +277,12 @@ export function useFileOperations({
       if (!request || elevating) return
       // Replay only the items that were denied. A rename keeps its full batch because its
       // per-item names are positional.
-      const failedPaths = (ops[opId]?.failed ?? []).map((failure) => failure.path)
+      const failedPaths = new Set(
+        (ops[opId]?.failed ?? []).map((failure) => failure.path.toLowerCase()),
+      )
       const canSubset = request.kind !== 'rename' && !request.newName && !request.newNames
       const subsetSources = canSubset
-        ? request.sources.filter((source) => failedPaths.includes(source))
+        ? request.sources.filter((source) => failedPaths.has(source.toLowerCase()))
         : request.sources
       // Only the shell-level error carries no per-item paths; then the whole request is
       // the right unit to retry.
@@ -264,11 +292,15 @@ export function useFileOperations({
       opRetryElevated(retry)
         .then((report) => {
           refreshPanes()
-          const failed = new Set(report.failed.map((failure) => failure.path))
-          const done = new Set(report.succeeded ?? [])
-          const completed = report.aborted
-            ? retry.sources.filter((_, index) => done.has(index))
-            : retry.sources.filter((source) => !failed.has(source))
+          const failed = new Set(report.failed.map((failure) => failure.path.toLowerCase()))
+          const succeeded = report.succeeded ?? []
+          let keep = succeeded
+          if (!report.aborted && !succeeded.length) {
+            keep = retry.sources
+              .map((_, index) => index)
+              .filter((index) => !failed.has(retry.sources[index].toLowerCase()))
+          }
+          const completed = keep.map((index) => retry.sources[index])
           // The elevated run does not go through `runOp`, so its history entry has to be
           // recorded here or Ctrl+Z would skip over it.
           // An inverse operation replayed by undo/redo must not add a new history entry.
@@ -279,17 +311,29 @@ export function useFileOperations({
                 ...completed.map((source) => parentPath(source)),
               ]),
             )
+            const landed = new Set(keep)
             const entry = undoEntryFor(retry.kind, retry.sources, {
               targetDir: retry.targetDir,
               newName: retry.newName,
               newNames: retry.newNames,
               permanent: retry.permanent,
-              skip: report.aborted
-                ? retry.sources.filter((_, index) => !done.has(index))
-                : report.failed.map((failure) => failure.path),
+              skip: retry.sources.filter((_, index) => !landed.has(index)),
             })
-            if (entry) pushUndo(entry, retry, dirs)
-            else if (retry.kind === 'delete' && retry.permanent) lastIrreversible.current = true
+            if (entry) {
+              pushUndo(
+                entry,
+                {
+                  ...retry,
+                  sources: completed,
+                  newNames: retry.newNames
+                    ? keep.map((index) => retry.newNames![index])
+                    : undefined,
+                },
+                dirs,
+              )
+            } else if (retry.kind === 'delete' && retry.permanent) {
+              lastIrreversible.current = true
+            }
           }
           if (report.error) {
             showToast(t('op.failed', { code: t(errorKey(report.error.code)) }))

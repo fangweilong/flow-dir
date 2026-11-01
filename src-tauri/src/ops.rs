@@ -352,11 +352,14 @@ pub fn run_headless(request: Request, cancel: Arc<AtomicBool>) -> ElevatedReport
         let sink = Channel::new(|_| Ok(()));
         run(&request, kind, None, cancel, sink)
     });
+    // The failure list is capped, so a truncated report needs the index list to tell which
+    // items actually landed when the caller records an undo entry.
+    let truncated = outcome.failed_total as usize > outcome.failed.len();
     ElevatedReport {
         aborted: outcome.aborted,
         failed: outcome.failed,
         failed_total: outcome.failed_total,
-        succeeded: if outcome.aborted {
+        succeeded: if outcome.aborted || truncated {
             outcome.succeeded
         } else {
             Vec::new()
@@ -416,6 +419,12 @@ pub fn start(
                 ),
             }
             let denied = outcome_denied(&outcome);
+            let truncated = outcome.failed_total as usize > outcome.failed.len();
+            let succeeded = if outcome.aborted || truncated {
+                outcome.succeeded
+            } else {
+                Vec::new()
+            };
             let _ = progress.send(OpProgress {
                 op_id: op_id.clone(),
                 phase: "done".into(),
@@ -426,13 +435,10 @@ pub fn start(
                 work_total: 0,
                 failed_count: outcome.failed_total,
                 failed: outcome.failed,
-                // Only an aborted batch needs the index list; a successful one would
-                // otherwise push a large vector over IPC for nothing.
-                succeeded: if outcome.aborted {
-                    outcome.succeeded
-                } else {
-                    Vec::new()
-                },
+                // The index list is needed by an aborted batch (to undo the part that
+                // landed) and by a batch whose failure list was capped: the paths alone
+                // then cannot tell which items succeeded.
+                succeeded,
                 done: true,
                 aborted: outcome.aborted,
                 error: outcome.error,

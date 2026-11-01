@@ -89,6 +89,8 @@ export function SearchOverlay({
   const [scrollTop, setScrollTop] = useState(0)
   const [viewHeight, setViewHeight] = useState(360)
   const gen = useRef(0)
+  /** Hits deleted from this panel; streamed batches must skip them. */
+  const doomed = useRef(new Set<string>())
   const inputRef = useRef<HTMLInputElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -181,12 +183,26 @@ export function SearchOverlay({
     inputRef.current?.focus()
   }, [])
 
+  // Escape must close even after a click on a non-focusable part of the panel moved focus
+  // to `body`; the container's own onKeyDown never saw those events.
+  useEffect(() => {
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape' && !ev.isComposing) {
+        ev.preventDefault()
+        onClose()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
   useEffect(() => {
     const value = query.trim()
     if (!value) {
       // Bump the generation before cancelling: a batch already in flight must not write
       // its hits back, or Enter would open a result for a query that was cleared.
       gen.current += 1
+      doomed.current.clear()
       setItems([])
       setActivePath(null)
       setProvider('')
@@ -204,6 +220,7 @@ export function SearchOverlay({
     setProvider('')
     setLoading(true)
     setError(null)
+    doomed.current.clear()
     void searchCancel().catch(() => undefined)
     const timer = window.setTimeout(() => {
       const acc: SearchItem[] = []
@@ -224,7 +241,9 @@ export function SearchOverlay({
             return
           }
           if (batch.items.length) {
-            acc.push(...batch.items)
+            // Rows deleted from this panel are gone from disk; the accumulator must not
+            // resurrect them when a later batch of the same scan arrives.
+            acc.push(...batch.items.filter((item) => !doomed.current.has(item.path)))
             setItems(acc.slice())
           }
           setProvider(batch.provider)
@@ -302,8 +321,9 @@ export function SearchOverlay({
     onDelete(selectedPaths)
     // The rows are gone from disk; keeping them would allow a second delete or an
     // activate that fails with NOT_FOUND.
-    const doomed = new Set(selectedPaths)
-    setItems((prev) => prev.filter((item) => !doomed.has(item.path)))
+    const gone = new Set(selectedPaths)
+    for (const path of selectedPaths) doomed.current.add(path)
+    setItems((prev) => prev.filter((item) => !gone.has(item.path)))
     setSelected(new Set())
   }
 

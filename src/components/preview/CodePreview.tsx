@@ -9,6 +9,9 @@ type Props = {
 
 type TokenKind = 'comment' | 'string' | 'keyword' | 'type' | 'number' | 'boolean' | 'plain'
 
+/** Lines rendered as DOM; beyond this the file is still fully copyable. */
+const MAX_RENDER_LINES = 3000
+
 interface Token {
   kind: TokenKind
   text: string
@@ -228,9 +231,12 @@ export function CodePreview({ text, name, t }: Props) {
     return text.split(/\r?\n/)
   }, [text])
 
+  // A 1 MB log is tens of thousands of lines and several spans each; rendering all of it
+  // froze the window on every selection change. The full text is still copyable.
   const tokenizedLines = useMemo(() => {
-    return lines.map((line) => tokenizeLine(line, ext))
+    return lines.slice(0, MAX_RENDER_LINES).map((line) => tokenizeLine(line, ext))
   }, [lines, ext])
+  const hiddenLines = lines.length - tokenizedLines.length
 
   const copyAll = () => {
     if (!text) return
@@ -299,7 +305,7 @@ export function CodePreview({ text, name, t }: Props) {
               className="select-none shrink-0 border-r border-line/40 bg-surface-2/40 py-1 pr-2.5 text-right font-mono text-muted-2"
               style={{ minWidth: `${lineCountDigits * 0.55 + 1.2}rem` }}
             >
-              {lines.map((_, i) => (
+              {tokenizedLines.map((_, i) => (
                 <div key={i} className="px-1">{i + 1}</div>
               ))}
             </div>
@@ -349,6 +355,11 @@ export function CodePreview({ text, name, t }: Props) {
             ))}
           </div>
         </div>
+        {hiddenLines > 0 && (
+          <div className="border-t border-line/40 px-3 py-2 text-[0.65625rem] text-muted-2">
+            {t('preview.linesTruncated', { count: tokenizedLines.length })}
+          </div>
+        )}
       </div>
     </div>
   )

@@ -22,6 +22,8 @@ const errorCode = (err: unknown): string =>
 export interface DeleteConfirmModalState {
   paneId: string
   names: string[]
+  /** Absolute paths resolved when the dialog opened; the pane can navigate meanwhile. */
+  paths: string[]
   permanent: boolean
 }
 
@@ -102,8 +104,13 @@ export function useFileActionHandlers({
 
   const deleteEntries = useCallback((paneId: string, names: string[], permanent: boolean) => {
     if (!names.length) return
-    setDeleteConfirm({ paneId, names, permanent })
-  }, [setDeleteConfirm])
+    // A launch request or tab switch can move the pane before the user confirms, and the
+    // dialog only shows names — resolving at confirm time deleted same-named files in the
+    // new folder. Freeze the absolute paths here instead.
+    const paths = pathsFor(paneId, names)
+    if (paths.length !== names.length) return
+    setDeleteConfirm({ paneId, names, paths, permanent })
+  }, [pathsFor, setDeleteConfirm])
 
 
   const openProperties = useCallback(

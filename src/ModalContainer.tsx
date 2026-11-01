@@ -51,6 +51,7 @@ export type PromptState = {
 export type DeleteConfirmState = {
   paneId: string
   names: string[]
+  paths: string[]
   permanent: boolean
 }
 
@@ -354,9 +355,9 @@ export function ModalContainer({
               deleteConfirm.permanent ? 'confirm.deletePermanent' : 'confirm.recycle',
               { count: deleteConfirm.names.length },
             )}
-            items={deleteConfirm.names.map((name) => ({
+            items={deleteConfirm.names.map((name, index) => ({
               name,
-              path: pathsFor(deleteConfirm.paneId, [name])[0],
+              path: deleteConfirm.paths[index],
             }))}
             confirmLabel={t(
               deleteConfirm.permanent ? 'confirm.deletePermanentAction' : 'confirm.recycleAction',
@@ -366,7 +367,7 @@ export function ModalContainer({
               const pending = deleteConfirm
               setDeleteConfirm(null)
               focusList(pending.paneId)
-              runOp('delete', pathsFor(pending.paneId, pending.names), { permanent: pending.permanent })
+              runOp('delete', pending.paths, { permanent: pending.permanent })
             }}
             onClose={() => {
               const pending = deleteConfirm

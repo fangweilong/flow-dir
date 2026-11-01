@@ -304,6 +304,7 @@ export const en: Record<BaseKey, string> = {
   'preview.folder': 'Folder',
   'preview.folderHint': 'Double-click to open this folder',
   'preview.tooLarge': 'File is larger than the preview cap, preview skipped',
+  'preview.linesTruncated': 'Rendering the first {count} lines; the full text is still copyable',
   'preview.cloud': 'Cloud file, not downloaded yet',
   'preview.cloudHint': 'Preview paused so nothing is downloaded; the button below reads the file',
   'preview.cloudDownload': 'Download and preview',

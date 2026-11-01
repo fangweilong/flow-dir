@@ -301,6 +301,7 @@ export const zh = {
   'preview.folder': '文件夹',
   'preview.folderHint': '双击可进入该文件夹',
   'preview.tooLarge': '文件超过预览大小上限，暂不生成预览',
+  'preview.linesTruncated': '仅渲染前 {count} 行，完整内容仍可复制',
   'preview.cloud': '云端文件，尚未下载到本机',
   'preview.cloudHint': '为了避免自动下载，预览已暂停；点击下方按钮才会读取文件',
   'preview.cloudDownload': '下载并预览',
