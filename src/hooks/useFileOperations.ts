@@ -393,7 +393,9 @@ export function useFileOperations({
                   ...current,
                   failed: report.failed,
                   failedCount: report.failedTotal,
-                  failedIndices: failedIdxNew,
+                  // `opRequests` now holds only the failed sources, so their positions
+                  // restart at 0: keeping the old indices would skip items on the next retry.
+                  failedIndices: failedIdxNew.map((_, index) => index),
                 },
               }
             })

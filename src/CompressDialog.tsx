@@ -28,6 +28,12 @@ const LEVELS = [
   { level: 9, key: 'compress.levelMax' },
 ] as const
 
+/**
+ * xz and zstd have no uncompressed frame, so level 0 would not store anything; the option
+ * is hidden there instead of silently compressing (the backend maps 0 to its fastest level).
+ */
+const STORE_FORMATS: CompressFormat[] = ['zip', '7z', 'tar.gz']
+
 /** Swaps the archive extension when the format changes, keeping the rest of the name. */
 function rename(name: string, from: CompressFormat, to: CompressFormat) {
   const old = COMPRESS_EXTENSIONS[from]
@@ -54,6 +60,9 @@ export function CompressDialog({ title, dir, name, format, lang, onSubmit, onClo
   }, [name])
 
   const encrypted = pick === 'zip'
+  const levels = STORE_FORMATS.includes(pick)
+    ? LEVELS
+    : LEVELS.filter((item) => item.level > 0)
   const submit = () => {
     const trimmed = value.trim()
     if (!trimmed) return
@@ -82,6 +91,7 @@ export function CompressDialog({ title, dir, name, format, lang, onSubmit, onClo
             onChange={(ev) => {
               const next = ev.target.value as CompressFormat
               setValue((current) => rename(current, pick, next))
+              if (!STORE_FORMATS.includes(next) && level === 0) setLevel(3)
               setPick(next)
             }}
             className={control}
@@ -100,7 +110,7 @@ export function CompressDialog({ title, dir, name, format, lang, onSubmit, onClo
             onChange={(ev) => setLevel(Number(ev.target.value))}
             className={control}
           >
-            {LEVELS.map((item) => (
+            {levels.map((item) => (
               <option key={item.level} value={item.level}>
                 {t(item.key)}
               </option>

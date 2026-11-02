@@ -294,6 +294,7 @@ export const configPath = () => invoke<string>('config_path')
 export const restartApp = () => invoke<void>('restart_app')
 /** Graceful quit: cancels running operations, flushes layout and settings, then exits. */
 export const quitApp = () => invoke<void>('quit_app')
+export const cancelQuit = () => invoke<void>('cancel_quit')
 /** Ids of the operations still running, used to confirm before a quit. */
 export const activeOps = () => invoke<string[]>('active_ops')
 export const pickFolder = (title: string, initial: string) =>

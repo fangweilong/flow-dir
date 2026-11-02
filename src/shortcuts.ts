@@ -241,6 +241,8 @@ export const FIXED_BINDINGS: { keys: string; label: Key }[] = [
     label: 'shortcut.fixedTabJump' as Key,
   })),
   { keys: 'alt+up', label: 'shortcut.fixedUpAlias' },
+  { keys: 'f4', label: 'shortcut.addressBar' },
+  { keys: 'alt+d', label: 'shortcut.addressBar' },
 ]
 
 /** Human label of a fixed combination that `binding` would shadow, if any. */

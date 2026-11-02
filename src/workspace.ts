@@ -72,6 +72,10 @@ export function adoptIds(ws: Workspace) {
   let max = 0
   const scan = (node: Node) => {
     if (node.t === 'split') {
+      // Split ids are minted from the same counter; skipping them let a restored `s8`
+      // collide with the next `splitPane` (`setRatio` then moved the wrong divider).
+      const match = /\d+$/.exec(node.id)
+      if (match) max = Math.max(max, Number(match[0]))
       scan(node.a)
       scan(node.b)
       return

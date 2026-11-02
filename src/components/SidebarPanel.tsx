@@ -92,7 +92,7 @@ export function SidebarPanel({
             key={place.key}
             label={place.label}
             hint={place.custom ? t('sidebar.pinPlace') : undefined}
-            active={place.path === treeSelected}
+            active={pathKey(place.path) === pathKey(treeSelected)}
             dropDir={place.path}
             onClick={() => openTreePath(place.path)}
             onContextMenu={(ev) => openPlaceMenu(place, pointOf(ev))}

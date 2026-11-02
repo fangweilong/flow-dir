@@ -15,7 +15,7 @@ const ConfirmDialog = lazy(() =>
 )
 import type { CompressValues } from './CompressDialog'
 import { baseName, joinPath } from './paths'
-import { COMPRESS_EXTENSIONS, uniquePaths, type CompressFormat } from './api'
+import { COMPRESS_EXTENSIONS, cancelQuit, uniquePaths, type CompressFormat } from './api'
 import { errorCode } from './hooks/useFileOperations'
 import { errorKey } from './i18n'
 
@@ -390,7 +390,12 @@ export function ModalContainer({
               setQuitBusy(null)
               void quitApp()
             }}
-            onClose={() => setQuitBusy(null)}
+            onClose={() => {
+              setQuitBusy(null)
+              // The backend latched `closing` when the close request was deferred; clearing
+              // it is what makes the next close click work again.
+              void cancelQuit()
+            }}
           />
         </Suspense>
       )}

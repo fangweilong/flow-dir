@@ -292,7 +292,9 @@ export function usePaneKeyboard({
       }
 
       if (matchBinding(ev, keys.open)) {
-        const entry = view[anchorIdx]
+        // After Shift+Arrow the anchor stays at the range start; the row the user
+        // travelled to is the keyboard cursor.
+        const entry = view[cursorIndex()]
         if (entry) activate(entry)
         return
       }
@@ -339,12 +341,13 @@ export function usePaneKeyboard({
       }
 
       if (matchBinding(ev, keys.contextMenu)) {
-        const name = view[anchorIdx]?.name
+        const entry = view[cursorIndex()]
+        const name = entry?.name
         const row = name ? sectionRef.current?.querySelector<HTMLElement>(`[data-row="${CSS.escape(name)}"]`) : null
-        if (name && row) {
+        if (entry && row) {
           ev.preventDefault()
           const rect = row.getBoundingClientRect()
-          onRowContextMenu(view[anchorIdx], {
+          onRowContextMenu(entry, {
             clientX: rect.left + 40,
             clientY: rect.top + 8,
             screenX: window.screenX + rect.left + 40,

@@ -210,6 +210,9 @@ export function fromSnapshot(value: unknown): Workspace | null {
   const paneMap = panes as Record<string, PaneState>
   const tabMap = tabs as Record<string, TabState>
   for (const pane of Object.values(paneMap)) {
+    // `layout.json` is user-editable data; a `null` member must reject the snapshot, not
+    // throw out of the bootstrap and leave the window empty with no recovery path.
+    if (!pane || typeof pane !== 'object') return null
     if (!Array.isArray(pane.tabIds) || !pane.tabIds.length) return null
     if (!pane.tabIds.every((id) => id in tabMap)) return null
     if (!(pane.activeTabId in tabMap)) return null
@@ -217,9 +220,17 @@ export function fromSnapshot(value: unknown): Workspace | null {
   }
   for (const tab of Object.values(tabMap)) {
     // An empty path is the drive overview tab and must survive a restart.
+    if (!tab || typeof tab !== 'object') return null
     if (typeof tab.path !== 'string') return null
     if (!Array.isArray(tab.history) || typeof tab.histIdx !== 'number') return null
+    if (!tab.history.every((entry) => typeof entry === 'string')) return null
   }
+  // Older builds could leave tab records no pane points at; restoring them would show
+  // closed folders in the compare pickers forever and keep growing the file.
+  const referenced = new Set(Object.values(paneMap).flatMap((pane) => pane.tabIds))
+  const liveTabs = Object.fromEntries(
+    Object.entries(tabMap).filter(([id]) => referenced.has(id)),
+  )
   const activePaneId =
     typeof snapshot.activePaneId === 'string' && snapshot.activePaneId in paneMap
       ? snapshot.activePaneId
@@ -228,7 +239,7 @@ export function fromSnapshot(value: unknown): Workspace | null {
   return {
     root: snapshot.root,
     panes: paneMap,
-    tabs: tabMap,
+    tabs: liveTabs,
     activePaneId,
   }
 }
