@@ -235,6 +235,9 @@ fn run_worker(
     let process = shell_execute(exe, params)?;
     let fork = OwnedHandle(process);
     let budget = Instant::now() + Duration::from_millis(u64::from(WAIT_TIMEOUT_MS));
+    // Set once the client passed the PID check: only then can a later read legitimately
+    // receive a report. A rejected impostor must never get a second chance to answer.
+    let trusted = std::cell::Cell::new(false);
 
     let result = (|| {
         // The helper may exit before it ever connects (credential-based elevation denies
@@ -245,6 +248,7 @@ fn run_worker(
         // The nonce hides the name, but a same-user process could still win the race to
         // an instance; only the helper this GUI launched may send the request.
         verify_client(pipe.0, fork.0)?;
+        trusted.set(true);
         let payload = serde_json::to_vec(&Payload {
             nonce: nonce.to_string(),
             request,
@@ -272,17 +276,26 @@ fn run_worker(
             // cancel flag aborted it mid-way. Reading again with a fresh budget and a fresh
             // (unsignalled) cancel flag recovers the indices it already completed, so a
             // cancelled batch does not lose its undo record.
-            let grace_cancel = AtomicBool::new(false);
-            let grace_budget = Instant::now() + Duration::from_secs(10);
-            let recovered = read_message(
-                pipe.0,
-                event.0,
-                Some(fork.0),
-                &grace_cancel,
-                grace_budget,
-            )
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<ops::ElevatedReport>(&bytes).ok());
+            // A prompt that was cancelled before the helper connected, or a pipe whose
+            // client never passed the PID check, cannot produce a report: waiting would
+            // only delay the retry command by the whole grace budget.
+            let recovered = if trusted.get() {
+                let grace_cancel = AtomicBool::new(false);
+                // The helper only has to finish the item in flight and serialize one
+                // report, so a short budget is enough for a cooperative abort.
+                let grace_budget = Instant::now() + Duration::from_secs(5);
+                read_message(
+                    pipe.0,
+                    event.0,
+                    Some(fork.0),
+                    &grace_cancel,
+                    grace_budget,
+                )
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<ops::ElevatedReport>(&bytes).ok())
+            } else {
+                None
+            };
             let _ = WaitForSingleObject(fork.0, 10_000);
             if let Some(report) = recovered {
                 return Ok(report);

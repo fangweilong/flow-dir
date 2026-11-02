@@ -63,7 +63,8 @@ pub struct Request {
     pub dest: String,
     /// `zip` | `7z` | `tar.gz` | `tar.xz` | `tar.zst`.
     pub format: String,
-    /// 0-9, clamped; 0 stores without compressing.
+    /// 0-9, clamped. 0 stores without compressing for zip/7z/tar.gz; xz and zstd have no
+    /// store mode, so 0 maps to their fastest level instead (the UI hides the option).
     #[serde(default)]
     pub level: u32,
     pub password: Option<String>,
@@ -579,7 +580,10 @@ fn write_tar(
             flate2::Compression::new(level),
         )),
         Format::TarXz => {
-            let mut options = lzma_rust2::XzOptions::with_preset(level);
+            // Preset 0 is a real (fast) preset, but the dialog labels 0 as "store"; xz
+            // cannot store an uncompressed frame, so treat it as the fastest level.
+            let preset = if level == 0 { 1 } else { level };
+            let mut options = lzma_rust2::XzOptions::with_preset(preset);
             options.set_block_size(std::num::NonZeroU64::new(64 << 20));
             Box::new(
                 lzma_rust2::XzWriter::new(writer, options)
@@ -587,7 +591,9 @@ fn write_tar(
             )
         }
         _ => Box::new(
-            zstd::Encoder::new(writer, level as i32)
+            // zstd reads level 0 as "codec default" (3), not "store"; map the dialog's 0 to
+            // its fastest real level so the choice stays predictable.
+            zstd::Encoder::new(writer, level.max(1) as i32)
                 .map_err(|err| ApiError::new("WRITE", err.to_string()))?
                 .auto_finish(),
         ),

@@ -11,8 +11,9 @@ use std::sync::{LazyLock, Mutex};
 
 use windows::core::{implement, Result as WinResult, BOOL, HRESULT};
 use windows::Win32::Foundation::{
-    GlobalFree, DATA_S_SAMEFORMATETC, DRAGDROP_S_CANCEL, DRAGDROP_S_USEDEFAULTCURSORS,
-    DV_E_FORMATETC, E_OUTOFMEMORY, HGLOBAL, OLE_E_ADVISENOTSUPPORTED, POINT, S_FALSE, S_OK,
+    GlobalFree, DATA_S_SAMEFORMATETC, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP,
+    DRAGDROP_S_USEDEFAULTCURSORS, DV_E_FORMATETC, E_OUTOFMEMORY, HGLOBAL, OLE_E_ADVISENOTSUPPORTED,
+    POINT, S_FALSE, S_OK,
 };
 use windows::Win32::System::Com::{
     IAdviseSink, IDataObject, IDataObject_Impl, IEnumFORMATETC, IEnumFORMATETC_Impl, DATADIR_GET,
@@ -241,14 +242,19 @@ impl IEnumFORMATETC_Impl for Formats_Impl {
 struct DropSource;
 
 impl IDropSource_Impl for DropSource_Impl {
-    /// Esc cancels; every other decision belongs to OLE (button release, target effect).
+    /// Esc cancels, releasing the button performs the drop, anything else keeps dragging.
     fn QueryContinueDrag(
         &self,
         escape: BOOL,
-        _keys: windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS,
+        keys: windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS,
     ) -> HRESULT {
+        use windows::Win32::System::SystemServices::MK_LBUTTON;
         if escape.as_bool() {
             DRAGDROP_S_CANCEL
+        } else if keys.0 & MK_LBUTTON.0 == 0 {
+            // OLE only forwards `IDropTarget::Drop` when this returns `DRAGDROP_S_DROP`;
+            // `S_OK` after the button is up leaves the drag without an outcome.
+            DRAGDROP_S_DROP
         } else {
             S_OK
         }

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -193,10 +193,13 @@ fn root_data(git: &Path, root: &str) -> Option<RootData> {
     if !output.status.success() {
         return None;
     }
+    // `None` means a descendant kept the pipe open past the drain window: the porcelain
+    // text is unknown, not empty, so this folder must not claim to be clean.
+    let stdout = output.stdout?;
     let tracked = Arc::new(tracked_paths(git, root));
     let data = RootData {
         at: Instant::now(),
-        output: Arc::new(output.stdout),
+        output: Arc::new(stdout),
         tracked,
     };
     if let Ok(mut cache) = ROOT_CACHE.lock() {
@@ -229,8 +232,10 @@ fn tracked_paths(git: &Path, root: &str) -> Vec<String> {
     if !output.status.success() {
         return Vec::new();
     }
-    output
-        .stdout
+    let Some(stdout) = output.stdout else {
+        return Vec::new();
+    };
+    stdout
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
         .map(|path| String::from_utf8_lossy(path).replace('/', "\\"))
@@ -323,7 +328,8 @@ fn toplevel(git: &PathBuf, dir: &str) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let text = String::from_utf8_lossy(&output.stdout);
+    let stdout = output.stdout?;
+    let text = String::from_utf8_lossy(&stdout);
     // `--show-toplevel` prints `D:/` for a drive root; trimming the separator there would
     // leave `D:`, which is a drive-relative path, not the root.
     let mut root = text.trim().replace('/', "\\");
@@ -472,21 +478,33 @@ fn repo_state(git: &Path, dir: &Path) -> GitRepo {
     if !output.status.success() {
         return state;
     }
-    let (_, ahead, behind, upstream) = summary(&output.stdout);
+    let Some(stdout) = output.stdout else {
+        // Unknown output must leave the badge unchecked instead of reporting "clean".
+        return state;
+    };
+    let (_, ahead, behind, upstream) = summary(&stdout);
     state.checked = true;
-    state.dirty = has_changes(&output.stdout);
-    state.conflict = has_conflict(&output.stdout);
+    state.dirty = has_changes(&stdout);
+    state.conflict = has_conflict(&stdout);
     state.ahead = ahead;
     state.behind = behind;
     state.upstream = upstream;
     state
 }
 
+/// Result of a git run whose pipes were drained with a deadline.
+struct Captured {
+    status: ExitStatus,
+    /// `None` when a descendant kept stdout open past the drain window. Callers must treat
+    /// that as unknown output, never as empty output.
+    stdout: Option<Vec<u8>>,
+}
+
 /// Runs `command` with a hard deadline. A work tree on an unreachable share (or a stuck
 /// `core.fsmonitor` hook) would otherwise pin a blocking thread forever; `None` means the
 /// child was killed. Output is drained on threads because status on a large repository
 /// writes far more than a pipe buffer.
-fn output_with_timeout(command: &mut Command, timeout: Duration) -> Option<Output> {
+fn output_with_timeout(command: &mut Command, timeout: Duration) -> Option<Captured> {
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -518,10 +536,12 @@ fn output_with_timeout(command: &mut Command, timeout: Duration) -> Option<Outpu
                 // the child is gone: the status is already known, and a still-blocked
                 // reader must not turn a finished command into "no answer at all".
                 let drain = Instant::now() + Duration::from_millis(250);
-                return Some(Output {
+                // The stderr reader still has to be drained so the pipe cannot block the
+                // child, but no caller reads its text.
+                let _ = collect_within(err, drain);
+                return Some(Captured {
                     status,
                     stdout: collect_within(out, drain),
-                    stderr: collect_within(err, drain),
                 });
             }
             Ok(None) if Instant::now() >= deadline => {
@@ -540,16 +560,16 @@ fn output_with_timeout(command: &mut Command, timeout: Duration) -> Option<Outpu
 /// bytes rather than `None`: the caller already has the exit status, and dropping the whole
 /// answer because a descendant still holds the pipe would report a healthy command as
 /// failed.
-fn collect_within(handle: std::thread::JoinHandle<Vec<u8>>, deadline: Instant) -> Vec<u8> {
+fn collect_within(handle: std::thread::JoinHandle<Vec<u8>>, deadline: Instant) -> Option<Vec<u8>> {
     while !handle.is_finished() {
         if Instant::now() >= deadline {
             // Dropping the handle detaches the reader, which ends on its own once the
-            // pipe is closed.
-            return Vec::new();
+            // pipe is closed. `None` keeps "still blocked" distinct from "no output".
+            return None;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    handle.join().unwrap_or_default()
+    handle.join().ok()
 }
 
 /// Splits pruned status paths into direct children and child folders, dropping duplicates

@@ -269,9 +269,10 @@ fn install_inner<R: Runtime>(app: &AppHandle<R>) -> Result<(), ApiError> {
             verify_file(&downloaded, asset)?;
             // A failed installer must not relaunch the old image: the user would see the
             // update "complete" while nothing changed. `start /wait` propagates the exit
-            // code, so stop the helper before the relaunch line when it is non-zero.
+            // code, so skip the relaunch line when it is non-zero. `goto` (not `exit /b`)
+            // keeps the helper's own `del "%~f0"` cleanup reachable.
             format!(
-                "start \"\" /wait \"{}\" /S\r\nif errorlevel 1 exit /b 1\r\nstart \"\" \"{}\"",
+                "start \"\" /wait \"{}\" /S\r\nif errorlevel 1 goto installed\r\nstart \"\" \"{}\"\r\n:installed",
                 batch_path(&downloaded),
                 batch_path(&exe)
             )

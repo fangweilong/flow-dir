@@ -285,6 +285,15 @@ fn quit_app(app: tauri::AppHandle) {
     shutdown(&app, false);
 }
 
+/// Restores the normal close path after the user dismisses the "operation running" prompt.
+///
+/// Without this the `closing` latch would stay set, so every later click on the window close
+/// button (or Alt+F4) would be ignored until the process restarts.
+#[tauri::command]
+fn cancel_quit(app: tauri::AppHandle) {
+    app.state::<AppState>().closing.store(false, Ordering::SeqCst);
+}
+
 #[tauri::command]
 fn config_path(app: tauri::AppHandle) -> Result<String, ApiError> {
     store::config_dir(&app).map(|dir| dir.to_string_lossy().into_owned())
@@ -618,7 +627,7 @@ fn op_cancel(state: tauri::State<'_, ops::OpState>, op_id: String) {
 /// Extracts one archive into `dest`; progress arrives on the channel and `op_cancel`
 /// stops it, because extraction registers itself in the shared op state.
 #[tauri::command(rename_all = "camelCase")]
-fn archive_extract(
+async fn archive_extract(
     state: tauri::State<'_, ops::OpState>,
     job_id: String,
     archive: String,
@@ -626,13 +635,20 @@ fn archive_extract(
     password: Option<String>,
     on_progress: Channel<ops::OpProgress>,
 ) -> Result<(), ApiError> {
-    archive::start(&state, job_id, archive, dest, password, on_progress)
+    // The preflight touches the filesystem (`is_file`, destination checks); on a dead
+    // share that must not run on the WebView2 IPC thread.
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        archive::start(&state, job_id, archive, dest, password, on_progress)
+    })
+    .await
+    .map_err(|err| ApiError::new("THREAD", err.to_string()))?
 }
 
 /// Creates an archive from the selection; progress arrives on the channel and `op_cancel`
 /// stops it, because compression registers itself in the shared op state.
 #[tauri::command(rename_all = "camelCase")]
-fn archive_compress(
+async fn archive_compress(
     state: tauri::State<'_, ops::OpState>,
     job_id: String,
     paths: Vec<String>,
@@ -642,18 +658,24 @@ fn archive_compress(
     password: Option<String>,
     on_progress: Channel<ops::OpProgress>,
 ) -> Result<(), ApiError> {
-    archive::write::start(
-        &state,
-        archive::write::Request {
-            job_id,
-            paths,
-            dest,
-            format,
-            level,
-            password,
-        },
-        on_progress,
-    )
+    // Same reason as `archive_extract`: every source is stat'ed before the job starts.
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        archive::write::start(
+            &state,
+            archive::write::Request {
+                job_id,
+                paths,
+                dest,
+                format,
+                level,
+                password,
+            },
+            on_progress,
+        )
+    })
+    .await
+    .map_err(|err| ApiError::new("THREAD", err.to_string()))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1751,12 +1773,13 @@ fn main() {
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_millis(900));
                         // A running copy/move needs the user's word before the window goes
-                        // away; the frontend answers with `quit_app`. Cancelling restores
-                        // the normal close path.
+                        // away; the frontend answers with `quit_app`. Calling `close()`
+                        // here would re-enter this handler while `closing` is still set and
+                        // be prevented forever, so the idle path exits directly.
                         if confirm_if_busy(win.app_handle()) {
                             win.state::<AppState>().closing.store(false, Ordering::SeqCst);
                         } else {
-                            let _ = win.close();
+                            shutdown(win.app_handle(), false);
                         }
                     });
                 } else {
@@ -1794,6 +1817,7 @@ fn main() {
             config_path,
             restart_app,
             quit_app,
+            cancel_quit,
             active_ops,
             pick_folder,
             set_app_theme,

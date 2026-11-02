@@ -320,12 +320,14 @@ pub fn level(left: &str, right: &str, prefix: &str, options: &Options) -> Result
 }
 
 /// Recursively collects files below `root` keyed by their lowercased relative path; the
-/// counts only need identity, not the display spelling.
+/// counts only need identity, not the display spelling. The boolean mirrors
+/// [`SideEntry::compared`]: a filtered file still pairs with its counterpart, it is not a
+/// file that exists on one side only.
 fn walk_files(
     root: &Path,
     options: &Options,
     cancel: &std::sync::atomic::AtomicBool,
-    out: &mut HashMap<String, Meta>,
+    out: &mut HashMap<String, (Meta, bool)>,
     scanned: &mut u32,
 ) {
     let mut stack = vec![(root.to_path_buf(), String::new())];
@@ -352,9 +354,8 @@ fn walk_files(
                 stack.push((entry.path(), child_rel));
             } else {
                 let item = meta_of(&meta, false);
-                if file_ok(options, &name, &item) {
-                    out.insert(child_rel.to_lowercase(), item);
-                }
+                let compared = file_ok(options, &name, &item);
+                out.insert(child_rel.to_lowercase(), (item, compared));
             }
         }
     }
@@ -392,18 +393,32 @@ fn count_pair(
         different: 0,
         same: 0,
     };
-    for (key, l) in &left_files {
+    for (key, (l, left_compared)) in &left_files {
         match right_files.get(key) {
-            None => counts.left_only += 1,
-            Some(r) if l.size == r.size && l.mtime.abs_diff(r.mtime) <= options.tolerance_ms => {
-                counts.same += 1;
+            // A one-sided file only counts when that side passes the filters, matching
+            // `compare_maps`; otherwise the row would never be shown.
+            None => {
+                if *left_compared {
+                    counts.left_only += 1;
+                }
             }
-            Some(_) => counts.different += 1,
+            Some((r, right_compared)) => {
+                // Both exist but both copies are hidden by the filters: `compare_maps`
+                // drops the row entirely, so it must not show up in the badge either.
+                if !left_compared && !right_compared {
+                    continue;
+                }
+                if l.size == r.size && l.mtime.abs_diff(r.mtime) <= options.tolerance_ms {
+                    counts.same += 1;
+                } else {
+                    counts.different += 1;
+                }
+            }
         }
     }
     counts.right_only += right_files
-        .keys()
-        .filter(|key| !left_files.contains_key(*key))
+        .iter()
+        .filter(|(key, (_, compared))| *compared && !left_files.contains_key(*key))
         .count() as u32;
     counts
 }
