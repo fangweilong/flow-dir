@@ -146,6 +146,11 @@ pub fn start(
     if !parent.is_dir() {
         return Err(ApiError::new("INVALID_DEST", request.dest.clone()));
     }
+    if dest.exists() {
+        // `fs::rename` replaces the target on Windows; the dialog pre-picks a free name, so
+        // an existing path here means a race (or a hand-typed name) and must not be lost.
+        return Err(ApiError::new("EXISTS", request.dest.clone()));
+    }
     if request.password.is_some() && !format.encrypts() {
         return Err(ApiError::new("PASSWORD_UNSUPPORTED", request.format.clone()));
     }
@@ -204,7 +209,7 @@ fn run(
             failed: skipped,
         };
         write_archive(format, &tmp, &sources, level, request.password.as_deref(), &mut progress, &cancel)?;
-        fs::rename(&tmp, &dest).map_err(|err| ApiError::from_io(&request.dest, &err))?;
+        publish(&tmp, &dest, &request.dest)?;
         Ok(progress)
     })();
 
@@ -254,6 +259,46 @@ fn run(
 
 /// `<dest>.<pid>-<seq>.part`: same directory, so the final rename stays on one volume, but
 /// unique per job so two compressions cannot interleave writes into one file.
+/// Moves the finished archive into place without ever replacing an existing file.
+///
+/// The temp file sits next to `dest`, so a hard link is atomic and fails with
+/// `AlreadyExists` instead of silently overwriting. File systems without hard links fall
+/// back to an exclusive create plus copy.
+fn publish(tmp: &Path, dest: &Path, label: &str) -> Result<(), ApiError> {
+    match fs::hard_link(tmp, dest) {
+        Ok(()) => {
+            let _ = fs::remove_file(tmp);
+            Ok(())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(ApiError::new("EXISTS", label.to_string()))
+        }
+        Err(_) => {
+            let mut source =
+                fs::File::open(tmp).map_err(|err| ApiError::from_io(label, &err))?;
+            let mut target = match fs::OpenOptions::new().write(true).create_new(true).open(dest) {
+                Ok(file) => file,
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Err(ApiError::new("EXISTS", label.to_string()));
+                }
+                Err(err) => return Err(ApiError::from_io(label, &err)),
+            };
+            match std::io::copy(&mut source, &mut target) {
+                Ok(_) => {
+                    drop(target);
+                    let _ = fs::remove_file(tmp);
+                    Ok(())
+                }
+                Err(err) => {
+                    drop(target);
+                    let _ = fs::remove_file(dest);
+                    Err(ApiError::from_io(label, &err))
+                }
+            }
+        }
+    }
+}
+
 fn temporary(dest: &Path) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -815,6 +860,9 @@ mod tests {
         for (label, format, extension) in FORMATS {
             let src = source(&format!("round-{label}"));
             let dest = src.with_file_name(format!("{label}{extension}"));
+            // Publishing refuses to replace a file, so a leftover from an interrupted run
+            // must be cleared or the test would depend on the machine's temp state.
+            let _ = fs::remove_file(&dest);
             let progress = compress(&[src.to_string_lossy().into_owned()], &dest, format, 5, None);
             assert!(progress.error.is_none(), "{label}: {:?}", progress.error);
             assert!(!progress.aborted);
@@ -840,6 +888,7 @@ mod tests {
     fn zip_password_is_required_to_read_back() {
         let src = source("zip-pw");
         let dest = src.with_file_name("locked.zip");
+        let _ = fs::remove_file(&dest);
         let progress = compress(
             &[src.to_string_lossy().into_owned()],
             &dest,
@@ -868,6 +917,7 @@ mod tests {
     fn sevenz_rejects_a_password_instead_of_writing_plain() {
         let src = source("sevenz-pw");
         let dest = src.with_file_name("plain.7z");
+        let _ = fs::remove_file(&dest);
         let error = start(
             &OpState::default(),
             Request {
@@ -890,6 +940,7 @@ mod tests {
     fn cancel_leaves_no_archive_behind() {
         let src = source("cancel");
         let dest = src.with_file_name("canceled.zip");
+        let _ = fs::remove_file(&dest);
         let request = Request {
             job_id: "cancel".into(),
             paths: vec![src.to_string_lossy().into_owned()],
@@ -949,6 +1000,7 @@ mod tests {
     fn start_reports_progress_and_publishes_the_archive() {
         let src = source("thread");
         let dest = src.with_file_name("thread.zip");
+        let _ = fs::remove_file(&dest);
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = seen.clone();
         let channel = Channel::new(move |body| {

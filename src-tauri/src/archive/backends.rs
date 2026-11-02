@@ -933,11 +933,26 @@ fn extract_zip_dir(
     let file = File::open(archive).map_err(|e| ApiError::from_io(archive, &e))?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| ApiError::new("ARCHIVE", e.to_string()))?;
     let mut written = Vec::new();
+    let mut first_error: Option<ApiError> = None;
     for index in 0..zip.len() {
         // Encrypted or damaged members are skipped like the generic path does; the folder
         // is still extracted with everything readable.
-        let Ok(mut member) = zip.by_index(index) else {
-            continue;
+        let mut member = match zip.by_index(index) {
+            Ok(member) => member,
+            Err(err) => {
+                // Remember the first failure: if nothing at all could be opened (an
+                // encrypted folder dragged without a password), reporting success would
+                // hand the user an empty folder instead.
+                if first_error.is_none() {
+                    first_error = Some(match err {
+                        ZipError::UnsupportedArchive(_) => {
+                            ApiError::new("PASSWORD_REQUIRED", "archive is encrypted")
+                        }
+                        other => ApiError::new("ARCHIVE", other.to_string()),
+                    });
+                }
+                continue;
+            }
         };
         let raw = member.name_raw().to_vec();
         let utf8 = member.flags().as_u16() & 0x800 != 0;
@@ -973,6 +988,11 @@ fn extract_zip_dir(
             .map_err(|e| ApiError::from_io(&target.to_string_lossy(), &e))?;
         out.flush().map_err(|e| ApiError::from_io(&target.to_string_lossy(), &e))?;
         written.push(target.to_string_lossy().into_owned());
+    }
+    if written.is_empty() {
+        if let Some(err) = first_error {
+            return Err(err);
+        }
     }
     Ok(written)
 }

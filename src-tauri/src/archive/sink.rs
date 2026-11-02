@@ -468,12 +468,26 @@ impl Sink {
                 } else {
                     target
                 };
-                if let Err(err) = fs::rename(&path, &target) {
-                    // A rename across volumes (dest on a junction) falls back to a copy.
-                    if fs::copy(&path, &target).is_ok() {
-                        let _ = fs::remove_file(&path);
-                    } else {
-                        self.skip(&display(rel), &ApiError::from_io(&display(&target), &err).code);
+                let mut target = target;
+                let mut tries = 0;
+                loop {
+                    match move_no_replace(&path, &target) {
+                        Ok(()) => break,
+                        // The name check above is a snapshot: another extraction or the user
+                        // can create it between the check and the move.
+                        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists && tries < 16 => {
+                            tries += 1;
+                            let unique =
+                                naming::unique(&[target.to_string_lossy().into_owned()], &[]);
+                            target = PathBuf::from(unique.into_iter().next().unwrap_or_default());
+                        }
+                        Err(err) => {
+                            self.skip(
+                                &display(rel),
+                                &ApiError::from_io(&display(&target), &err).code,
+                            );
+                            break;
+                        }
                     }
                 }
             }
@@ -567,6 +581,38 @@ fn display(path: &Path) -> String {
 /// A plain existing folder is reused. Anything else — a file with that name, a junction or
 /// a symlink — would either abort the merge (`create_dir_all` fails) or redirect every
 /// child outside the chosen destination, so the folder is given a free name instead.
+/// Moves `src` to `dst` without replacing an existing destination. A hard link is the
+/// atomic no-replace primitive on Windows; the copy fallback uses an exclusive create so it
+/// cannot silently overwrite either.
+fn move_no_replace(src: &Path, dst: &Path) -> std::io::Result<()> {
+    match fs::hard_link(src, dst) {
+        Ok(()) => {
+            let _ = fs::remove_file(src);
+            Ok(())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Err(err),
+        Err(_) => {
+            let mut source = fs::File::open(src)?;
+            let mut target = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(dst)?;
+            match std::io::copy(&mut source, &mut target) {
+                Ok(_) => {
+                    drop(target);
+                    let _ = fs::remove_file(src);
+                    Ok(())
+                }
+                Err(err) => {
+                    drop(target);
+                    let _ = fs::remove_file(dst);
+                    Err(err)
+                }
+            }
+        }
+    }
+}
+
 fn merge_dir_target(target: &Path) -> PathBuf {
     let Ok(meta) = fs::symlink_metadata(target) else {
         return target.to_path_buf();

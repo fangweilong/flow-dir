@@ -556,10 +556,11 @@ fn output_with_timeout(command: &mut Command, timeout: Duration) -> Option<Captu
 }
 
 /// Joins a pipe reader only if it finished before `deadline`; otherwise the thread is left
-/// to drain (or block) on its own instead of holding the caller. A timeout yields empty
-/// bytes rather than `None`: the caller already has the exit status, and dropping the whole
-/// answer because a descendant still holds the pipe would report a healthy command as
-/// failed.
+/// to drain (or block) on its own instead of holding the caller.
+///
+/// A timeout yields `None`, not empty bytes: callers already have the exit status, and the
+/// difference between "wrote nothing" and "still blocked by a descendant" decides whether a
+/// repository may be reported clean.
 fn collect_within(handle: std::thread::JoinHandle<Vec<u8>>, deadline: Instant) -> Option<Vec<u8>> {
     while !handle.is_finished() {
         if Instant::now() >= deadline {

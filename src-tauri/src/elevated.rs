@@ -281,9 +281,10 @@ fn run_worker(
             // only delay the retry command by the whole grace budget.
             let recovered = if trusted.get() {
                 let grace_cancel = AtomicBool::new(false);
-                // The helper only has to finish the item in flight and serialize one
-                // report, so a short budget is enough for a cooperative abort.
-                let grace_budget = Instant::now() + Duration::from_secs(5);
+                // The helper checks the cancel flag between items, so a large copy or move
+                // already in flight still has to finish; killing it earlier would truncate
+                // that item and lose the report for everything already completed.
+                let grace_budget = Instant::now() + Duration::from_secs(30);
                 read_message(
                     pipe.0,
                     event.0,

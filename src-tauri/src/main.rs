@@ -33,7 +33,7 @@ mod watch;
 mod webview_mem;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use error::ApiError;
@@ -58,6 +58,9 @@ type Scans = Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>;
 struct AppState {
     scans: Scans,
     closing: AtomicBool,
+    /// Bumped for every deferred close attempt; a delay thread whose epoch is stale must
+    /// not re-emit the busy prompt after the user dismissed it.
+    close_epoch: AtomicU64,
 }
 
 impl AppState {
@@ -287,11 +290,13 @@ fn quit_app(app: tauri::AppHandle) {
 
 /// Restores the normal close path after the user dismisses the "operation running" prompt.
 ///
-/// Without this the `closing` latch would stay set, so every later click on the window close
-/// button (or Alt+F4) would be ignored until the process restarts.
+/// The prompt is emitted from a 900ms delay thread; dismissing it must also retire that
+/// attempt, or it would pop up again on its own right after the user clicked cancel.
 #[tauri::command]
 fn cancel_quit(app: tauri::AppHandle) {
-    app.state::<AppState>().closing.store(false, Ordering::SeqCst);
+    let state = app.state::<AppState>();
+    state.close_epoch.fetch_add(1, Ordering::SeqCst);
+    state.closing.store(false, Ordering::SeqCst);
 }
 
 #[tauri::command]
@@ -722,12 +727,21 @@ async fn archive_extract_items(
                     );
                     std::fs::create_dir_all(&target_folder)
                         .map_err(|e| ApiError::from_io(&target_folder.to_string_lossy(), &e))?;
-                    extracted.extend(archive::backends::extract_dir(
+                    let written = match archive::backends::extract_dir(
                         &archive_str,
                         &inner,
                         &target_folder,
                         true,
-                    )?);
+                    ) {
+                        Ok(written) => written,
+                        Err(err) => {
+                            // The folder was created a moment ago; leaving an empty or
+                            // half-written tree would look like a successful extraction.
+                            let _ = std::fs::remove_dir_all(&target_folder);
+                            return Err(err);
+                        }
+                    };
+                    extracted.extend(written);
                 } else {
                     let file_name = std::path::Path::new(&inner).file_name().unwrap_or_default();
                     // A same-named file in the destination must not be truncated silently.
@@ -735,7 +749,13 @@ async fn archive_extract_items(
                     let target_file = std::path::PathBuf::from(
                         naming::unique(std::slice::from_ref(&file), &[]).remove(0),
                     );
-                    archive::backends::extract_single(&archive_str, &inner, &target_file, None, None)?;
+                    if let Err(err) =
+                        archive::backends::extract_single(&archive_str, &inner, &target_file, None, None)
+                    {
+                        // `extract_single` creates the file before streaming it.
+                        let _ = std::fs::remove_file(&target_file);
+                        return Err(err);
+                    }
                     extracted.push(target_file.to_string_lossy().into_owned());
                 }
             }
@@ -1588,6 +1608,10 @@ fn confirm_if_busy<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
         return false;
     }
     if let Some(window) = app.get_webview_window("main") {
+        // The prompt is rendered inside the window: a minimized or hidden window would
+        // leave the user with no way to answer it.
+        let _ = window.show();
+        let _ = window.unminimize();
         let _ = window.emit("flowdir:confirm-quit", active.len());
         let _ = window.set_focus();
     }
@@ -1769,9 +1793,14 @@ fn main() {
                 if !state.closing.swap(true, Ordering::SeqCst) {
                     api.prevent_close();
                     let _ = window.emit("flowdir:flush-layout", ());
+                    // A dismissed prompt must not be followed by this attempt's own emit.
+                    let epoch = state.close_epoch.fetch_add(1, Ordering::SeqCst) + 1;
                     let win = window.clone();
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_millis(900));
+                        if win.state::<AppState>().close_epoch.load(Ordering::SeqCst) != epoch {
+                            return;
+                        }
                         // A running copy/move needs the user's word before the window goes
                         // away; the frontend answers with `quit_app`. Calling `close()`
                         // here would re-enter this handler while `closing` is still set and
