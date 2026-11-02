@@ -19,6 +19,8 @@ export interface PaneNodeRendererProps {
   settings: Settings
   driveList: Drive[]
   keys: Record<ShortcutId, string>
+  /** True while a modal panel is open; list shortcuts must not act behind it. */
+  keyboardDisabled: boolean
   historyEpoch: number
   registerPane: (id: string, el: HTMLDivElement | null) => void
   focusPane: (paneId: string) => void
@@ -124,6 +126,7 @@ export function PaneNodeRenderer(props: PaneNodeRendererProps) {
           onNewFolder={() => props.createFolder(pane.id)}
           onCyclePane={props.cyclePane}
           keys={keys}
+          keyboardDisabled={props.keyboardDisabled}
           update={props.update}
         />
       </div>

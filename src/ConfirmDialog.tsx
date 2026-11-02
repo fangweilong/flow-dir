@@ -47,6 +47,9 @@ export function ConfirmDialog({
   useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
       if (ev.key === 'Escape') {
+        // Two stacked dialogs both listen in the capture phase on `window`;
+        // `stopPropagation` does not stop the other listener on the same node.
+        ev.stopImmediatePropagation()
         ev.preventDefault()
         ev.stopPropagation()
         onClose()

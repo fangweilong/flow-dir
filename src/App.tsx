@@ -646,6 +646,7 @@ export default function App() {
               drag={drag}
               lang={lang}
               settings={settings}
+              keyboardDisabled={overlayOpen}
               driveList={driveList}
               keys={keys}
               historyEpoch={historyEpoch}

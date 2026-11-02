@@ -134,6 +134,8 @@ type Props = {
   onRetry: (tabId: string) => void
   /** Resolved key combinations, so rebinding in settings reaches the pane commands. */
   keys: Record<ShortcutId, string>
+  /** True while a modal panel is open; list shortcuts must not act behind it. */
+  keyboardDisabled: boolean
   onNewFolder?: () => void
   onCyclePane?: () => void
   update: (tabId: string, fn: (d: ListData) => ListData) => void
@@ -200,6 +202,7 @@ export function PaneView({
   onRefresh,
   onRetry,
   keys,
+  keyboardDisabled,
   onNewFolder,
   onCyclePane,
   update,
@@ -419,6 +422,7 @@ export function PaneView({
     visibleSelected,
     rowHeight,
     keys,
+    disabled: keyboardDisabled,
     scrollRef,
     sectionRef,
     addressBarRef,
@@ -654,6 +658,7 @@ export function PaneView({
         ref={scrollRef}
         tabIndex={0}
         data-list
+        data-active={active ? '1' : '0'}
         onKeyDown={onKeyDown}
         onScroll={(ev) => {
           // The header lives outside the scroll port; mirror the offset so its columns stay

@@ -102,7 +102,13 @@ export function useDragAndDrop({
             refreshPanes()
             showToast(t('toast.copied', { count: extracted.length }))
           })
-          .catch(() => showToast(t('toast.copyFailed')))
+          .catch(() => {
+            // A failed batch still leaves the items extracted before the error; refresh so
+            // the list matches what is actually on disk.
+            invalidateTree(targetDir)
+            refreshPanes()
+            showToast(t('toast.copyFailed'))
+          })
         return
       }
       if (forced === 'copy') {

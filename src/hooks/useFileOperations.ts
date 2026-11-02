@@ -239,7 +239,12 @@ export function useFileOperations({
               if (failedIndices?.length) {
                 const failedSet = new Set(failedIndices)
                 keep = sources.map((_, index) => index).filter((index) => !failedSet.has(index))
-              } else if (progress.failed.length === progress.failedCount) {
+              } else if (
+                progress.failed.length === progress.failedCount &&
+                // A batch-level failure carries an empty path; treating it as a path
+                // match would mark every source as landed and record a phantom undo.
+                progress.failed.every((failure) => failure.path)
+              ) {
                 // The list is complete, so the paths identify the landed items. When it is
                 // capped, deriving from it would record items that never landed.
                 const failedSet = new Set(
@@ -313,13 +318,19 @@ export function useFileOperations({
           const succeeded = report.succeeded ?? []
           const reportedIndices = report.failedIndices ?? []
           let keep = succeeded
-          if (!keep.length) {
+          if (!keep.length && !report.aborted) {
             if (reportedIndices.length) {
               const failedSet = new Set(reportedIndices)
               keep = retry.sources
                 .map((_, index) => index)
                 .filter((index) => !failedSet.has(index))
-            } else if (!report.aborted && report.failedTotal === report.failed.length) {
+            } else if (
+              !report.aborted &&
+              report.failedTotal === report.failed.length &&
+              // A batch-level failure is reported with an empty path; a path match would
+              // otherwise leave every source marked as landed.
+              report.failed.every((failure) => failure.path)
+            ) {
               keep = retry.sources
                 .map((_, index) => index)
                 .filter((index) => !failed.has(retry.sources[index].toLowerCase()))
@@ -363,6 +374,38 @@ export function useFileOperations({
           if (report.error) {
             showToast(t('op.failed', { code: t(errorKey(report.error.code)) }))
           } else if (report.aborted) {
+            // Items completed before the cancel are already on disk and already in the
+            // undo stack; replaying them would duplicate copies or fail every move.
+            // Renames are left whole because their names are positional and the backend
+            // re-arms the complete request.
+            const landed = new Set(keep)
+            const remaining = retry.sources
+              .map((_, index) => index)
+              .filter((index) => !landed.has(index))
+            if (
+              remaining.length &&
+              remaining.length < retry.sources.length &&
+              retry.kind !== 'rename' &&
+              !retry.newName &&
+              !retry.newNames
+            ) {
+              opRequests.current[opId] = {
+                ...retry,
+                sources: remaining.map((index) => retry.sources[index]),
+              }
+              setOps((prev) => {
+                const current = prev[opId]
+                if (!current) return prev
+                return {
+                  ...prev,
+                  [opId]: {
+                    ...current,
+                    // Every remaining source still has to run, so their indices restart at 0.
+                    failedIndices: remaining.map((_, index) => index),
+                  },
+                }
+              })
+            }
             showToast(t('op.canceled'))
           } else if (report.failedTotal > 0) {
             showToast(
@@ -530,6 +573,18 @@ export function useFileOperations({
           return
         }
         refreshPanes()
+        if (progress.failedCount > 0) {
+          // Unreadable entries are skipped and still produce an archive; reporting plain
+          // "done" would hide that files are missing from it.
+          showToast(
+            t('op.partial', {
+              ok: Math.max(0, progress.total - progress.failedCount),
+              failed: progress.failedCount,
+            }),
+          )
+          drop(15000)
+          return
+        }
         showToast(t('op.done'))
         drop(800)
       }).catch((e: unknown) => {
@@ -620,16 +675,31 @@ export function useFileOperations({
       }
       switch (entry.kind) {
         case 'rename': {
-          const dirs = entry.items.map((item) => parentPath(item.path))
+          const sources = entry.items.map((item) => joinPath(parentPath(item.path), item.newName))
+          // A previous attempt may have restored some names already; replaying them fails
+          // with NOT_FOUND and left the entry blocking the whole history forever.
+          const flags = await pathsExist(sources)
+          const pending = entry.items.filter((_, index) => flags[index])
+          if (!pending.length) {
+            showToast(t('undo.done'))
+            return true
+          }
+          const dirs = pending.map((item) => parentPath(item.path))
           return runStep(
             'rename',
-            entry.items.map((item) => joinPath(parentPath(item.path), item.newName)),
-            { newNames: entry.items.map((item) => item.oldName), after: afterDirs(dirs) },
+            pending.map((item) => joinPath(parentPath(item.path), item.newName)),
+            { newNames: pending.map((item) => item.oldName), after: afterDirs(dirs) },
           )
         }
         case 'move': {
+          const flags = await pathsExist(entry.items.map((item) => item.to))
+          const pending = entry.items.filter((_, index) => flags[index])
+          if (!pending.length) {
+            showToast(t('undo.done'))
+            return true
+          }
           const byDir = new Map<string, string[]>()
-          for (const item of entry.items) {
+          for (const item of pending) {
             const dir = parentPath(item.from)
             byDir.set(dir, [...(byDir.get(dir) ?? []), item.to])
           }

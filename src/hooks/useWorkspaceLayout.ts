@@ -442,6 +442,9 @@ export function useWorkspaceLayout({
       }
       setWs((prev) => {
         if (!prev) return prev
+        // Ctrl+W can close the dragged tab before the pointer is released; moving an id
+        // with no tab record would persist a layout that `fromSnapshot` then rejects whole.
+        if (!prev.tabs[tabId]) return prev
         const from = prev.panes[fromPaneId]
         if (!from) return prev
         if (target.mode === 'center') {

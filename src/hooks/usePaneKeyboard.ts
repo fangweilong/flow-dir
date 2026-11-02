@@ -15,6 +15,8 @@ export interface UsePaneKeyboardOptions {
   visibleSelected: Set<string>
   rowHeight: number
   keys: Record<ShortcutId, string>
+  /** True while a modal panel owns the window; the list must not act behind it. */
+  disabled?: boolean
   scrollRef: React.RefObject<HTMLDivElement | null>
   sectionRef: React.RefObject<HTMLElement | null>
   addressBarRef: React.RefObject<AddressBarHandle | null>
@@ -47,6 +49,7 @@ export function usePaneKeyboard({
   visibleSelected,
   rowHeight,
   keys,
+  disabled,
   scrollRef,
   sectionRef,
   addressBarRef,
@@ -91,8 +94,11 @@ export function usePaneKeyboard({
 
   const cursorIndex = useCallback(() => {
     const cursor = cursorRef.current
-    // A cleared selection (blank click, external reset) also drops the cursor.
-    if (!cursor || !visibleSelected.size || !tab || cursor.tabId !== tab.id) return anchorIdx
+    // A cleared selection (blank click, external reset) or a selection set from elsewhere
+    // (search reveal, rename marker) drops the stale cursor in favour of the anchor.
+    if (!cursor || !tab || cursor.tabId !== tab.id || !visibleSelected.has(cursor.name)) {
+      return anchorIdx
+    }
     const index = view.findIndex((e) => e.name === cursor.name)
     return index >= 0 ? index : anchorIdx
   }, [anchorIdx, tab, view, visibleSelected])
@@ -147,7 +153,7 @@ export function usePaneKeyboard({
 
   const onKeyDown = useCallback(
     (ev: React.KeyboardEvent) => {
-      if (!tab) return
+      if (disabled || !tab) return
       if (ev.nativeEvent.isComposing) return
 
       if (typed) {
@@ -418,6 +424,7 @@ export function usePaneKeyboard({
       view,
       anchorIdx,
       cursorIndex,
+      disabled,
       onProperties,
       onHistoryMove,
       onNavigate,

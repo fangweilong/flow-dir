@@ -94,6 +94,20 @@ export const AddressBar = forwardRef<AddressBarHandle, AddressBarProps>(function
     setAddressBad(false)
   }
 
+  /**
+   * Returns keyboard control to the file list. The input unmounts on commit, so without
+   * this the browser parks focus on `body` and every pane shortcut (arrows, Enter, F4)
+   * would stop working until the list is clicked again.
+   */
+  const focusList = () => {
+    window.setTimeout(() => {
+      const list =
+        document.querySelector<HTMLElement>('[data-list][data-active="1"]') ??
+        document.querySelector<HTMLElement>('[data-list]')
+      list?.focus()
+    }, 0)
+  }
+
   /** Abandons the typed text and cancels any commit still awaiting a result. */
   const abortAddressEdit = () => {
     addressSeq.current += 1
@@ -109,10 +123,12 @@ export const AddressBar = forwardRef<AddressBarHandle, AddressBarProps>(function
     const raw = addressDraft.trim()
     if (!raw) {
       endAddressEdit()
+      focusList()
       return
     }
     if (raw.toLowerCase() === 'this pc' || raw === t('sidebar.thisPc')) {
       endAddressEdit()
+      focusList()
       if (tab.path) onNavigate(tab.id, '')
       return
     }
@@ -123,12 +139,14 @@ export const AddressBar = forwardRef<AddressBarHandle, AddressBarProps>(function
         const next = resolveAddress(tab.path, expanded)
         if (pathKey(next) === pathKey(tab.path)) {
           endAddressEdit()
+          focusList()
           return
         }
         const isDir = await pathIsDir(next).catch(() => false)
         if (seq !== addressSeq.current) return
         if (isDir) {
           endAddressEdit()
+          focusList()
           onNavigate(tab.id, next)
           return
         }
@@ -142,6 +160,7 @@ export const AddressBar = forwardRef<AddressBarHandle, AddressBarProps>(function
         if (seq !== addressSeq.current) return
         if (executed) {
           endAddressEdit()
+          focusList()
           return
         }
         setAddressBad(true)
@@ -239,6 +258,7 @@ export const AddressBar = forwardRef<AddressBarHandle, AddressBarProps>(function
             } else if (ev.key === 'Escape') {
               ev.preventDefault()
               abortAddressEdit()
+              focusList()
             }
           }}
           placeholder={root ? t('sidebar.thisPc') : undefined}
