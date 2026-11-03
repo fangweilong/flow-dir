@@ -27,11 +27,14 @@ import { DragOverlay } from './components/DragOverlay'
 import { refreshIconCache } from './icons'
 import { paneIds } from './workspace'
 import {
+  isElevated,
   openPath,
   openWith,
   opCancel,
   quitApp,
+  restartPrivilege,
   titlebarMenu,
+  uacEnabled,
 } from './api'
 import type { Drive, Lang, ListData, Place } from './types'
 import { errorKey, makeT, setUiLanguage } from './i18n'
@@ -265,6 +268,27 @@ export default function App() {
     }))
   }, [listData, pendingSelect, pendingSelectTick, update])
 
+  // The integrity level is fixed for the process lifetime; switching relaunches the app.
+  const [elevated, setElevated] = useState(false)
+  const [uacOn, setUacOn] = useState(true)
+  useEffect(() => {
+    void isElevated().then(setElevated).catch(() => undefined)
+    void uacEnabled().then(setUacOn).catch(() => undefined)
+  }, [])
+  const switchPrivilege = useCallback(
+    (wanted: boolean) => {
+      void restartPrivilege(wanted).catch((e: unknown) => {
+        const code = errorCode(e)
+        showToast(
+          code === 'ELEVATION_CANCELED'
+            ? t('priv.canceled')
+            : t('priv.failed', { code: t(errorKey(code)) }),
+        )
+      })
+    },
+    [showToast, t],
+  )
+
   // Hook: file operations
   const {
     ops,
@@ -309,6 +333,7 @@ export default function App() {
     runOp,
     update,
     activateTab,
+    uacEnabled: uacOn,
   })
 
   // Hook: file action handlers
@@ -603,6 +628,9 @@ export default function App() {
         setSearchOpen={setSearchOpen}
         previewOpen={previewOpen}
         setPreviewOpen={setPreviewOpen}
+        elevated={elevated}
+        uacEnabled={uacOn}
+        onRestartPrivilege={switchPrivilege}
         setSettingsOpen={setSettingsOpen}
         updateAvailable={updateAvailable}
         maximized={maximized}

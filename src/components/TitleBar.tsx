@@ -94,6 +94,9 @@ export type TitleBarProps = {
   setSearchOpen: (val: boolean) => void
   previewOpen: boolean
   setPreviewOpen: React.Dispatch<React.SetStateAction<boolean>>
+  elevated: boolean
+  uacEnabled: boolean
+  onRestartPrivilege: (elevated: boolean) => void
   setSettingsOpen: (val: boolean) => void
   updateAvailable: string | null
   maximized: boolean
@@ -117,12 +120,16 @@ export function TitleBar({
   setSearchOpen,
   previewOpen,
   setPreviewOpen,
+  elevated,
+  uacEnabled,
+  onRestartPrivilege,
   setSettingsOpen,
   updateAvailable,
   maximized,
   setMaximized,
   onContextMenu,
 }: TitleBarProps) {
+  const [privOpen, setPrivOpen] = React.useState(false)
   return (
     <header
       data-tauri-drag-region
@@ -234,6 +241,55 @@ export function TitleBar({
           <path d="M10 2.5v11" />
         </svg>
       </button>
+      <div className="relative shrink-0">
+        <button
+          type="button"
+          onClick={() => setPrivOpen((open) => !open)}
+          title={`${t('priv.title')} · ${t(elevated ? 'priv.elevated' : 'priv.normal')}`}
+          aria-label={t('priv.title')}
+          aria-expanded={privOpen}
+          className={`grid h-6 w-6 place-items-center rounded-md hover:bg-surface-3 ${
+            elevated ? 'text-amber-500' : 'text-muted-2'
+          }`}
+        >
+          <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.3">
+            <path d="M8 1.9 13 3.7v4.1c0 2.9-2 5.2-5 6.3-3-1.1-5-3.4-5-6.3V3.7z" fill="currentColor" fillOpacity={elevated ? 0.18 : 0} />
+            {elevated && <path d="m5.8 7.9 1.6 1.6 3-3.2" strokeLinecap="round" strokeLinejoin="round" />}
+          </svg>
+        </button>
+        {privOpen && (
+          <>
+            <div className="fixed inset-0 z-40" onMouseDown={() => setPrivOpen(false)} />
+            <div
+              data-privilege-popover
+              className="absolute right-0 top-full z-50 mt-1 w-[22rem] rounded-md border border-line bg-surface p-3 text-left shadow-xl"
+            >
+              <div className="text-[0.8125rem] font-semibold text-fg-strong">
+                {t(elevated ? 'priv.elevated' : 'priv.normal')}
+              </div>
+              {uacEnabled ? (
+                <>
+                  <p className="mt-1.5 text-[0.75rem] leading-5 text-muted">{t('priv.diff')}</p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPrivOpen(false)
+                      onRestartPrivilege(!elevated)
+                    }}
+                    className="mt-2.5 w-full rounded border border-line bg-surface-2 px-2 py-1.5 text-[0.75rem] font-medium text-fg hover:bg-surface-3"
+                  >
+                    {t(elevated ? 'priv.restartNormal' : 'priv.restartAdmin')}
+                  </button>
+                </>
+              ) : (
+                <p className="mt-2 rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-[0.71875rem] leading-5 text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+                  {t('priv.uacOff')}
+                </p>
+              )}
+            </div>
+          </>
+        )}
+      </div>
       <button
         type="button"
         onClick={() => setSettingsOpen(true)}

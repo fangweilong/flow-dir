@@ -59,6 +59,8 @@ export interface UseDragAndDropProps {
   runOp: (kind: OpKind, sources: string[], options?: RunOpOptions) => void
   update: (tabId: string, fn: (data: ListData) => ListData) => void
   activateTab: (paneId: string, tabId: string) => void
+  /** UIPI is only the explanation when UAC still separates the two levels. */
+  uacEnabled: boolean
 }
 
 export function useDragAndDrop({
@@ -72,6 +74,7 @@ export function useDragAndDrop({
   runOp,
   update,
   activateTab,
+  uacEnabled,
 }: UseDragAndDropProps) {
   const [rowDrag, setRowDrag] = useState<RowDragState | null>(null)
   const [osDrag, setOsDrag] = useState<OsDragState | null>(null)
@@ -131,7 +134,7 @@ export function useDragAndDrop({
   // UIPI stops an elevated process from dropping onto normal apps, and the failure is
   // silent or surfaces as a generic error; name the cause once instead.
   const warnElevated = useCallback(() => {
-    if (elevated.current === false || warnedElevated.current) return
+    if (!uacEnabled || elevated.current === false || warnedElevated.current) return
     void isElevated()
       .then((value) => {
         elevated.current = value
@@ -140,7 +143,7 @@ export function useDragAndDrop({
         showToast(t('drag.elevated'))
       })
       .catch(() => undefined)
-  }, [showToast, t])
+  }, [showToast, t, uacEnabled])
 
   const dropPaths = useCallback(
     (sources: string[], target: DropTarget, forced: 'copy' | 'move' | null) => {

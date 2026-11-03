@@ -19,6 +19,7 @@ mod naming;
 mod ops;
 mod pathkey;
 mod preview;
+mod privilege;
 mod restore;
 mod search;
 mod settings;
@@ -569,18 +570,27 @@ fn drop_modifiers() -> u8 {
     mask
 }
 
-/// Starts an OLE drag for the given paths; blocks until the target accepts or cancels.
+/// Starts an OLE drag for the given paths; resolves when the target accepts or cancels.
 ///
-/// `DoDragDrop` runs for as long as the user drags, so it must not occupy the IPC thread
-/// that every other command shares.
+/// `DoDragDrop` must run on the UI thread (it is tied to that thread's window/input
+/// state and pumps its own modal loop). Waiting for the main thread's result happens on a
+/// blocking worker so the async runtime is never held for the length of the drag.
 #[tauri::command(rename_all = "camelCase")]
-async fn drag_out(paths: Vec<String>) -> Result<String, ApiError> {
+async fn drag_out(app: tauri::AppHandle, paths: Vec<String>) -> Result<String, ApiError> {
     if paths.is_empty() {
         return Err(ApiError::new("EMPTY", "no paths"));
     }
-    tauri::async_runtime::spawn_blocking(move || dragout::drag_out(&paths))
-        .await
-        .map_err(|e| ApiError::new("THREAD", e.to_string()))?
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        let _ = tx.send(dragout::drag_out(&paths));
+    })
+    .map_err(|e| ApiError::new("THREAD", e.to_string()))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        rx.recv()
+            .map_err(|_| ApiError::new("THREAD", "main thread dropped the drag result"))?
+    })
+    .await
+    .map_err(|e| ApiError::new("THREAD", e.to_string()))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1333,34 +1343,25 @@ fn app_info() -> AppInfo {
 }
 
 /// Whether this process runs with an elevated token. UIPI blocks OLE drag-out from an
-/// elevated process into normal apps, so the frontend can name the cause instead of
-/// leaving the failed drag silent.
+/// elevated process into normal apps, so the title bar shows the state and lets the user
+/// switch levels.
 #[tauri::command]
 fn is_elevated() -> bool {
-    use windows::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows::Win32::Security::{
-        GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
-    };
-    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    privilege::is_elevated()
+}
 
-    let mut token = HANDLE::default();
-    unsafe {
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
-            return false;
-        }
-        let mut elevation = TOKEN_ELEVATION::default();
-        let mut size = 0u32;
-        let ok = GetTokenInformation(
-            token,
-            TokenElevation,
-            Some(&mut elevation as *mut _ as *mut core::ffi::c_void),
-            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
-            &mut size,
-        )
-        .is_ok();
-        let _ = CloseHandle(token);
-        ok && elevation.TokenIsElevated != 0
-    }
+#[tauri::command]
+fn uac_enabled() -> bool {
+    privilege::uac_enabled()
+}
+
+/// Restarts the GUI at the other integrity level, preserving the saved layout. The new
+/// instance waits for this PID, so a restart never trips the single-instance mutex.
+#[tauri::command]
+async fn restart_privilege(app: tauri::AppHandle, elevated: bool) -> Result<(), ApiError> {
+    tauri::async_runtime::spawn_blocking(move || privilege::restart(&app, elevated))
+        .await
+        .map_err(|e| ApiError::new("THREAD", e.to_string()))?
 }
 
 #[tauri::command]
@@ -1691,6 +1692,12 @@ fn main() {
     if let Some((pipe, nonce, cancel_event)) = elevated::helper_args() {
         std::process::exit(elevated::run_helper(&pipe, &nonce, cancel_event.as_deref()));
     }
+    // A privilege switch starts this copy while the previous instance is still closing.
+    // Waiting before Tauri initializes keeps the single-instance plugin from forwarding
+    // the launch back into the instance that is about to exit.
+    if let Some(pid) = privilege::restart_wait_pid() {
+        privilege::wait_for_exit(pid);
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
@@ -1916,6 +1923,8 @@ fn main() {
             taskbar_progress,
             notify_op,
             is_elevated,
+            uac_enabled,
+            restart_privilege,
             log_frontend,
             log_dir_path,
             diagnostics_export,

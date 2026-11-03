@@ -72,6 +72,11 @@ export const clipboardCopy = (paths: string[], cut: boolean) => invoke<void>('cl
 export const clipboardPaste = () => invoke<Clip>('clipboard_paste')
 /** Whether the GUI runs with an elevated token; Windows blocks drag-out to normal apps. */
 export const isElevated = () => invoke<boolean>('is_elevated')
+/** Whether Windows UAC is enabled; with it off every admin process runs elevated. */
+export const uacEnabled = () => invoke<boolean>('uac_enabled')
+/** Relaunches the GUI at the requested integrity level; the current instance exits. */
+export const restartPrivilege = (elevated: boolean) =>
+  invoke<void>('restart_privilege', { elevated })
 /** Modifier keys at drop time: 1 ctrl, 2 shift, 4 alt. */
 export const dropModifiers = () => invoke<number>('drop_modifiers')
 /** Starts an OLE drag of the paths; resolves to the accepted effect: copy/move/link/none. */

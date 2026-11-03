@@ -265,39 +265,55 @@ impl IDropSource_Impl for DropSource_Impl {
     }
 }
 
-/// Runs a modal OLE drag on its own STA thread and reports the accepted effect.
-///
-/// The thread must call `OleInitialize`, not `CoInitializeEx`: with COM alone
-/// `DoDragDrop` fails immediately with `CO_E_NOTINITIALIZED` because the OLE
-/// drag/drop subsystem is initialized only by `OleInitialize`.
-pub fn drag_out(paths: &[String]) -> Result<String, ApiError> {
-    let paths = paths.to_vec();
-    let effect = std::thread::Builder::new()
-        .name("flowdir-drag".into())
-        .spawn(move || -> Result<DROPEFFECT, ApiError> {
-            unsafe {
-                OleInitialize(None).map_err(|e| ApiError::new("COM", e.to_string()))?;
-                let data: IDataObject = DragData { paths }.into();
-                let source: IDropSource = DropSource.into();
-                let mut effect = DROPEFFECT_NONE;
-                let result = DoDragDrop(&data, &source, DROPEFFECT(ALLOWED), &mut effect);
-                OleUninitialize();
-                result
-                    .ok()
-                    .map_err(|e| ApiError::from_windows("", e.code().0))
-                    .map(|()| effect)
-            }
-        })
-        .map_err(|e| ApiError::new("THREAD", e.to_string()))?
-        .join()
-        .map_err(|_| ApiError::new("THREAD", "drag thread panicked"))??;
-    Ok(match effect {
-        DROPEFFECT_COPY => "copy",
-        DROPEFFECT_MOVE => "move",
-        DROPEFFECT_LINK => "link",
-        _ => "none",
+/// OLE reads the calling thread's keyboard state when the drag starts. The webview owns
+/// the real mouse messages, so a freshly repainted UI thread can still see the left
+/// button as up; mirror the global physical state into this thread before the drag. The
+/// live button messages then drive the loop normally.
+fn prime_drag_button() {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, GetKeyboardState, SetKeyboardState, VK_LBUTTON,
+    };
+    unsafe {
+        if (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16) & 0x8000 == 0 {
+            return;
+        }
+        let mut state = [0u8; 256];
+        if GetKeyboardState(&mut state).is_err() {
+            return;
+        }
+        state[VK_LBUTTON.0 as usize] |= 0x80;
+        let _ = SetKeyboardState(&state);
     }
-    .to_string())
+}
+
+/// Carries out the modal OLE drag on the calling thread and reports the accepted effect.
+///
+/// Must run on the UI thread: native drag APIs are tied to that thread's window/input
+/// state, and `DoDragDrop` pumps its own message loop until the drop finishes. COM alone
+/// is not enough — `OleInitialize` is what initializes OLE's drag/drop subsystem.
+pub fn drag_out(paths: &[String]) -> Result<String, ApiError> {
+    unsafe {
+        OleInitialize(None).map_err(|e| ApiError::new("COM", e.to_string()))?;
+        prime_drag_button();
+        let data: IDataObject = DragData {
+            paths: paths.to_vec(),
+        }
+        .into();
+        let source: IDropSource = DropSource.into();
+        let mut effect = DROPEFFECT_NONE;
+        let result = DoDragDrop(&data, &source, DROPEFFECT(ALLOWED), &mut effect);
+        OleUninitialize();
+        result
+            .ok()
+            .map_err(|e| ApiError::from_windows("", e.code().0))?;
+        Ok(match effect {
+            DROPEFFECT_COPY => "copy",
+            DROPEFFECT_MOVE => "move",
+            DROPEFFECT_LINK => "link",
+            _ => "none",
+        }
+        .to_string())
+    }
 }
 
 #[cfg(test)]
