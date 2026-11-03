@@ -1332,6 +1332,37 @@ fn app_info() -> AppInfo {
     }
 }
 
+/// Whether this process runs with an elevated token. UIPI blocks OLE drag-out from an
+/// elevated process into normal apps, so the frontend can name the cause instead of
+/// leaving the failed drag silent.
+#[tauri::command]
+fn is_elevated() -> bool {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Security::{
+        GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut token = HANDLE::default();
+    unsafe {
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+            return false;
+        }
+        let mut elevation = TOKEN_ELEVATION::default();
+        let mut size = 0u32;
+        let ok = GetTokenInformation(
+            token,
+            TokenElevation,
+            Some(&mut elevation as *mut _ as *mut core::ffi::c_void),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut size,
+        )
+        .is_ok();
+        let _ = CloseHandle(token);
+        ok && elevation.TokenIsElevated != 0
+    }
+}
+
 #[tauri::command]
 fn config_warnings() -> Vec<&'static str> {
     let mut warnings = Vec::new();
@@ -1884,6 +1915,7 @@ fn main() {
             restore_recycle,
             taskbar_progress,
             notify_op,
+            is_elevated,
             log_frontend,
             log_dir_path,
             diagnostics_export,

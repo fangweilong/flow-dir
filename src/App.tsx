@@ -23,6 +23,7 @@ import { TitleBar } from './components/TitleBar'
 import { GUTTER, ResizeHandle } from './components/SplitView'
 import { SidebarPanel } from './components/SidebarPanel'
 import { PaneNodeRenderer } from './components/PaneNodeRenderer'
+import { DragOverlay } from './components/DragOverlay'
 import { refreshIconCache } from './icons'
 import { paneIds } from './workspace'
 import {
@@ -297,7 +298,7 @@ export default function App() {
   })
 
   // Hook: drag and drop
-  const { startRowDrag } = useDragAndDrop({
+  const { rowDrag, osDrag, startRowDrag } = useDragAndDrop({
     wsRef,
     listData,
     t,
@@ -306,6 +307,8 @@ export default function App() {
     invalidateTree,
     invalidateGit,
     runOp,
+    update,
+    activateTab,
   })
 
   // Hook: file action handlers
@@ -734,6 +737,8 @@ export default function App() {
           />
         </Suspense>
       )}
+
+      <DragOverlay rowDrag={rowDrag} osDrag={osDrag} t={t} />
 
       {toast && (
         <div className="pointer-events-none fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-md bg-fg px-3 py-1.5 text-[0.75rem] font-medium text-surface shadow-lg">

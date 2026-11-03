@@ -82,6 +82,9 @@ export function PaneTabBar({
             <div
               key={id}
               data-tab={id}
+              data-drop-dir={tabState.path || undefined}
+              data-drop-tab={id}
+              data-drop-pane={pane.id}
               onClick={() => onActivateTab(id)}
               onPointerDown={(ev) => {
                 if (ev.button === 0) onTabDragStart(id, ev)

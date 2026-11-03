@@ -69,6 +69,7 @@ export const en: Record<BaseKey, string> = {
   'drag.moveCount': 'Move here · {count}',
   'drag.copyCount': 'Copy here · {count}',
   'drag.outFailed': 'Drag out failed: could not start the system drag',
+  'drag.elevated': 'Drag failed: FlowDir runs elevated, and Windows blocks drops into normal apps; restart FlowDir without administrator rights',
   'git.detached': 'detached HEAD',
   'git.dirty': 'Uncommitted changes',
   'git.clean': 'No uncommitted changes',

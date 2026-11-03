@@ -67,6 +67,7 @@ export const zh = {
   'drag.moveCount': '移动到此处 · {count} 项',
   'drag.copyCount': '复制到此处 · {count} 项',
   'drag.outFailed': '拖出失败：无法启动系统拖放',
+  'drag.elevated': '拖放未生效：FlowDir 以管理员身份运行，Windows 不允许拖到普通程序；请以普通权限重启 FlowDir',
   'git.detached': '分离 HEAD',
   'git.dirty': '有未提交的更改',
   'git.clean': '没有未提交的更改',

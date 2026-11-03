@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, RefObject } from 'react'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import type { Entry, ListData, OpKind } from '../types'
+import { samePath } from '../workspace'
 import type { Workspace } from '../workspace'
 import type { Translate } from '../i18n'
 import type { RunOpOptions } from './useFileOperations'
@@ -10,8 +11,10 @@ import {
   archivePrepareDrag,
   dragOut,
   dropModifiers,
+  isElevated,
 } from '../api'
 import {
+  baseName,
   isFsPath,
   isArchiveMember,
   isInsideArchive,
@@ -22,7 +25,15 @@ import {
   underPath,
 } from '../paths'
 
-export type DropTarget = { dir: string; left: number; top: number; width: number; height: number }
+export type DropTarget = {
+  dir: string
+  left: number
+  top: number
+  width: number
+  height: number
+  /** Tab whose folder the pointer is over; used to reveal the dropped files. */
+  tabId?: string
+}
 
 export type RowDragState = {
   names: string[]
@@ -46,6 +57,8 @@ export interface UseDragAndDropProps {
   invalidateTree: (dir: string) => void
   invalidateGit: (dir: string) => void
   runOp: (kind: OpKind, sources: string[], options?: RunOpOptions) => void
+  update: (tabId: string, fn: (data: ListData) => ListData) => void
+  activateTab: (paneId: string, tabId: string) => void
 }
 
 export function useDragAndDrop({
@@ -57,6 +70,8 @@ export function useDragAndDrop({
   invalidateTree,
   invalidateGit,
   runOp,
+  update,
+  activateTab,
 }: UseDragAndDropProps) {
   const [rowDrag, setRowDrag] = useState<RowDragState | null>(null)
   const [osDrag, setOsDrag] = useState<OsDragState | null>(null)
@@ -73,17 +88,68 @@ export function useDragAndDrop({
     const el = hit instanceof Element ? hit.closest<HTMLElement>('[data-drop-dir]') : null
     const dir = el?.dataset.dropDir
     if (!el || !dir) return null
+    const tabId = el.closest<HTMLElement>('[data-drop-tab]')?.dataset.dropTab
     const rect = el.getBoundingClientRect()
-    return { dir, left: rect.left, top: rect.top, width: rect.width, height: rect.height }
+    return { dir, tabId, left: rect.left, top: rect.top, width: rect.width, height: rect.height }
   }, [])
 
+  const [pendingDrop, setPendingDrop] = useState<{ tabId: string; names: string[] } | null>(null)
+  const revealSeq = useRef(0)
+  const elevated = useRef<boolean | null>(null)
+  const warnedElevated = useRef(false)
+
+  // Dropped files land inside a folder, so they can only be selected once the destination
+  // listing shows them. The op refreshes panes before this runs; a marker avoids a race
+  // with that rescan (and with a slow network share).
+  useEffect(() => {
+    if (!pendingDrop) return
+    const listing = listData[pendingDrop.tabId]
+    if (!listing || listing.loading) return
+    const wanted = new Set(pendingDrop.names.map((name) => name.toLowerCase()))
+    const landed = listing.entries
+      .filter((entry) => wanted.has(entry.name.toLowerCase()))
+      .map((entry) => entry.name)
+    if (!landed.length) return
+    setPendingDrop(null)
+    revealSeq.current += 1
+    update(pendingDrop.tabId, (data) => ({
+      ...data,
+      selected: new Set(landed),
+      anchor: landed[0],
+      reveal: { name: landed[0], id: revealSeq.current },
+    }))
+  }, [listData, pendingDrop, update])
+
+  useEffect(() => {
+    if (!pendingDrop) return
+    // A failed drop may leave no matching row forever; do not let the marker hijack a
+    // later listing in the same tab.
+    const timer = window.setTimeout(() => setPendingDrop(null), 5_000)
+    return () => window.clearTimeout(timer)
+  }, [pendingDrop])
+
+  // UIPI stops an elevated process from dropping onto normal apps, and the failure is
+  // silent or surfaces as a generic error; name the cause once instead.
+  const warnElevated = useCallback(() => {
+    if (elevated.current === false || warnedElevated.current) return
+    void isElevated()
+      .then((value) => {
+        elevated.current = value
+        if (!value || warnedElevated.current) return
+        warnedElevated.current = true
+        showToast(t('drag.elevated'))
+      })
+      .catch(() => undefined)
+  }, [showToast, t])
+
   const dropPaths = useCallback(
-    (sources: string[], targetDir: string, forced: 'copy' | 'move' | null) => {
-      const target = pathKey(targetDir)
+    (sources: string[], target: DropTarget, forced: 'copy' | 'move' | null) => {
+      const targetDir = target.dir
+      const destination = pathKey(targetDir)
       const items = sources.filter(
         (source) =>
-          pathKey(source) !== target &&
-          pathKey(parentPath(source)) !== target &&
+          pathKey(source) !== destination &&
+          pathKey(parentPath(source)) !== destination &&
           !underPath(targetDir, source),
       )
       if (!items.length) return
@@ -111,20 +177,50 @@ export function useDragAndDrop({
           })
         return
       }
+
+      // The element under the pointer names the tab; a drop on a folder row must not
+      // select same-named entries in the visible listing.
+      const targetTab = target.tabId ? wsRef.current?.tabs[target.tabId] : undefined
+      const selectTabId =
+        targetTab && targetTab.path && samePath(targetTab.path, targetDir) ? targetTab.id : null
+      const selectDropped = () => {
+        if (!selectTabId) return
+        const pane = Object.values(wsRef.current?.panes ?? {}).find((item) =>
+          item.tabIds.includes(selectTabId),
+        )
+        if (pane && pane.activeTabId !== selectTabId) activateTab(pane.id, selectTabId)
+        setPendingDrop({ tabId: selectTabId, names: items.map((item) => baseName(item)) })
+      }
+
+      // A mixed-volume drop runs as two batches; select once both have settled.
+      let pending = 0
+      let failed = false
+      const run = (kind: 'copy' | 'move', list: string[]) => {
+        pending += 1
+        runOp(kind, list, {
+          targetDir,
+          after,
+          onDone: (ok) => {
+            if (!ok) failed = true
+            pending -= 1
+            if (pending === 0 && !failed) selectDropped()
+          },
+        })
+      }
       if (forced === 'copy') {
-        runOp('copy', items, { targetDir, after })
+        run('copy', items)
         return
       }
       if (forced === 'move') {
-        runOp('move', items, { targetDir, after })
+        run('move', items)
         return
       }
       const moving = items.filter((source) => sameVolume(source, targetDir))
       const copying = items.filter((source) => !sameVolume(source, targetDir))
-      if (copying.length) runOp('copy', copying, { targetDir, after })
-      if (moving.length) runOp('move', moving, { targetDir, after })
+      if (copying.length) run('copy', copying)
+      if (moving.length) run('move', moving)
     },
-    [invalidateGit, invalidateTree, refreshPanes, runOp, showToast, t],
+    [activateTab, invalidateGit, invalidateTree, refreshPanes, runOp, showToast, t, wsRef],
   )
 
   const startRowDrag = useCallback(
@@ -168,12 +264,16 @@ export function useDragAndDrop({
         void archivePrepareDrag(rawPaths)
           .then((paths) => dragOut(paths))
           .then((effect) => {
+            if (effect === 'none') warnElevated()
             if (effect !== 'move') return
             invalidateTree(sourceDir)
             invalidateGit(sourceDir)
             refreshPanes()
           })
-          .catch(() => showToast(t('drag.outFailed')))
+          .catch(() => {
+            showToast(t('drag.outFailed'))
+            warnElevated()
+          })
       }
 
       const move = (e: PointerEvent) => {
@@ -219,7 +319,7 @@ export function useDragAndDrop({
         const forced = e.ctrlKey || e.metaKey ? 'copy' : e.shiftKey ? 'move' : null
         dropPaths(
           selectedNames().map((name) => joinPath(sourceDir, name)),
-          target.dir,
+          target,
           forced,
         )
       }
@@ -261,7 +361,18 @@ export function useDragAndDrop({
       // window edge, which would otherwise leave the drag inside the app forever.
       document.documentElement.addEventListener('pointerleave', handOff)
     },
-    [dropPaths, invalidateGit, invalidateTree, listData, refreshPanes, resolveDropTarget, showToast, t, wsRef],
+    [
+      dropPaths,
+      invalidateGit,
+      invalidateTree,
+      listData,
+      refreshPanes,
+      resolveDropTarget,
+      showToast,
+      t,
+      warnElevated,
+      wsRef,
+    ],
   )
 
   useEffect(() => {
@@ -288,9 +399,9 @@ export function useDragAndDrop({
           void dropModifiers()
             .then((mask) => {
               const forced = mask & 1 ? 'copy' : mask & 2 ? 'move' : null
-              dropPaths(dropped, target.dir, forced)
+              dropPaths(dropped, target, forced)
             })
-            .catch(() => dropPaths(dropped, target.dir, null))
+            .catch(() => dropPaths(dropped, target, null))
           return
         }
         setOsDrag({ paths, target })

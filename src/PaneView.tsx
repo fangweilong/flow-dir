@@ -682,6 +682,8 @@ export function PaneView({
           onBlankContextMenu(pointOf(e))
         }}
         data-drop-dir={tab?.path || undefined}
+        data-drop-tab={tab?.id}
+        data-drop-pane={pane.id}
         className="typo-list relative min-h-0 flex-1 overflow-auto outline-none"
         // Blank strip under the last row: the container is the click target there, so a
         // right-click reaches the folder menu even when the list fills the pane.
