@@ -39,7 +39,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    GetMenuItemCount, GetMenuItemID, InsertMenuItemW, PostMessageW, RegisterClassW,
+    GetMenuItemCount, GetMenuItemID, GetSubMenu, InsertMenuItemW, PostMessageW, RegisterClassW,
     SetForegroundWindow, TrackPopupMenuEx, HMENU, MENUITEMINFOW, MF_SEPARATOR, MF_STRING, MFT_STRING,
     MIIM_BITMAP, MIIM_ID, MIIM_STRING, MIIM_SUBMENU, SM_CXSMICON, SW_SHOWNORMAL, TPM_RETURNCMD, TPM_RIGHTBUTTON,
     TPM_WORKAREA, WM_DRAWITEM, WM_INITMENUPOPUP, WM_MEASUREITEM, WM_MENUCHAR, WM_NULL, WNDCLASSW,
@@ -592,6 +592,75 @@ unsafe fn build_background(
     }
 }
 
+/// Canonical verb of a shell command; `None` when the handler does not implement
+/// `GetCommandString` (third-party submenu entries often do not).
+unsafe fn command_string(context: &IContextMenu, offset: u32) -> Option<String> {
+    unsafe {
+        let mut buffer = [0u16; 64];
+        context
+            .GetCommandString(
+                offset as usize,
+                GCS_VERBW,
+                None,
+                PSTR(buffer.as_mut_ptr() as *mut u8),
+                buffer.len() as u32,
+            )
+            .ok()?;
+        let len = buffer.iter().position(|c| *c == 0).unwrap_or(buffer.len());
+        Some(String::from_utf16_lossy(&buffer[..len]))
+    }
+}
+
+/// Whether a command verb names a shell "New" entry. The New submenu is not consistent:
+/// folder/link use `NewFolder`/`NewLink`, while every ShellNew template uses the target
+/// extension as its verb (`.txt`, `.docx`, `.xlsx`, …).
+fn new_verb(verb: &str) -> bool {
+    let lower = verb.trim().to_ascii_lowercase();
+    lower.starts_with("new") || (lower.starts_with('.') && lower.len() > 1)
+}
+
+/// Whether `command` is one of the entries in the shell's New submenu. The submenus are
+/// populated while the popup is tracked, so this runs against the live menu. A New submenu
+/// is recognized by a `New…` verb among its children; that avoids matching unrelated
+/// extensions provided by third-party menus.
+unsafe fn in_new_submenu(context: &IContextMenu, menu: HMENU, command: u32) -> bool {
+    unsafe fn visit(context: &IContextMenu, menu: HMENU, command: u32, depth: u32) -> bool {
+        if depth > 3 {
+            return false;
+        }
+        let count = GetMenuItemCount(Some(menu));
+        for index in 0..count {
+            let submenu = GetSubMenu(menu, index);
+            if submenu.is_invalid() {
+                continue;
+            }
+            let children = GetMenuItemCount(Some(submenu));
+            let mut creates = false;
+            let mut hit = false;
+            for child in 0..children {
+                let id = GetMenuItemID(submenu, child);
+                if !(ID_CMD_FIRST..=ID_CMD_LAST).contains(&id) {
+                    continue;
+                }
+                if id == command {
+                    hit = true;
+                }
+                if !creates && command_string(context, id - ID_CMD_FIRST).is_some_and(|v| new_verb(&v)) {
+                    creates = true;
+                }
+            }
+            if creates && hit {
+                return true;
+            }
+            if visit(context, submenu, command, depth + 1) {
+                return true;
+            }
+        }
+        false
+    }
+    visit(context, menu, command, 0)
+}
+
 /// Builds, tracks and tears down the popup. Takes ownership of `hwnd`.
 unsafe fn track(
     hwnd: HWND,
@@ -680,22 +749,12 @@ unsafe fn track(
             outcome.action = Some(extra.action.into());
         } else if (ID_CMD_FIRST..=ID_CMD_LAST).contains(&command) {
             let offset = command - ID_CMD_FIRST;
-            // New submenu entries carry canonical verbs such as `NewFolder`; remember the
-            // verb so the frontend can select and rename the item the shell just created.
-            let mut buffer = [0u16; 64];
-            let verb = match context.GetCommandString(
-                offset as usize,
-                GCS_VERBW,
-                None,
-                PSTR(buffer.as_mut_ptr() as *mut u8),
-                buffer.len() as u32,
-            ) {
-                Ok(()) => {
-                    let len = buffer.iter().position(|c| *c == 0).unwrap_or(buffer.len());
-                    String::from_utf16_lossy(&buffer[..len])
-                }
-                Err(_) => String::new(),
-            };
+            // The New submenu mixes canonical verbs (`NewFolder`, `NewLink`) with ShellNew
+            // templates whose verb is the extension (`.txt`, `.xlsx`, …), so the selected
+            // entry cannot be classified by its verb alone. The menu is still alive here:
+            // identify the submenu that holds a `New…` entry instead.
+            let creates_item = in_new_submenu(context, menu, command);
+            let verb = command_string(context, offset).unwrap_or_default();
             let info = CMINVOKECOMMANDINFOEX {
                 cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
                 fMask: CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE,
@@ -714,7 +773,9 @@ unsafe fn track(
                 return Err(ApiError::new("SHELL_MENU", err.to_string()));
             }
             outcome.invoked = true;
-            if verb.to_ascii_lowercase().starts_with("new") {
+            // The verb is the fallback for a New submenu whose entries the shell has
+            // already torn down; the extension form covers ShellNew templates.
+            if creates_item || new_verb(&verb) {
                 outcome.action = Some("newItem".into());
             }
         }
@@ -971,6 +1032,92 @@ mod tests {
             let _ = DestroyWindow(hwnd);
             CoUninitialize();
             assert!(count > 0, "background menu must contain shell entries, got {count}");
+        }
+    }
+
+    /// ShellNew templates use the extension as their verb (only folder/link say `New…`),
+    /// so the verb heuristic must treat both as creation commands.
+    #[test]
+    fn new_verbs_cover_templates_and_canonical_entries() {
+        for verb in ["NewFolder", "NewLink", "new", ".txt", ".XLSX", ".zip"] {
+            assert!(new_verb(verb), "{verb} must count as a New entry");
+        }
+        for verb in ["properties", "", "Git 克隆...", "OpenWith", "剪切"] {
+            assert!(!new_verb(verb), "{verb} must not count as a New entry");
+        }
+    }
+
+    /// The shell exposes the New submenu only after `WM_INITMENUPOPUP`; the app must map
+    /// the invoked template command (`.txt`, `.xlsx`, …) back to that submenu so the
+    /// frontend selects and renames the created item.
+    #[test]
+    fn shell_new_submenu_commands_are_recognized() {
+        unsafe {
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+                .ok()
+                .expect("COM apartment");
+            let hwnd = create_owner().expect("owner window");
+            let dir = std::env::temp_dir();
+            let (context, pidls) = background_context(&dir.to_string_lossy(), hwnd)
+                .expect("background menu context");
+            let menu = CreatePopupMenu().expect("popup menu");
+            assert!(
+                context
+                    .QueryContextMenu(menu, 0, ID_CMD_FIRST, ID_CMD_LAST, CMF_NORMAL | CMF_EXPLORE)
+                    .is_ok(),
+                "background menu query"
+            );
+            // Tracking sends WM_INITMENUPOPUP for every submenu the user opens; replay it
+            // so the New entries exist in this headless menu.
+            let menu2: Option<IContextMenu2> = context.cast().ok();
+            for index in 0..GetMenuItemCount(Some(menu)) {
+                let submenu = GetSubMenu(menu, index);
+                if submenu.is_invalid() {
+                    continue;
+                }
+                if let Some(menu2) = &menu2 {
+                    let _ = menu2.HandleMenuMsg(
+                        WM_INITMENUPOPUP,
+                        WPARAM(submenu.0 as usize),
+                        LPARAM(index as isize),
+                    );
+                }
+            }
+            let mut folder_id = None;
+            let mut template_id = None;
+            for index in 0..GetMenuItemCount(Some(menu)) {
+                let submenu = GetSubMenu(menu, index);
+                if submenu.is_invalid() {
+                    continue;
+                }
+                for child in 0..GetMenuItemCount(Some(submenu)) {
+                    let id = GetMenuItemID(submenu, child);
+                    let Some(verb) = ((ID_CMD_FIRST..=ID_CMD_LAST).contains(&id))
+                        .then(|| command_string(&context, id - ID_CMD_FIRST))
+                        .flatten()
+                    else {
+                        continue;
+                    };
+                    if verb.eq_ignore_ascii_case("NewFolder") {
+                        folder_id = Some(id);
+                    } else if verb.starts_with('.') && template_id.is_none() {
+                        template_id = Some(id);
+                    }
+                }
+            }
+            let folder_id = folder_id.expect("New folder entry");
+            assert!(in_new_submenu(&context, menu, folder_id), "NewFolder must belong to the New submenu");
+            if let Some(template_id) = template_id {
+                assert!(
+                    in_new_submenu(&context, menu, template_id),
+                    "a ShellNew template must belong to the New submenu"
+                );
+            }
+            let _ = DestroyMenu(menu);
+            drop(context);
+            drop(pidls);
+            let _ = DestroyWindow(hwnd);
+            CoUninitialize();
         }
     }
 }

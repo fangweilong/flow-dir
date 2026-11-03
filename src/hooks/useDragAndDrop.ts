@@ -141,6 +141,9 @@ export function useDragAndDrop({
       const startX = ev.clientX
       const startY = ev.clientY
       let started = false
+      // The gesture ends exactly once: either handed to OLE or resolved in-app.
+      let finished = false
+      let handedOff = false
       let userSelect = ''
       // Prefer the selection captured before pointerdown (what the user saw when pressing
       // the row); the committed ref only helps when the pressed row was not selected yet.
@@ -148,6 +151,29 @@ export function useDragAndDrop({
         if (atDown?.selected.has(entry.name)) return Array.from(atDown.selected)
         const live = listDataRef.current[tab.id]
         return live?.selected.has(entry.name) ? Array.from(live.selected) : [entry.name]
+      }
+
+      let detach = () => {}
+      /**
+       * Hands the gesture to OLE once it leaves the window. WebView2 does not always
+       * report out-of-window pointer coordinates, so both the out-of-bounds move and
+       * `pointerleave` funnel here; the first one wins.
+       */
+      const handOff = () => {
+        if (handedOff || !started) return
+        handedOff = true
+        detach()
+        setRowDrag(null)
+        const rawPaths = selectedNames().map((name) => joinPath(sourceDir, name))
+        void archivePrepareDrag(rawPaths)
+          .then((paths) => dragOut(paths))
+          .then((effect) => {
+            if (effect !== 'move') return
+            invalidateTree(sourceDir)
+            invalidateGit(sourceDir)
+            refreshPanes()
+          })
+          .catch(() => showToast(t('drag.outFailed')))
       }
 
       const move = (e: PointerEvent) => {
@@ -163,18 +189,7 @@ export function useDragAndDrop({
           e.clientX >= window.innerWidth ||
           e.clientY >= window.innerHeight
         ) {
-          detach()
-          setRowDrag(null)
-          const rawPaths = selectedNames().map((name) => joinPath(sourceDir, name))
-          void archivePrepareDrag(rawPaths)
-            .then((paths) => dragOut(paths))
-            .then((effect) => {
-              if (effect !== 'move') return
-              invalidateTree(sourceDir)
-              invalidateGit(sourceDir)
-              refreshPanes()
-            })
-            .catch(() => showToast(t('drag.outFailed')))
+          handOff()
           return
         }
         setRowDrag({
@@ -189,11 +204,12 @@ export function useDragAndDrop({
         })
       }
 
-      let detach = () => {}
       const onKey = (e: KeyboardEvent) => {
         if (e.key === 'Escape') finish(null)
       }
       const finish = (e: PointerEvent | null) => {
+        if (finished || handedOff) return
+        finished = true
         detach()
         setRowDrag(null)
         // A click without any pointermove is a selection, not a drop.
@@ -208,18 +224,42 @@ export function useDragAndDrop({
         )
       }
       const up = (e: PointerEvent) => finish(e)
-      const cancel = () => finish(null)
+      const out = (e: PointerEvent) => {
+        if (
+          e.clientX < 0 ||
+          e.clientY < 0 ||
+          e.clientX >= window.innerWidth ||
+          e.clientY >= window.innerHeight
+        ) {
+          handOff()
+        }
+      }
+      const cancel = () => {
+        if (!started) {
+          finish(null)
+          return
+        }
+        // Losing capture at the window edge can beat `pointerleave`; wait a frame for
+        // the leave to hand the gesture to OLE before treating it as cancelled.
+        window.setTimeout(() => finish(null), 60)
+      }
       detach = () => {
         window.removeEventListener('pointermove', move)
         window.removeEventListener('pointerup', up)
         window.removeEventListener('pointercancel', cancel)
+        window.removeEventListener('pointerout', out)
         window.removeEventListener('keydown', onKey)
+        document.documentElement.removeEventListener('pointerleave', handOff)
         if (started) document.body.style.userSelect = userSelect
       }
       window.addEventListener('pointermove', move)
       window.addEventListener('pointerup', up)
       window.addEventListener('pointercancel', cancel)
+      window.addEventListener('pointerout', out)
       window.addEventListener('keydown', onKey)
+      // `pointerleave` covers the case where WebView2 stops reporting moves at the
+      // window edge, which would otherwise leave the drag inside the app forever.
+      document.documentElement.addEventListener('pointerleave', handOff)
     },
     [dropPaths, invalidateGit, invalidateTree, listData, refreshPanes, resolveDropTarget, showToast, t, wsRef],
   )
