@@ -15,11 +15,18 @@ import type { SortItem } from '../api'
 import { EMPTY_LIST, emptyList } from '../types'
 import type { Drive, Entry, GitStatus, ListData, SortState } from '../types'
 import type { Settings } from '../persist'
-import { isDir, markVirtualRoot, pathKey } from '../paths'
+import { baseName, isDir, markVirtualRoot, parentPath, pathKey } from '../paths'
 import { pushHistory, samePath, stepHistory } from '../workspace'
 import type { Workspace } from '../workspace'
 
 const KEEP_TABS = 8
+
+/**
+ * Name to highlight in the destination of a one-level-up move (`C:\a\b` → `C:\a`), so the
+ * folder the user just left is selected instead of an empty list.
+ */
+const leavingPick = (from: string, to: string) =>
+  from && to && samePath(parentPath(from), to) ? baseName(from) : ''
 
 const sameEntries = (a: Entry[], b: Entry[]): boolean => {
   if (a.length !== b.length) return false
@@ -69,6 +76,11 @@ export function useDirectoryScanner({
   const lastActiveTab = useRef(new Map<string, string>())
   const rescanTimers = useRef(new Map<string, number>())
   const pendingStructural = useRef(new Map<string, boolean>())
+  // Row the destination listing must select because the move went one level up; the
+  // folder being left is the one the user expects to see highlighted.
+  const pendingPick = useRef(new Map<string, string>())
+  /** Makes each pick's scroll request one-shot. */
+  const pickSeq = useRef(0)
 
   useEffect(() => {
     listDataRef.current = listData
@@ -81,7 +93,17 @@ export function useDirectoryScanner({
   }, [])
 
   const startScan = useCallback(
-    (tabId: string, path: string, sort: SortState, hidden: boolean, keep = false) => {
+    (
+      tabId: string,
+      path: string,
+      sort: SortState,
+      hidden: boolean,
+      keep = false,
+      /** Row to select once it shows up, for a move that left that folder one level down. */
+      pick = '',
+    ) => {
+      if (pick && !keep) pendingPick.current.set(tabId, pick.toLowerCase())
+      else pendingPick.current.delete(tabId)
       if (!path) {
         gens.current[tabId] = (gens.current[tabId] ?? 0) + 1
         scanning.current.delete(tabId)
@@ -132,6 +154,14 @@ export function useDirectoryScanner({
           acc.push({ name, size, mtime, attrs, id })
         }
         if (keep && !batch.done) return
+        // The folder the user just climbed out of is selected as soon as its row arrives,
+        // so the highlight does not wait for the rest of a large listing.
+        const wanted = pendingPick.current.get(tabId)
+        const picked = wanted ? acc.find((entry) => entry.name.toLowerCase() === wanted) : undefined
+        const reveal = picked
+          ? { name: picked.name, id: (pickSeq.current += 1) }
+          : undefined
+        if (picked) pendingPick.current.delete(tabId)
         setListData((prev) => {
           const old = prev[tabId] ?? emptyList()
           if (!keep) {
@@ -144,6 +174,7 @@ export function useDirectoryScanner({
                 loading: !batch.done,
                 truncated: batch.truncated,
                 error: null,
+                ...(picked && reveal ? { selected: new Set([picked.name]), anchor: picked.name, reveal } : {}),
               },
             }
           }
@@ -202,7 +233,7 @@ export function useDirectoryScanner({
         if (moved === live) return prev
         return { ...prev, tabs: { ...prev.tabs, [tabId]: moved } }
       })
-      startScan(tabId, next, pane.sort, pane.hidden)
+      startScan(tabId, next, pane.sort, pane.hidden, false, leavingPick(tab.path, next))
     },
     [setWs, startScan, wsRef],
   )
@@ -234,7 +265,7 @@ export function useDirectoryScanner({
         const next = stepHistory(live, delta)
         return next ? { ...prev, tabs: { ...prev.tabs, [tabId]: next } } : prev
       })
-      startScan(tabId, moved.path, pane.sort, pane.hidden)
+      startScan(tabId, moved.path, pane.sort, pane.hidden, false, leavingPick(tab.path, moved.path))
     },
     [setWs, startScan, wsRef],
   )
