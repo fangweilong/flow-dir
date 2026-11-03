@@ -219,5 +219,5 @@ screenshots/      README 与文档截图
 
 | 主题 | 来源 | 许可证 |
 | --- | --- | --- |
-| `material` | Material Icon Theme — © 2025 Material Extensions | MIT |
-| `catppuccin-mocha`、`catppuccin-latte` | Catppuccin Icons for VSCode — © 2023 Catppuccin / thang-nm | MIT |
+| `material` | [Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme) — © 2025 Material Extensions | [MIT](https://github.com/material-extensions/vscode-material-icon-theme/blob/main/LICENSE) |
+| `catppuccin-mocha`、`catppuccin-latte` | [Catppuccin Icons for VSCode](https://github.com/catppuccin/vscode-icons) — © 2023 Catppuccin / thang-nm | [MIT](https://github.com/catppuccin/vscode-icons/blob/main/LICENSE) |
