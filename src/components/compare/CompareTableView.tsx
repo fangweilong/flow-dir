@@ -1,6 +1,7 @@
 import { describeError, type Translate } from '../../i18n'
 import type { CompareCount, CompareEntry, CompareHashResult, CompareStatus } from '../../types'
 import { FileIcon } from '../../icons'
+import { EntryStateBadges, entryStateTitle, entryStateTone } from '../EntryStateBadge'
 import { formatSize, joinPath } from '../../paths'
 
 export interface CompareTableViewProps {
@@ -53,16 +54,22 @@ export function CompareTableView({
             : ''
     return (
       <div className={`flex min-w-0 items-center gap-1.5 px-2 py-1 ${tint}`}>
-        <FileIcon
-          name={entry.name}
-          dir={meta.isDir}
-          path={joinPath(root, entry.rel)}
-          scale={iconScale}
-          size={iconPx}
-        />
+        <span className="relative shrink-0">
+          <FileIcon
+            name={entry.name}
+            dir={meta.isDir}
+            path={joinPath(root, entry.rel)}
+            scale={iconScale}
+            size={iconPx}
+          />
+          <EntryStateBadges name={entry.name} attrs={meta.attrs} t={t} />
+        </span>
         <span
-          className={`truncate ${entry.status === 'same' ? 'text-muted' : 'text-fg-strong'}`}
-          title={entry.rel}
+          className={`truncate ${
+            entryStateTone(entry.name, meta.attrs) ||
+            (entry.status === 'same' ? 'text-muted' : 'text-fg-strong')
+          }`}
+          title={entryStateTitle(entry.name, meta.attrs, t) || entry.rel}
         >
           {entry.name}
         </span>

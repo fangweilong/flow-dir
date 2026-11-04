@@ -44,6 +44,8 @@ pub struct Meta {
     pub size: u64,
     pub mtime: u64,
     pub is_dir: bool,
+    /// Raw `FILE_ATTRIBUTE_*` bits; the UI derives hidden and link badges from them.
+    pub attrs: u32,
 }
 
 /// `status` is `left` / `right` / `different` / `same`; a type mismatch (file vs folder)
@@ -213,6 +215,7 @@ fn meta_of(meta: &fs::Metadata, is_dir: bool) -> Meta {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0),
         is_dir,
+        attrs: meta.file_attributes(),
     }
 }
 

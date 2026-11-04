@@ -16,15 +16,38 @@ export type ExternalPreviewSectionProps = {
 export function ExternalPreviewSection({ settings, keys, onChange, t, visible }: ExternalPreviewSectionProps) {
   const [externalExt, setExternalExt] = useState('')
   const [externalCommand, setExternalCommand] = useState('')
+  /** Extension of the rule being edited; `null` while the form adds a new one. */
+  const [editingExt, setEditingExt] = useState<string | null>(null)
 
-  const addExternal = () => {
+  const resetDraft = () => {
+    setExternalExt('')
+    setExternalCommand('')
+    setEditingExt(null)
+  }
+
+  const commitExternal = () => {
     const ext = externalExt.trim().replace(/^\.+/, '').toLowerCase()
     const command = externalCommand.trim()
     if (!ext || !command) return
-    const rest = settings.externalPreview.filter((rule) => rule.ext !== ext)
-    onChange({ ...settings, externalPreview: [...rest, { ext, command }] })
-    setExternalExt('')
-    setExternalCommand('')
+    const rules = settings.externalPreview
+    if (editingExt !== null && rules.some((rule) => rule.ext === editingExt)) {
+      // Keep the edited row in place; a rule already using the new extension is dropped,
+      // so the list still maps one command per extension.
+      const next = rules
+        .filter((rule) => rule.ext !== ext || rule.ext === editingExt)
+        .map((rule) => (rule.ext === editingExt ? { ext, command } : rule))
+      onChange({ ...settings, externalPreview: next })
+    } else {
+      const rest = rules.filter((rule) => rule.ext !== ext)
+      onChange({ ...settings, externalPreview: [...rest, { ext, command }] })
+    }
+    resetDraft()
+  }
+
+  const startEdit = (ext: string, command: string) => {
+    setEditingExt(ext)
+    setExternalExt(ext)
+    setExternalCommand(command)
   }
 
   if (!visible) return null
@@ -40,25 +63,41 @@ export function ExternalPreviewSection({ settings, keys, onChange, t, visible }:
           {t('settings.externalKey', { keys: formatBinding(keys.externalPreview) })}
         </div>
         {settings.externalPreview.map((rule) => (
-          <div key={rule.ext} className="flex items-center justify-between gap-2 text-[0.71875rem]">
+          <div
+            key={rule.ext}
+            data-external-editing={rule.ext === editingExt ? '1' : undefined}
+            className={`flex items-center justify-between gap-2 rounded px-1 text-[0.71875rem] ${
+              rule.ext === editingExt ? 'bg-surface-3' : ''
+            }`}
+          >
             <span className="min-w-0">
               <span className="font-mono text-fg">.{rule.ext}</span>
               <span className="ml-2 truncate font-mono text-[0.65625rem] text-muted-2" title={rule.command}>
                 {rule.command}
               </span>
             </span>
-            <button
-              type="button"
-              onClick={() =>
-                onChange({
-                  ...settings,
-                  externalPreview: settings.externalPreview.filter((entry) => entry.ext !== rule.ext),
-                })
-              }
-              className="shrink-0 rounded px-1.5 py-0.5 text-[0.6875rem] text-muted hover:bg-surface-3 hover:text-red-500"
-            >
-              {t('settings.placeDelete')}
-            </button>
+            <span className="flex shrink-0 items-center gap-1">
+              <button
+                type="button"
+                onClick={() => startEdit(rule.ext, rule.command)}
+                className="rounded px-1.5 py-0.5 text-[0.6875rem] text-muted hover:bg-surface-3 hover:text-blue-500"
+              >
+                {t('settings.placeEdit')}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (rule.ext === editingExt) resetDraft()
+                  onChange({
+                    ...settings,
+                    externalPreview: settings.externalPreview.filter((entry) => entry.ext !== rule.ext),
+                  })
+                }}
+                className="rounded px-1.5 py-0.5 text-[0.6875rem] text-muted hover:bg-surface-3 hover:text-red-500"
+              >
+                {t('settings.placeDelete')}
+              </button>
+            </span>
           </div>
         ))}
         <div className="flex items-center gap-1.5 border-t border-line pt-2">
@@ -73,7 +112,8 @@ export function ExternalPreviewSection({ settings, keys, onChange, t, visible }:
             value={externalCommand}
             onChange={(ev) => setExternalCommand(ev.target.value)}
             onKeyDown={(ev) => {
-              if (ev.key === 'Enter') addExternal()
+              if (ev.key === 'Enter') commitExternal()
+              if (ev.key === 'Escape' && editingExt !== null) resetDraft()
             }}
             placeholder={t('settings.externalCommandPh')}
             title={t('settings.externalCommand')}
@@ -82,12 +122,21 @@ export function ExternalPreviewSection({ settings, keys, onChange, t, visible }:
           />
           <button
             type="button"
-            onClick={addExternal}
+            onClick={commitExternal}
             disabled={!externalExt.trim() || !externalCommand.trim()}
             className="h-6 shrink-0 rounded bg-blue-600 px-2 text-[0.6875rem] text-white hover:bg-blue-500 disabled:opacity-40"
           >
-            {t('settings.placeAdd')}
+            {editingExt !== null ? t('settings.placeSave') : t('settings.placeAdd')}
           </button>
+          {editingExt !== null && (
+            <button
+              type="button"
+              onClick={resetDraft}
+              className="h-6 shrink-0 rounded border border-line px-2 text-[0.6875rem] text-fg hover:bg-surface-3"
+            >
+              {t('settings.placeCancel')}
+            </button>
+          )}
         </div>
       </div>
       <div className="mt-2 space-y-2 rounded-lg border border-line px-3 py-2" data-preview-limits>

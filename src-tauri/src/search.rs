@@ -49,6 +49,8 @@ pub struct SearchItem {
     pub is_dir: bool,
     pub size: u64,
     pub mtime: u64,
+    /// Raw `FILE_ATTRIBUTE_*` bits; the UI derives hidden and link badges from them.
+    pub attrs: u32,
     /// Line that matched a content search; `None` for name-only hits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snippet: Option<String>,
@@ -417,6 +419,7 @@ pub fn run(
         let is_dir = entry.file_type().is_dir();
         let name = entry.file_name().to_string_lossy().into_owned();
         let metadata = entry.metadata().ok();
+        let attrs = metadata.as_ref().map(|m| m.file_attributes()).unwrap_or(0);
         let size = if is_dir {
             0
         } else {
@@ -455,6 +458,7 @@ pub fn run(
                 is_dir,
                 size,
                 mtime,
+                attrs,
                 snippet,
             });
             total += 1;
@@ -710,6 +714,7 @@ fn everything_search(
                 item.get_size(RequestFlags::Size).unwrap_or(0)
             },
             mtime,
+            attrs,
             snippet: None,
         });
         if items.len() >= limit {

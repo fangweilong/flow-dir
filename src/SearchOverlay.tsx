@@ -4,6 +4,7 @@ import type { ContentOptions } from './api'
 import { errorKey, makeT } from './i18n'
 import { formatSize, parentPath, volumeRoot } from './paths'
 import { FileIcon } from './icons'
+import { EntryStateBadges, entryStateTitle, entryStateTone } from './components/EntryStateBadge'
 import { BASE_FONT_SIZE, clampFontSize, clampIconSize } from './fonts'
 import type { ApiError, Lang, SearchItem } from './types'
 import {
@@ -665,9 +666,17 @@ export function SearchOverlay({
                   }}
                   className="flex min-w-0 flex-1 items-center gap-2 text-left"
                 >
-                  <FileIcon name={item.name} dir={item.isDir} path={item.path} scale={iconScale} size={iconPx} />
+                  <span className="relative shrink-0">
+                    <FileIcon name={item.name} dir={item.isDir} path={item.path} scale={iconScale} size={iconPx} />
+                    <EntryStateBadges name={item.name} attrs={item.attrs} t={t} />
+                  </span>
                   <span className="flex min-w-0 flex-1 flex-col">
-                    <span className="truncate text-[0.75rem] text-fg-strong">{item.name}</span>
+                    <span
+                      className={`truncate text-[0.75rem] ${entryStateTone(item.name, item.attrs) || 'text-fg-strong'}`}
+                      title={entryStateTitle(item.name, item.attrs, t) || undefined}
+                    >
+                      {item.name}
+                    </span>
                     {item.snippet && (
                       <span className="truncate text-[0.625rem] text-muted-2">
                         <Highlight text={item.snippet} needle={regexOn ? '' : query.trim()} />

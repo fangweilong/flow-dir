@@ -1,6 +1,7 @@
 import React from 'react'
 import { FileIcon } from '../icons'
 import { GitItemBadge } from './GitBadges'
+import { EntryStateBadges, entryStateTitle, entryStateTone } from './EntryStateBadge'
 import type { Entry } from '../types'
 import type { GitBadges as GitBadgesData } from '../git'
 import type { Translate } from '../i18n'
@@ -64,6 +65,9 @@ export function FileTableRow({
 }: FileTableRowProps) {
   const dir = isDir(entry.attrs)
   const fullPath = joinPath(tabPath, entry.name)
+  const stateTitle = entryStateTitle(entry.name, entry.attrs, t)
+  const stateTone = entryStateTone(entry.name, entry.attrs)
+  const nameTone = stateTone || (dir ? 'text-fg-strong' : '')
 
   return (
     <div
@@ -101,9 +105,15 @@ export function FileTableRow({
       <div className="flex min-w-0 items-center gap-1.5 pl-1.5">
         <span className="relative shrink-0">
           <FileIcon name={entry.name} dir={dir} path={fullPath} scale={listScale} size={iconPx} />
+          <EntryStateBadges name={entry.name} attrs={entry.attrs} t={t} />
           <GitItemBadge name={entry.name} dir={dir} badges={gitBadges} iconSize={iconPx} t={t} />
         </span>
-        <span className={`truncate ${dir ? 'font-medium text-fg-strong' : ''}`}>{entry.name}</span>
+        <span
+          className={`truncate ${dir ? 'font-medium' : ''} ${nameTone}`}
+          title={stateTitle || undefined}
+        >
+          {entry.name}
+        </span>
       </div>
       {showSize && (
         <div className="tabular whitespace-nowrap pr-1.5 text-right text-[0.88em] text-muted">

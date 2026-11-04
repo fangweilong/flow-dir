@@ -273,6 +273,8 @@ export type SearchItem = {
   isDir: boolean
   size: number
   mtime: number
+  /** Raw `FILE_ATTRIBUTE_*` bits. */
+  attrs: number
   /** Matching line for content hits; absent for name-only hits. */
   snippet?: string
 }
@@ -285,7 +287,7 @@ export type SearchBatch = {
 }
 
 /** One side's metadata in a folder comparison; `size` is 0 for folders. */
-export type CompareMeta = { size: number; mtime: number; isDir: boolean }
+export type CompareMeta = { size: number; mtime: number; isDir: boolean; attrs: number }
 export type CompareStatus = 'left' | 'right' | 'different' | 'same'
 export type CompareEntry = {
   /** Path relative to the two compare roots. */
