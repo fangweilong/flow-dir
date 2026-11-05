@@ -245,7 +245,7 @@ export function BatchRenameDialog({ dir, names, lang, onConfirm, onClose }: Prop
                 type="button"
                 onClick={() => setMode(entry)}
                 className={`rounded px-2 py-0.5 ${
-                  mode === entry ? 'bg-blue-600 text-white' : 'text-muted hover:bg-surface-3'
+                  mode === entry ? 'bg-accent-strong text-white' : 'text-muted hover:bg-surface-3'
                 }`}
               >
                 {t(entry === 'replace' ? 'batch.modeReplace' : 'batch.modeSequence')}
@@ -262,7 +262,7 @@ export function BatchRenameDialog({ dir, names, lang, onConfirm, onClose }: Prop
               onChange={(ev) => setFind(ev.target.value)}
               placeholder={t('batch.find')}
               aria-label={t('batch.find')}
-              className="h-7 min-w-0 flex-1 rounded border border-line bg-surface-2 px-2 text-[0.71875rem] outline-none placeholder:text-muted-2 focus:border-blue-400"
+              className="h-7 min-w-0 flex-1 rounded border border-line bg-surface-2 px-2 text-[0.71875rem] outline-none placeholder:text-muted-2 focus:border-accent-soft"
             />
             <span className="shrink-0 text-[0.6875rem] text-muted-2">→</span>
             <input
@@ -270,7 +270,7 @@ export function BatchRenameDialog({ dir, names, lang, onConfirm, onClose }: Prop
               onChange={(ev) => setReplace(ev.target.value)}
               placeholder={t('batch.replace')}
               aria-label={t('batch.replace')}
-              className="h-7 min-w-0 flex-1 rounded border border-line bg-surface-2 px-2 text-[0.71875rem] outline-none placeholder:text-muted-2 focus:border-blue-400"
+              className="h-7 min-w-0 flex-1 rounded border border-line bg-surface-2 px-2 text-[0.71875rem] outline-none placeholder:text-muted-2 focus:border-accent-soft"
             />
           </div>
         ) : (
@@ -281,7 +281,7 @@ export function BatchRenameDialog({ dir, names, lang, onConfirm, onClose }: Prop
               onChange={(ev) => setTemplate(ev.target.value)}
               placeholder="{name}_{n}"
               aria-label={t('batch.template')}
-              className="h-7 min-w-0 flex-1 rounded border border-line bg-surface-2 px-2 font-mono text-[0.71875rem] outline-none focus:border-blue-400"
+              className="h-7 min-w-0 flex-1 rounded border border-line bg-surface-2 px-2 font-mono text-[0.71875rem] outline-none focus:border-accent-soft"
             />
             <label className="flex shrink-0 items-center gap-1 text-[0.6875rem] text-muted-2">
               {t('batch.start')}
@@ -290,7 +290,7 @@ export function BatchRenameDialog({ dir, names, lang, onConfirm, onClose }: Prop
                 max={9999}
                 value={start}
                 onChange={setStart}
-                className="h-7 w-14 rounded border border-line bg-surface-2 px-1 text-[0.71875rem] text-fg outline-none focus:border-blue-400"
+                className="h-7 w-14 rounded border border-line bg-surface-2 px-1 text-[0.71875rem] text-fg outline-none focus:border-accent-soft"
               />
             </label>
             <label className="flex shrink-0 items-center gap-1 text-[0.6875rem] text-muted-2">
@@ -300,7 +300,7 @@ export function BatchRenameDialog({ dir, names, lang, onConfirm, onClose }: Prop
                 max={6}
                 value={digits}
                 onChange={setDigits}
-                className="h-7 w-12 rounded border border-line bg-surface-2 px-1 text-[0.71875rem] text-fg outline-none focus:border-blue-400"
+                className="h-7 w-12 rounded border border-line bg-surface-2 px-1 text-[0.71875rem] text-fg outline-none focus:border-accent-soft"
               />
             </label>
           </div>
@@ -317,7 +317,7 @@ export function BatchRenameDialog({ dir, names, lang, onConfirm, onClose }: Prop
                 invalid.has(index)
                   ? 'text-red-600 dark:text-red-300'
                   : conflicts.has(index)
-                    ? 'text-amber-600 dark:text-amber-300'
+                    ? 'text-warning-strong dark:text-warning-faint'
                     : 'text-fg'
               }`}
             >
@@ -339,9 +339,9 @@ export function BatchRenameDialog({ dir, names, lang, onConfirm, onClose }: Prop
         {conflicts.size > 0 && (
           <div
             data-batch-conflicts
-            className="mt-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1.5"
+            className="mt-2 rounded-md border border-warning/40 bg-warning/10 px-2 py-1.5"
           >
-            <div className="pb-1 text-[0.6875rem] text-amber-700 dark:text-amber-300">
+            <div className="pb-1 text-[0.6875rem] text-warning-deep dark:text-warning-faint">
               {t('batch.conflictCount', { count: conflicts.size })}
             </div>
             <div className="flex flex-wrap gap-1">
@@ -353,7 +353,7 @@ export function BatchRenameDialog({ dir, names, lang, onConfirm, onClose }: Prop
                   onClick={() => setPolicy(option)}
                   className={`rounded border px-2 py-0.5 text-[0.6875rem] ${
                     policy === option
-                      ? 'border-blue-500 bg-blue-600 text-white'
+                      ? 'border-accent bg-accent-strong text-white'
                       : 'border-line text-fg hover:bg-surface-3'
                   }`}
                 >
@@ -396,7 +396,7 @@ export function BatchRenameDialog({ dir, names, lang, onConfirm, onClose }: Prop
             type="button"
             onClick={submit}
             disabled={!ready || needsDecision}
-            className="shrink-0 rounded-md bg-blue-600 px-3 py-1 text-[0.71875rem] font-medium text-white hover:bg-blue-500 disabled:opacity-40"
+            className="shrink-0 rounded-md bg-accent-strong px-3 py-1 text-[0.71875rem] font-medium text-white hover:bg-accent disabled:opacity-40"
           >
             {t('batch.confirm')}
           </button>

@@ -226,7 +226,7 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
                 value={query}
                 onChange={(ev) => setQuery(ev.target.value)}
                 placeholder={t('settings.searchPh')}
-                className="h-7 w-48 rounded-md border border-line bg-surface-2 pl-7 pr-2 text-[0.75rem] outline-none placeholder:text-muted-2 focus:border-blue-400 focus:bg-surface"
+                className="h-7 w-48 rounded-md border border-line bg-surface-2 pl-7 pr-2 text-[0.75rem] outline-none placeholder:text-muted-2 focus:border-accent-soft focus:bg-surface"
               />
               <svg
                 aria-hidden

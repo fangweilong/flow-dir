@@ -15,6 +15,30 @@
   --color-sel: #dbeafe;
   /* List row divider, kept separate from `line` so rows can read clearly on dark surfaces. */
   --color-row-line: #e6ecf4;
+  /*
+   * Accent ladder, defaulting to the blue the UI has always used. Palettes with a strong
+   * hue cast override the whole ladder so focus rings, switches and active markers match.
+   */
+  --color-accent: #3b82f6;
+  --color-accent-strong: #2563eb;
+  --color-accent-deep: #1d4ed8;
+  --color-accent-soft: #60a5fa;
+  --color-accent-faint: #93c5fd;
+  --color-accent-wash: #dbeafe;
+  --color-accent-night: #172554;
+  /*
+   * Warning ladder for banners, conflicts and paused/temporary markers. Status colours
+   * (danger red, success green, Git and syntax colours) stay fixed across palettes.
+   */
+  --color-warning: #f59e0b;
+  --color-warning-strong: #d97706;
+  --color-warning-deep: #b45309;
+  --color-warning-soft: #fbbf24;
+  --color-warning-faint: #fcd34d;
+  --color-warning-wash: #fffbeb;
+  --color-warning-border: #fde68a;
+  --color-warning-tint: #92400e;
+  --color-warning-night: #451a03;
 }
 
 /*
@@ -82,6 +106,37 @@
   --color-row-line: #e1eeea;
 }
 
+/* Bean green: eye-friendly paper light with a muted matcha selection. */
+[data-theme='light-green'] {
+  --color-surface: #ebf2eb;
+  --color-surface-2: #dfe8df;
+  --color-surface-3: #e2ece2;
+  --color-line: #c8d7c8;
+  --color-line-strong: #b3c6b3;
+  --color-fg: #1f2e23;
+  --color-fg-strong: #14211a;
+  --color-muted: #5a6e60;
+  --color-muted-2: #7c9283;
+  --color-sel: #c7e2c7;
+  --color-row-line: #dce8dc;
+  --color-accent: #2e7d4f;
+  --color-accent-strong: #256b42;
+  --color-accent-deep: #1c5233;
+  --color-accent-soft: #4f9a6e;
+  --color-accent-faint: #8fc3a4;
+  --color-accent-wash: #d8ebdd;
+  --color-accent-night: #0e2a1a;
+  --color-warning: #d9822b;
+  --color-warning-strong: #c06f1f;
+  --color-warning-deep: #a35d18;
+  --color-warning-soft: #e39a52;
+  --color-warning-faint: #efc08e;
+  --color-warning-wash: #fbf0e3;
+  --color-warning-border: #f0d3b0;
+  --color-warning-tint: #7a4315;
+  --color-warning-night: #2e1b0c;
+}
+
 /* Ink black with an indigo cast, for OLED panels. */
 [data-theme='midnight'] {
   --color-surface: #070a10;
@@ -140,6 +195,38 @@
   --color-muted-2: #5f7669;
   --color-sel: #1f4a37;
   --color-row-line: #263b30;
+}
+
+/* Dark bean green: ink-green night surfaces with moss selection, no pure black or white. */
+[data-theme='dark-green'] {
+  --color-surface: #141a16;
+  --color-surface-2: #1a221c;
+  --color-surface-3: #1f2922;
+  --color-line: #28332b;
+  --color-line-strong: #3a4a3f;
+  --color-fg: #d1e0d4;
+  --color-fg-strong: #e6f0e8;
+  --color-muted: #7d9482;
+  --color-muted-2: #5c7164;
+  --color-sel: #243d2d;
+  --color-row-line: #222e26;
+  --color-accent: #4e9a68;
+  --color-accent-strong: #3f8557;
+  --color-accent-deep: #357a4e;
+  --color-accent-soft: #6fb58a;
+  --color-accent-faint: #9bd1b1;
+  --color-accent-wash: #1e3b2a;
+  --color-accent-night: #0e2a1a;
+  --color-warning: #e09a5a;
+  --color-warning-strong: #d0823f;
+  --color-warning-deep: #b96f2f;
+  --color-warning-soft: #ebb07a;
+  --color-warning-faint: #f2c9a4;
+  --color-warning-wash: #3a2a1c;
+  --color-warning-border: #f2c9a4;
+  /* Used as the dark-mode banner border in `border-amber-800` slots. */
+  --color-warning-tint: #6b4630;
+  --color-warning-night: #2a1c10;
 }
 
 /*

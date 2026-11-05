@@ -168,7 +168,7 @@ export function FileListBody({
         <div className="grid h-full place-items-center text-center text-muted-2">
           {loading ? (
             <div className="flex flex-col items-center gap-2">
-              <div className="h-4 w-4 animate-spin rounded-full border-2 border-line border-t-blue-500" />
+              <div className="h-4 w-4 animate-spin rounded-full border-2 border-line border-t-accent" />
               <div className="text-[0.88em]">
                 {t('list.loading')} {list.scanned > 0 && t('list.scanned', { count: list.scanned })}
               </div>

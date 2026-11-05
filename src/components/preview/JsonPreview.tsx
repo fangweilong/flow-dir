@@ -221,7 +221,7 @@ export function JsonPreview({ text, t }: Props) {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder={t('preview.search')}
-            className="h-6 w-28 sm:w-36 rounded border border-line bg-surface-2 px-1.5 text-[0.625rem] text-fg outline-none placeholder:text-muted-2 focus:border-blue-400"
+            className="h-6 w-28 sm:w-36 rounded border border-line bg-surface-2 px-1.5 text-[0.625rem] text-fg outline-none placeholder:text-muted-2 focus:border-accent-soft"
           />
           {search && (
             <span className="text-[0.5625rem] text-muted tabular">

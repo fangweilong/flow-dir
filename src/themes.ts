@@ -14,11 +14,13 @@ export const THEMES: ThemeDef[] = [
   { id: 'light', label: 'settings.themeLight', dark: false },
   { id: 'sepia', label: 'settings.themeSepia', dark: false },
   { id: 'mist', label: 'settings.themeMist', dark: false },
+  { id: 'light-green', label: 'settings.themeLightGreen', dark: false },
   { id: 'dark', label: 'settings.themeDark', dark: true },
   { id: 'midnight', label: 'settings.themeMidnight', dark: true },
   { id: 'graphite', label: 'settings.themeGraphite', dark: true },
   { id: 'nord', label: 'settings.themeNord', dark: true },
   { id: 'forest', label: 'settings.themeForest', dark: true },
+  { id: 'dark-green', label: 'settings.themeDarkGreen', dark: true },
 ]
 
 /** Resolves whether a theme paints with dark tokens; `system` takes the OS answer. */

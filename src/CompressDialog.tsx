@@ -71,7 +71,7 @@ export function CompressDialog({ title, dir, name, format, lang, onSubmit, onClo
 
   const label = 'text-[0.6875rem] text-muted'
   const control =
-    'h-8 w-full rounded border border-line bg-surface-2 px-2 text-[0.75rem] text-fg outline-none focus:border-blue-400'
+    'h-8 w-full rounded border border-line bg-surface-2 px-2 text-[0.75rem] text-fg outline-none focus:border-accent-soft'
 
   return (
     <div
@@ -163,7 +163,7 @@ export function CompressDialog({ title, dir, name, format, lang, onSubmit, onClo
             type="button"
             onClick={submit}
             disabled={!value.trim()}
-            className="rounded-md bg-blue-600 px-3 py-1 text-[0.71875rem] font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+            className="rounded-md bg-accent-strong px-3 py-1 text-[0.71875rem] font-medium text-white hover:bg-accent disabled:opacity-50"
           >
             {t('compress.apply')}
           </button>

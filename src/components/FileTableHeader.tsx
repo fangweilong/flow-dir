@@ -95,7 +95,7 @@ export function FileTableHeader({
         onPointerDown={startNameDrag}
         onDoubleClick={onResetNameWidth}
         style={{ left: nameWidth > 0 ? `min(${listMinWidth}, 100%)` : '100%' }}
-        className="absolute inset-y-0 z-10 w-1.5 -translate-x-full cursor-col-resize touch-none select-none hover:bg-blue-400/60 active:bg-blue-500"
+        className="absolute inset-y-0 z-10 w-1.5 -translate-x-full cursor-col-resize touch-none select-none hover:bg-accent-soft/60 active:bg-accent"
       />
     </div>
   )

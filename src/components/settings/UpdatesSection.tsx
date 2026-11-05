@@ -177,7 +177,7 @@ export function UpdatesSection({ settings, info, lang, onChange, t, visible }: U
               onClick={runUpdateInstall}
               disabled={installing}
               data-update-install
-              className="w-full rounded-md bg-blue-600 px-2 py-1.5 text-[0.71875rem] font-medium text-white hover:bg-blue-500 disabled:opacity-60"
+              className="w-full rounded-md bg-accent-strong px-2 py-1.5 text-[0.71875rem] font-medium text-white hover:bg-accent disabled:opacity-60"
             >
               {installing
                 ? (updateProgress?.phase === 'connecting'
@@ -214,7 +214,7 @@ export function UpdatesSection({ settings, info, lang, onChange, t, visible }: U
                 </div>
                 <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-3">
                   <div
-                    className={`h-full bg-blue-600 transition-all duration-150 ${updateProgress?.phase === 'connecting' ? 'w-1/3 animate-pulse' : ''}`}
+                    className={`h-full bg-accent-strong transition-all duration-150 ${updateProgress?.phase === 'connecting' ? 'w-1/3 animate-pulse' : ''}`}
                     style={{
                       width: updateProgress?.phase === 'connecting' ? '30%' : `${updateProgress?.percent ?? 0}%`,
                     }}
@@ -231,7 +231,7 @@ export function UpdatesSection({ settings, info, lang, onChange, t, visible }: U
             value={settings.updateIntervalHours}
             onChange={(ev) => onChange({ ...settings, updateIntervalHours: Number(ev.target.value) })}
             data-update-interval
-            className="h-6 rounded border border-line bg-surface-2 px-1 text-[0.6875rem] text-fg outline-none focus:border-blue-400"
+            className="h-6 rounded border border-line bg-surface-2 px-1 text-[0.6875rem] text-fg outline-none focus:border-accent-soft"
           >
             {UPDATE_INTERVALS.map((hours) => (
               <option key={hours} value={hours}>
@@ -267,12 +267,12 @@ export function UpdatesSection({ settings, info, lang, onChange, t, visible }: U
                   <summary className="flex cursor-pointer list-none items-center gap-2 px-2 py-1">
                     <span className="font-mono text-[0.6875rem] text-fg">v{release.version}</span>
                     {release.version === info?.version && (
-                      <span className="rounded bg-blue-500/15 px-1 py-px text-[0.59375rem] text-blue-600 dark:text-blue-400">
+                      <span className="rounded bg-accent/15 px-1 py-px text-[0.59375rem] text-accent-strong dark:text-accent-soft">
                         {t('settings.updateCurrentVersion')}
                       </span>
                     )}
                     {release.prerelease && (
-                      <span className="rounded bg-amber-500/15 px-1 py-px text-[0.59375rem] text-amber-600 dark:text-amber-400">
+                      <span className="rounded bg-warning/15 px-1 py-px text-[0.59375rem] text-warning-strong dark:text-warning-soft">
                         {t('settings.prerelease')}
                       </span>
                     )}
@@ -292,7 +292,7 @@ export function UpdatesSection({ settings, info, lang, onChange, t, visible }: U
                       <button
                         type="button"
                         onClick={() => void openUrl(release.url!).catch(() => undefined)}
-                        className="rounded px-1 py-0.5 text-[0.625rem] text-blue-600 hover:bg-surface-3 dark:text-blue-400"
+                        className="rounded px-1 py-0.5 text-[0.625rem] text-accent-strong hover:bg-surface-3 dark:text-accent-soft"
                       >
                         {t('settings.releasePage')}
                       </button>

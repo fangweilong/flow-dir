@@ -90,7 +90,7 @@ export function PaneNavBar({
           onChange={(e) => onFilterChange(e.target.value)}
           placeholder={t('list.filter')}
           style={navFieldStyle}
-          className="w-[5.25rem] shrink-0 rounded border border-line bg-surface-2 px-1.5 text-[0.92em] outline-none placeholder:text-muted-2 focus:border-blue-400 focus:bg-surface"
+          className="w-[5.25rem] shrink-0 rounded border border-line bg-surface-2 px-1.5 text-[0.92em] outline-none placeholder:text-muted-2 focus:border-accent-soft focus:bg-surface"
         />
       )}
       {!showFilter && !root && filter && (
@@ -114,7 +114,7 @@ export function PaneNavBar({
         title={hidden ? t('list.hideHidden') : t('list.showHidden')}
         style={navButtonStyle}
         className={`grid shrink-0 place-items-center rounded hover:bg-surface-3 ${
-          hidden ? 'text-blue-500' : 'text-muted-2'
+          hidden ? 'text-accent' : 'text-muted-2'
         }`}
       >
         <svg viewBox="0 0 16 16" className="h-[1.17em] w-[1.17em]" fill="none" stroke="currentColor" strokeWidth="1.4">

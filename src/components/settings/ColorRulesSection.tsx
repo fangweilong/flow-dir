@@ -135,7 +135,7 @@ export function ColorRulesSection({ settings, onChange, t, visible }: Props) {
               <button
                 type="button"
                 onClick={() => startEdit(index, rule)}
-                className="rounded px-1.5 py-0.5 text-[0.6875rem] text-muted hover:bg-surface-3 hover:text-blue-500"
+                className="rounded px-1.5 py-0.5 text-[0.6875rem] text-muted hover:bg-surface-3 hover:text-accent"
               >
                 {t('settings.placeEdit')}
               </button>
@@ -167,7 +167,7 @@ export function ColorRulesSection({ settings, onChange, t, visible }: Props) {
             placeholder={t('settings.colorPatternPh')}
             title={t('settings.colorPattern')}
             data-color-pattern
-            className="h-6 w-full rounded border border-line bg-surface-2 px-1.5 text-[0.6875rem] outline-none placeholder:text-muted-2 focus:border-blue-400 focus:bg-surface"
+            className="h-6 w-full rounded border border-line bg-surface-2 px-1.5 text-[0.6875rem] outline-none placeholder:text-muted-2 focus:border-accent-soft focus:bg-surface"
           />
           <div className="flex flex-wrap items-center gap-2 text-[0.65625rem] text-muted">
             <label className="flex items-center gap-1">
@@ -202,7 +202,7 @@ export function ColorRulesSection({ settings, onChange, t, visible }: Props) {
               type="button"
               onClick={commit}
               disabled={!pattern.trim()}
-              className="h-6 shrink-0 rounded bg-blue-600 px-2 text-[0.6875rem] text-white hover:bg-blue-500 disabled:opacity-40"
+              className="h-6 shrink-0 rounded bg-accent-strong px-2 text-[0.6875rem] text-white hover:bg-accent disabled:opacity-40"
             >
               {editing !== null ? t('settings.placeSave') : t('settings.placeAdd')}
             </button>

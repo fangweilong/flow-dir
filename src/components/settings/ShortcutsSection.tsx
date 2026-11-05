@@ -97,7 +97,7 @@ export function ShortcutsSection({ settings, keys, onChange, t, visible }: Short
                       data-shortcut={shortcut.id}
                       className={`min-w-[5.75rem] rounded border px-2 py-0.5 font-mono text-[0.6875rem] ${
                         capturing === shortcut.id
-                          ? 'border-blue-400 bg-blue-500/10 text-blue-500'
+                          ? 'border-accent-soft bg-accent/10 text-accent'
                           : 'border-line bg-surface-2 text-fg hover:bg-surface-3'
                       }`}
                     >

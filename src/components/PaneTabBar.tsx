@@ -102,13 +102,13 @@ export function PaneTabBar({
               className={`group flex min-w-0 max-w-[12rem] cursor-default items-center gap-1 rounded-t px-2 text-[0.84em] select-none ${
                 isTabActive
                   ? active
-                    ? 'border-t-2 border-t-blue-500 bg-surface-2 font-medium text-fg-strong'
-                    : 'border-t-2 border-t-blue-400/50 bg-surface-2 text-fg-strong'
+                    ? 'border-t-2 border-t-accent bg-surface-2 font-medium text-fg-strong'
+                    : 'border-t-2 border-t-accent-soft/50 bg-surface-2 text-fg-strong'
                   : 'text-muted hover:bg-surface-3 hover:text-fg'
               } ${isDragging ? 'opacity-40' : ''}`}
             >
               {tabState.pinned && (
-                <span className="shrink-0 text-[0.625rem] text-blue-500" title={t('tab.pinned')}>
+                <span className="shrink-0 text-[0.625rem] text-accent" title={t('tab.pinned')}>
                   ★
                 </span>
               )}

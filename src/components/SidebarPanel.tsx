@@ -97,7 +97,7 @@ export function SidebarPanel({
             onClick={() => openTreePath(place.path)}
             onContextMenu={(ev) => openPlaceMenu(place, pointOf(ev))}
             icon={
-              <svg viewBox="0 0 16 16" className="h-4 w-4 text-blue-500" fill="currentColor">
+              <svg viewBox="0 0 16 16" className="h-4 w-4 text-accent" fill="currentColor">
                 <path d="M1.5 3.6c0-.6.5-1.1 1.1-1.1h3.2c.4 0 .7.15.95.42l.85.93h6.3c.6 0 1.1.5 1.1 1.1v7.4c0 .6-.5 1.1-1.1 1.1H2.6c-.6 0-1.1-.5-1.1-1.1V3.6Z" />
               </svg>
             }

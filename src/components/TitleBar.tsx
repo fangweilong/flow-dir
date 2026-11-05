@@ -68,7 +68,7 @@ function LayoutButton({
       title={title}
       onClick={onClick}
       className={`grid h-5 w-6 place-items-center rounded ${
-        active ? 'bg-surface text-blue-500 shadow-sm' : 'text-muted-2 hover:text-fg'
+        active ? 'bg-surface text-accent shadow-sm' : 'text-muted-2 hover:text-fg'
       }`}
     >
       <svg viewBox="0 0 16 16" className="h-3 w-3" fill="currentColor">
@@ -192,7 +192,7 @@ export function TitleBar({
         aria-label={t('history.open')}
         data-history-toggle
         className={`grid h-6 w-6 shrink-0 place-items-center rounded-md hover:bg-surface-3 ${
-          historyOpen ? 'text-blue-500' : 'text-muted'
+          historyOpen ? 'text-accent' : 'text-muted'
         }`}
       >
         <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.4">
@@ -233,7 +233,7 @@ export function TitleBar({
         title={`${t('preview.title')} (${formatBinding(keys.togglePreview)})`}
         aria-label={t('preview.title')}
         className={`grid h-6 w-6 shrink-0 place-items-center rounded-md hover:bg-surface-3 ${
-          previewOpen ? 'text-blue-500' : 'text-muted'
+          previewOpen ? 'text-accent' : 'text-muted'
         }`}
       >
         <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.4">
@@ -249,7 +249,7 @@ export function TitleBar({
           aria-label={t('priv.title')}
           aria-expanded={privOpen}
           className={`grid h-6 w-6 place-items-center rounded-md hover:bg-surface-3 ${
-            elevated ? 'text-amber-500' : 'text-muted-2'
+            elevated ? 'text-warning' : 'text-muted-2'
           }`}
         >
           <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.3">
@@ -282,7 +282,7 @@ export function TitleBar({
                   </button>
                 </>
               ) : (
-                <p className="mt-2 rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-[0.71875rem] leading-5 text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+                <p className="mt-2 rounded border border-warning-faint bg-warning-wash px-2 py-1.5 text-[0.71875rem] leading-5 text-warning-tint dark:border-warning-tint dark:bg-warning-night/40 dark:text-warning-border">
                   {t('priv.uacOff')}
                 </p>
               )}
@@ -306,7 +306,7 @@ export function TitleBar({
           <span
             data-update-badge
             title={t('settings.updateAvailable', { version: updateAvailable })}
-            className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-blue-500"
+            className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-accent"
           />
         )}
       </button>

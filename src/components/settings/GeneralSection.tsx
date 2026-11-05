@@ -56,9 +56,9 @@ export function GeneralSection({ settings, onChange, t, visible, everything }: G
             type="button"
             aria-pressed={settings.theme === 'system'}
             onClick={() => onChange({ ...settings, theme: 'system' })}
-            className={`mt-2 flex w-full items-center gap-3 rounded-lg border p-1.5 text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-400 ${
+            className={`mt-2 flex w-full items-center gap-3 rounded-lg border p-1.5 text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-soft ${
               settings.theme === 'system'
-                ? 'border-blue-400 bg-surface-3/60'
+                ? 'border-accent-soft bg-surface-3/60'
                 : 'border-line hover:border-line-strong hover:bg-surface-2'
             }`}
           >
@@ -128,7 +128,7 @@ export function GeneralSection({ settings, onChange, t, visible, everything }: G
                   onChange({ ...settings, fontFamily: value })
                 }}
                 aria-label={t('settings.font')}
-                className="h-6 w-[9.5rem] rounded border border-line bg-surface-2 px-1.5 text-[0.71875rem] text-fg outline-none focus:border-blue-400 focus:bg-surface"
+                className="h-6 w-[9.5rem] rounded border border-line bg-surface-2 px-1.5 text-[0.71875rem] text-fg outline-none focus:border-accent-soft focus:bg-surface"
               >
                 {FONT_FAMILIES.map((family) => (
                   <option key={family} value={family}>
@@ -146,7 +146,7 @@ export function GeneralSection({ settings, onChange, t, visible, everything }: G
                   }}
                   placeholder={t('settings.fontCustomPh')}
                   aria-label={t('settings.fontCustomPh')}
-                  className="h-6 w-[9.5rem] rounded border border-line bg-surface-2 px-1.5 text-[0.71875rem] outline-none placeholder:text-muted-2 focus:border-blue-400 focus:bg-surface"
+                  className="h-6 w-[9.5rem] rounded border border-line bg-surface-2 px-1.5 text-[0.71875rem] outline-none placeholder:text-muted-2 focus:border-accent-soft focus:bg-surface"
                 />
               )}
             </div>
@@ -165,7 +165,7 @@ export function GeneralSection({ settings, onChange, t, visible, everything }: G
                 value={fontSize}
                 onChange={(ev) => onChange({ ...settings, fontSize: Number(ev.target.value) })}
                 aria-label={t('settings.fontSize')}
-                className="h-4 w-[7rem] cursor-pointer accent-blue-600"
+                className="h-4 w-[7rem] cursor-pointer accent-accent"
               />
               <span className="tabular w-9 text-right text-[0.71875rem] text-muted">{fontSize} px</span>
             </div>
@@ -184,7 +184,7 @@ export function GeneralSection({ settings, onChange, t, visible, everything }: G
                 value={iconSize}
                 onChange={(ev) => onChange({ ...settings, iconSize: Number(ev.target.value) })}
                 aria-label={t('settings.iconSize')}
-                className="h-4 w-[7rem] cursor-pointer accent-blue-600"
+                className="h-4 w-[7rem] cursor-pointer accent-accent"
               />
               <span className="tabular w-9 text-right text-[0.71875rem] text-muted">{iconSize} px</span>
             </div>
@@ -200,7 +200,7 @@ export function GeneralSection({ settings, onChange, t, visible, everything }: G
               value={settings.iconTheme}
               onChange={(ev) => onChange({ ...settings, iconTheme: ev.target.value as IconThemeId })}
               aria-label={t('settings.iconTheme')}
-              className="h-7 shrink-0 rounded border border-line bg-surface-2 px-1.5 text-[0.71875rem] text-fg outline-none focus:border-blue-400"
+              className="h-7 shrink-0 rounded border border-line bg-surface-2 px-1.5 text-[0.71875rem] text-fg outline-none focus:border-accent-soft"
             >
               {ICON_THEMES.map((entry) => (
                 <option key={entry.id} value={entry.id}>
@@ -305,7 +305,7 @@ export function GeneralSection({ settings, onChange, t, visible, everything }: G
               max={50}
               value={settings.closedTabLimit}
               onChange={(value) => onChange({ ...settings, closedTabLimit: value })}
-              className="h-6 w-16 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-blue-400"
+              className="h-6 w-16 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-accent-soft"
             />
           </div>
           <div className="flex items-center justify-between gap-2">
@@ -318,7 +318,7 @@ export function GeneralSection({ settings, onChange, t, visible, everything }: G
               max={16}
               value={settings.dupConcurrency}
               onChange={(value) => onChange({ ...settings, dupConcurrency: value })}
-              className="h-6 w-16 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-blue-400"
+              className="h-6 w-16 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-accent-soft"
             />
           </div>
           <div className="flex items-center justify-between gap-2">
@@ -331,7 +331,7 @@ export function GeneralSection({ settings, onChange, t, visible, everything }: G
               max={4096}
               value={settings.dupMaxMbPerSec}
               onChange={(value) => onChange({ ...settings, dupMaxMbPerSec: value })}
-              className="h-6 w-16 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-blue-400"
+              className="h-6 w-16 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-accent-soft"
             />
           </div>
           <div className="space-y-1">
@@ -356,7 +356,7 @@ export function GeneralSection({ settings, onChange, t, visible, everything }: G
               onKeyDown={(ev) => {
                 if (ev.key === 'Enter') ev.currentTarget.blur()
               }}
-              className="h-6 w-full rounded border border-line bg-surface-2 px-1 text-[0.6875rem] text-fg outline-none focus:border-blue-400"
+              className="h-6 w-full rounded border border-line bg-surface-2 px-1 text-[0.6875rem] text-fg outline-none focus:border-accent-soft"
             />
           </div>
           <ToggleRow
@@ -388,7 +388,7 @@ export function GeneralSection({ settings, onChange, t, visible, everything }: G
               value={settings.undoLimit}
               onChange={(value) => onChange({ ...settings, undoLimit: value })}
               data-undo-limit
-              className="h-6 w-16 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-blue-400"
+              className="h-6 w-16 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-accent-soft"
             />
           </div>
         </div>

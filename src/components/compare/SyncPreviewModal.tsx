@@ -114,7 +114,7 @@ export function SyncPreviewModal({
               type="button"
               onClick={onExecute}
               disabled={executing || !plan.actions.length}
-              className="rounded bg-blue-600 px-2.5 py-1 text-white hover:bg-blue-500 disabled:opacity-40"
+              className="rounded bg-accent-strong px-2.5 py-1 text-white hover:bg-accent disabled:opacity-40"
             >
               {executing ? t('compare.executing') : t('compare.execute')}
             </button>

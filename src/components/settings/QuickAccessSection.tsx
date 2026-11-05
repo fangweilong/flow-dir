@@ -85,7 +85,7 @@ export function QuickAccessSection({ settings, onChange, t, visible, configDir }
           <button
             type="button"
             onClick={() => onChange({ ...settings, hiddenPlaces: [] })}
-            className="rounded px-1.5 py-0.5 text-[0.6875rem] text-blue-500 hover:bg-surface-3"
+            className="rounded px-1.5 py-0.5 text-[0.6875rem] text-accent hover:bg-surface-3"
           >
             {t('settings.placeRestore')}
           </button>
@@ -96,7 +96,7 @@ export function QuickAccessSection({ settings, onChange, t, visible, configDir }
             onChange={(ev) => setPlaceName(ev.target.value)}
             placeholder={t('settings.placeNamePh')}
             data-place-name
-            className="h-6 w-[6rem] rounded border border-line bg-surface-2 px-1.5 text-[0.6875rem] outline-none placeholder:text-muted-2 focus:border-blue-400 focus:bg-surface"
+            className="h-6 w-[6rem] rounded border border-line bg-surface-2 px-1.5 text-[0.6875rem] outline-none placeholder:text-muted-2 focus:border-accent-soft focus:bg-surface"
           />
           <input
             value={placePath}
@@ -106,7 +106,7 @@ export function QuickAccessSection({ settings, onChange, t, visible, configDir }
             }}
             placeholder={t('settings.placePathPh')}
             data-place-path
-            className="h-6 min-w-0 flex-1 rounded border border-line bg-surface-2 px-1.5 text-[0.6875rem] outline-none placeholder:text-muted-2 focus:border-blue-400 focus:bg-surface"
+            className="h-6 min-w-0 flex-1 rounded border border-line bg-surface-2 px-1.5 text-[0.6875rem] outline-none placeholder:text-muted-2 focus:border-accent-soft focus:bg-surface"
           />
           <button
             type="button"
@@ -125,7 +125,7 @@ export function QuickAccessSection({ settings, onChange, t, visible, configDir }
             type="button"
             onClick={addPlace}
             disabled={!placePath.trim()}
-            className="h-6 shrink-0 rounded bg-blue-600 px-2 text-[0.6875rem] text-white hover:bg-blue-500 disabled:opacity-40"
+            className="h-6 shrink-0 rounded bg-accent-strong px-2 text-[0.6875rem] text-white hover:bg-accent disabled:opacity-40"
           >
             {t('settings.placeAdd')}
           </button>

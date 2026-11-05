@@ -51,7 +51,7 @@ export function CompareTableView({
     const hash = hashResults[entry.rel]
     const tint =
       entry.status === 'different'
-        ? 'bg-amber-50/60 dark:bg-amber-950/25'
+        ? 'bg-warning-wash/60 dark:bg-warning-night/25'
         : entry.status === 'left' && side === 'left'
           ? 'bg-rose-50/60 dark:bg-rose-950/25'
           : entry.status === 'right' && side === 'right'

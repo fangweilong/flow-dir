@@ -70,7 +70,7 @@ export function ToggleRow({
         aria-checked={value}
         data-toggle={label}
         onClick={() => onChange(!value)}
-        className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${value ? 'bg-blue-600' : 'bg-surface-3'}`}
+        className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${value ? 'bg-accent-strong' : 'bg-surface-3'}`}
       >
         <span
           className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-[left] ${value ? 'left-[1.125rem]' : 'left-0.5'}`}
@@ -92,7 +92,7 @@ export function ThemeSwatchSurface({ theme }: { theme: Exclude<Theme, 'system'> 
         </div>
         <div className="min-h-0 flex-1 px-1.5 py-1">
           <div className="flex items-center gap-1 border-b border-row-line py-[0.125rem]">
-            <span className="h-1.5 w-1.5 rounded-sm bg-blue-500" />
+            <span className="h-1.5 w-1.5 rounded-sm bg-accent" />
             <span className="h-1 w-7 rounded bg-fg-strong/80" />
           </div>
           <div className="flex items-center gap-1 py-[0.125rem]">
@@ -123,7 +123,7 @@ export function ThemeSwatch({ theme }: { theme: Theme }) {
 
 export function ActiveCheck() {
   return (
-    <svg aria-hidden viewBox="0 0 16 16" className="ml-auto h-3 w-3 shrink-0 text-blue-500">
+    <svg aria-hidden viewBox="0 0 16 16" className="ml-auto h-3 w-3 shrink-0 text-accent">
       <path
         d="m3.5 8.5 3 3 6-7"
         fill="none"
@@ -153,8 +153,8 @@ export function ThemeCard({
       aria-pressed={active}
       title={label}
       onClick={onSelect}
-      className={`rounded-lg border p-1.5 text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-400 ${
-        active ? 'border-blue-400 bg-surface-3/60' : 'border-line hover:border-line-strong hover:bg-surface-2'
+      className={`rounded-lg border p-1.5 text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-soft ${
+        active ? 'border-accent-soft bg-surface-3/60' : 'border-line hover:border-line-strong hover:bg-surface-2'
       }`}
     >
       <ThemeSwatch theme={theme} />
@@ -192,7 +192,7 @@ export function RegionFontRow({
         placeholder={inheritHint}
         aria-label={label}
         onChange={(ev) => onChangeFamily(ev.target.value)}
-        className="h-6 min-w-0 flex-1 rounded border border-line bg-surface-2 px-1.5 text-[0.6875rem] outline-none placeholder:text-muted-2 focus:border-blue-400 focus:bg-surface"
+        className="h-6 min-w-0 flex-1 rounded border border-line bg-surface-2 px-1.5 text-[0.6875rem] outline-none placeholder:text-muted-2 focus:border-accent-soft focus:bg-surface"
       />
       <input
         type="range"
@@ -202,7 +202,7 @@ export function RegionFontRow({
         value={size}
         aria-label={label}
         onChange={(ev) => onChangeSize(Number(ev.target.value))}
-        className="h-4 w-[5rem] shrink-0 cursor-pointer accent-blue-600"
+        className="h-4 w-[5rem] shrink-0 cursor-pointer accent-accent"
       />
       <span className="tabular w-9 shrink-0 text-right text-[0.71875rem] text-muted">{size} px</span>
     </div>

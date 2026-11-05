@@ -62,7 +62,7 @@ export function FeatureIcon({ name }: { name: 'compare' | 'duplicate' }) {
   return (
     <svg
       viewBox="0 0 16 16"
-      className="h-[1.1em] w-[1.1em] shrink-0 text-blue-500"
+      className="h-[1.1em] w-[1.1em] shrink-0 text-accent"
       fill="none"
       stroke="currentColor"
       strokeWidth="1.5"

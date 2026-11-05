@@ -114,6 +114,8 @@ export const zh = {
   'settings.themeLight': '浅色',
   'settings.themeSepia': '暖纸',
   'settings.themeMist': '雾青',
+  'settings.themeLightGreen': '豆沙绿',
+  'settings.themeDarkGreen': '墨豆沙',
   'settings.themeDark': '深色',
   'settings.themeMidnight': '午夜',
   'settings.themeGraphite': '石墨',

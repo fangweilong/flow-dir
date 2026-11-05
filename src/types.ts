@@ -34,11 +34,13 @@ export type Theme =
   | 'light'
   | 'sepia'
   | 'mist'
+  | 'light-green'
   | 'dark'
   | 'midnight'
   | 'graphite'
   | 'nord'
   | 'forest'
+  | 'dark-green'
 export type Dependency = {
   name: string
   version: string

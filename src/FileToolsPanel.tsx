@@ -350,7 +350,7 @@ export function FileToolsPanel({
                   value={compareHash}
                   onChange={(ev) => setCompareHash(ev.target.value)}
                   placeholder={t('tools.comparePh')}
-                  className="h-6 min-w-0 flex-1 rounded border border-line bg-surface-2 px-1.5 font-mono text-[0.6875rem] text-fg outline-none focus:border-blue-400"
+                  className="h-6 min-w-0 flex-1 rounded border border-line bg-surface-2 px-1.5 font-mono text-[0.6875rem] text-fg outline-none focus:border-accent-soft"
                 />
                 <button
                   type="button"
@@ -430,13 +430,13 @@ export function FileToolsPanel({
           </div>
           <div className="h-1 overflow-hidden rounded bg-surface-3">
             <div
-              className={`h-full ${paused ? 'bg-amber-400' : 'bg-blue-500'}`}
+              className={`h-full ${paused ? 'bg-warning-soft' : 'bg-accent'}`}
               style={{ width: `${done ? 100 : percent}%` }}
             />
           </div>
           {error && <div className="text-[0.65625rem] text-red-500">{error}</div>}
           {canceled && !running && (
-            <div className="text-[0.65625rem] text-amber-500">{t('op.canceled')}</div>
+            <div className="text-[0.65625rem] text-warning">{t('op.canceled')}</div>
           )}
         </div>
 
@@ -559,7 +559,7 @@ function HashTable({
                       type="button"
                       onClick={() => onCopyHash(row.hash)}
                       title={t('tools.copy')}
-                      className="shrink-0 rounded px-1 opacity-0 hover:text-blue-500 group-hover:opacity-100"
+                      className="shrink-0 rounded px-1 opacity-0 hover:text-accent group-hover:opacity-100"
                     >
                       📋
                     </button>

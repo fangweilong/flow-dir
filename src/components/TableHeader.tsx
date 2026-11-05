@@ -24,7 +24,7 @@ export function HeaderCell({
       }`}
     >
       <span className="truncate">{label}</span>
-      <span className={`shrink-0 text-[0.64em] ${active ? 'text-blue-500' : 'text-transparent'}`}>
+      <span className={`shrink-0 text-[0.64em] ${active ? 'text-accent' : 'text-transparent'}`}>
         {sort.dir === 'asc' ? '▲' : '▼'}
       </span>
     </button>
@@ -48,7 +48,7 @@ export function ColDivider({
       aria-label={label}
       onPointerDown={onPointerDown}
       onDoubleClick={onDoubleClick}
-      className="absolute inset-y-0 left-0 z-10 w-1.5 -translate-x-1/2 cursor-col-resize touch-none select-none hover:bg-blue-400/60 active:bg-blue-500"
+      className="absolute inset-y-0 left-0 z-10 w-1.5 -translate-x-1/2 cursor-col-resize touch-none select-none hover:bg-accent-soft/60 active:bg-accent"
     />
   )
 }

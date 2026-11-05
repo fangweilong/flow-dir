@@ -80,7 +80,7 @@ export function ExternalPreviewSection({ settings, keys, onChange, t, visible }:
               <button
                 type="button"
                 onClick={() => startEdit(rule.ext, rule.command)}
-                className="rounded px-1.5 py-0.5 text-[0.6875rem] text-muted hover:bg-surface-3 hover:text-blue-500"
+                className="rounded px-1.5 py-0.5 text-[0.6875rem] text-muted hover:bg-surface-3 hover:text-accent"
               >
                 {t('settings.placeEdit')}
               </button>
@@ -106,7 +106,7 @@ export function ExternalPreviewSection({ settings, keys, onChange, t, visible }:
             onChange={(ev) => setExternalExt(ev.target.value)}
             placeholder={t('settings.externalExtPh')}
             data-external-ext
-            className="h-6 w-[4.5rem] shrink-0 rounded border border-line bg-surface-2 px-1.5 text-[0.6875rem] outline-none placeholder:text-muted-2 focus:border-blue-400 focus:bg-surface"
+            className="h-6 w-[4.5rem] shrink-0 rounded border border-line bg-surface-2 px-1.5 text-[0.6875rem] outline-none placeholder:text-muted-2 focus:border-accent-soft focus:bg-surface"
           />
           <input
             value={externalCommand}
@@ -118,13 +118,13 @@ export function ExternalPreviewSection({ settings, keys, onChange, t, visible }:
             placeholder={t('settings.externalCommandPh')}
             title={t('settings.externalCommand')}
             data-external-command
-            className="h-6 min-w-0 flex-1 rounded border border-line bg-surface-2 px-1.5 text-[0.6875rem] outline-none placeholder:text-muted-2 focus:border-blue-400 focus:bg-surface"
+            className="h-6 min-w-0 flex-1 rounded border border-line bg-surface-2 px-1.5 text-[0.6875rem] outline-none placeholder:text-muted-2 focus:border-accent-soft focus:bg-surface"
           />
           <button
             type="button"
             onClick={commitExternal}
             disabled={!externalExt.trim() || !externalCommand.trim()}
-            className="h-6 shrink-0 rounded bg-blue-600 px-2 text-[0.6875rem] text-white hover:bg-blue-500 disabled:opacity-40"
+            className="h-6 shrink-0 rounded bg-accent-strong px-2 text-[0.6875rem] text-white hover:bg-accent disabled:opacity-40"
           >
             {editingExt !== null ? t('settings.placeSave') : t('settings.placeAdd')}
           </button>
@@ -151,7 +151,7 @@ export function ExternalPreviewSection({ settings, keys, onChange, t, visible }:
             value={settings.previewMaxFileMb}
             onChange={(value) => onChange({ ...settings, previewMaxFileMb: value })}
             data-preview-max-file
-            className="h-6 w-16 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-blue-400"
+            className="h-6 w-16 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-accent-soft"
           />
         </div>
         <div className="flex items-center justify-between gap-2">
@@ -166,7 +166,7 @@ export function ExternalPreviewSection({ settings, keys, onChange, t, visible }:
             value={settings.previewMaxDimension}
             onChange={(value) => onChange({ ...settings, previewMaxDimension: value })}
             data-preview-max-dimension
-            className="h-6 w-20 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-blue-400"
+            className="h-6 w-20 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-accent-soft"
           />
         </div>
         <div className="flex items-center justify-between gap-2">
@@ -180,7 +180,7 @@ export function ExternalPreviewSection({ settings, keys, onChange, t, visible }:
             value={settings.previewTextKb}
             onChange={(value) => onChange({ ...settings, previewTextKb: value })}
             data-preview-text-kb
-            className="h-6 w-16 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-blue-400"
+            className="h-6 w-16 shrink-0 rounded border border-line bg-surface-2 px-1 text-right text-[0.6875rem] tabular text-fg outline-none focus:border-accent-soft"
           />
         </div>
       </div>

@@ -33,7 +33,7 @@ export function DiagnosticsSection({ settings, onChange, onOpenLocation, t, visi
             value={settings.logLevel}
             onChange={(ev) => onChange({ ...settings, logLevel: ev.target.value as LogLevel })}
             data-log-level
-            className="h-6 shrink-0 rounded border border-line bg-surface-2 px-1 text-[0.6875rem] text-fg outline-none focus:border-blue-400"
+            className="h-6 shrink-0 rounded border border-line bg-surface-2 px-1 text-[0.6875rem] text-fg outline-none focus:border-accent-soft"
           >
             {LOG_LEVELS.map((level) => (
               <option key={level} value={level}>

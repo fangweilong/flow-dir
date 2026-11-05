@@ -570,7 +570,7 @@ export function ComparePanel({
       case 'right':
         return 'text-emerald-600 dark:text-emerald-400'
       case 'different':
-        return 'text-amber-600 dark:text-amber-400'
+        return 'text-warning-strong dark:text-warning-soft'
       default:
         return 'text-muted-2'
     }
@@ -675,7 +675,7 @@ export function ComparePanel({
             type="button"
             onClick={begin}
             disabled={!leftRoot.trim() || !rightRoot.trim() || loading}
-            className="shrink-0 rounded bg-blue-600 px-2.5 py-1 text-[0.6875rem] font-medium text-white hover:bg-blue-500 disabled:opacity-40"
+            className="shrink-0 rounded bg-accent-strong px-2.5 py-1 text-[0.6875rem] font-medium text-white hover:bg-accent disabled:opacity-40"
           >
             {session ? t('compare.refresh') : t('compare.start')}
           </button>
@@ -717,7 +717,7 @@ export function ComparePanel({
             {t('compare.includeHidden')}
           </label>
           {hashProgress && !hashProgress.done && (
-            <span className="flex items-center gap-1 text-blue-500">
+            <span className="flex items-center gap-1 text-accent">
               {t('compare.verifying', { current: hashProgress.current, total: hashProgress.total })}
               <button type="button" onClick={cancelHash} className="rounded border border-line px-1 hover:text-fg">
                 {t('compare.cancel')}

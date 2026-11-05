@@ -533,11 +533,13 @@ impl Settings {
             "light" => "light".to_string(),
             "sepia" => "sepia".to_string(),
             "mist" => "mist".to_string(),
+            "light-green" => "light-green".to_string(),
             "dark" => "dark".to_string(),
             "midnight" => "midnight".to_string(),
             "graphite" => "graphite".to_string(),
             "nord" => "nord".to_string(),
             "forest" => "forest".to_string(),
+            "dark-green" => "dark-green".to_string(),
             _ => "system".to_string(),
         };
         // The frontend enforces the same minimum; the upper bound only rejects absurd
@@ -627,7 +629,7 @@ const TEMPLATE: &str = r#"# FlowDir 设置 / settings
 # 界面语言 / UI language: "zh-CN" | "en"
 language = "zh-CN"
 
-# 主题 / theme: "system" | "light" | "sepia" | "mist" | "dark" | "midnight" | "graphite" | "nord" | "forest"
+# 主题 / theme: "system" | "light" | "sepia" | "mist" | "light-green" | "dark" | "midnight" | "graphite" | "nord" | "forest" | "dark-green"
 theme = "system"
 
 # 界面字体与字号（像素，12–20）/ UI font family and size in px

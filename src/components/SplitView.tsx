@@ -17,7 +17,7 @@ export function ResizeHandle({
       aria-orientation="vertical"
       onPointerDown={onPointerDown}
       style={{ width: GUTTER }}
-      className="shrink-0 cursor-col-resize bg-line-strong hover:bg-blue-400"
+      className="shrink-0 cursor-col-resize bg-line-strong hover:bg-accent-soft"
     />
   )
 }
@@ -57,7 +57,7 @@ export function SplitView({
           window.addEventListener('pointerup', up)
           window.addEventListener('pointercancel', up)
         }}
-        className={`shrink-0 bg-line-strong hover:bg-blue-400 ${
+        className={`shrink-0 bg-line-strong hover:bg-accent-soft ${
           node.dir === 'row' ? 'w-0.5 cursor-col-resize' : 'h-0.5 cursor-row-resize'
         }`}
       />

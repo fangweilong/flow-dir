@@ -80,7 +80,7 @@ function DependencyRow({ dep, t }: { dep: Dependency; t: Translate }) {
         type="button"
         title={dep.repository || dep.name}
         onClick={() => dep.repository && void openUrl(dep.repository).catch(() => undefined)}
-        className="min-w-0 truncate text-left font-mono text-[0.6875rem] text-blue-600 hover:underline dark:text-blue-400"
+        className="min-w-0 truncate text-left font-mono text-[0.6875rem] text-accent-strong hover:underline dark:text-accent-soft"
       >
         {dep.name}
       </button>

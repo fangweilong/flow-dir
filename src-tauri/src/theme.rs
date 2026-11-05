@@ -71,11 +71,13 @@ fn palette(theme: &str) -> Option<(bool, u32)> {
         "light" => Some((false, 0xff_ffff)),
         "sepia" => Some((false, 0xfb_f7ef)),
         "mist" => Some((false, 0xf7_fbfa)),
+        "light-green" => Some((false, 0xeb_f2eb)),
         "dark" => Some((true, 0x0f_172a)),
         "midnight" => Some((true, 0x07_0a10)),
         "graphite" => Some((true, 0x18_191b)),
         "nord" => Some((true, 0x2e_3440)),
         "forest" => Some((true, 0x0e_1713)),
+        "dark-green" => Some((true, 0x14_1a16)),
         _ => None,
     }
 }

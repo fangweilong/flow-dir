@@ -106,7 +106,7 @@ export function FolderPickerDialog({ title, initial, lang, onPick, onClose }: Pr
               onClick={() => setPath(drive.root)}
               className={`rounded border px-1.5 py-0.5 text-[0.65625rem] ${
                 path === drive.root
-                  ? 'border-blue-500 text-fg-strong'
+                  ? 'border-accent text-fg-strong'
                   : 'border-line text-muted hover:bg-surface-3 hover:text-fg'
               }`}
             >
@@ -162,7 +162,7 @@ export function FolderPickerDialog({ title, initial, lang, onPick, onClose }: Pr
             type="button"
             data-picker-ok
             onClick={() => onPick(path)}
-            className="rounded-md bg-blue-600 px-3 py-1 text-[0.71875rem] font-medium text-white hover:bg-blue-500"
+            className="rounded-md bg-accent-strong px-3 py-1 text-[0.71875rem] font-medium text-white hover:bg-accent"
           >
             {t('picker.choose')}
           </button>

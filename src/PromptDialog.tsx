@@ -66,7 +66,7 @@ export function PromptDialog({ title, initial, lang, onConfirm, onClose, passwor
               onClose()
             }
           }}
-          className="h-8 w-full rounded border border-line bg-surface-2 px-2 text-[0.75rem] outline-none focus:border-blue-400"
+          className="h-8 w-full rounded border border-line bg-surface-2 px-2 text-[0.75rem] outline-none focus:border-accent-soft"
         />
         <div className="flex justify-end gap-2 pt-3">
           <button
@@ -79,7 +79,7 @@ export function PromptDialog({ title, initial, lang, onConfirm, onClose, passwor
           <button
             type="button"
             onClick={submit}
-            className="rounded-md bg-blue-600 px-3 py-1 text-[0.71875rem] font-medium text-white hover:bg-blue-500"
+            className="rounded-md bg-accent-strong px-3 py-1 text-[0.71875rem] font-medium text-white hover:bg-accent"
           >
             {t('dialog.ok')}
           </button>

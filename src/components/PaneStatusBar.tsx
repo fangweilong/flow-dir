@@ -74,7 +74,7 @@ export function PaneStatusBar({
         )}
         {loading && entryCount > 0 && <span>{t('list.scanning', { count: scanned })}</span>}
         {folderSize && (
-          <span className="flex items-center gap-1 text-blue-500">
+          <span className="flex items-center gap-1 text-accent">
             {folderSize.error ? (
               <span className="text-red-500">{t('list.sizeFailed')}</span>
             ) : !folderSize.done ? (

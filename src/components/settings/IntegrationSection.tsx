@@ -75,7 +75,7 @@ export function IntegrationSection({ settings, onChange, t, visible }: Integrati
             }}
             className={`shrink-0 rounded-md border px-2 py-1 font-mono text-[0.6875rem] ${
               hotkeyCapturing
-                ? 'border-blue-400 bg-blue-500/10 text-blue-500'
+                ? 'border-accent-soft bg-accent/10 text-accent'
                 : 'border-line bg-surface-2 text-fg hover:bg-surface-3'
             }`}
           >

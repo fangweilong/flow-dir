@@ -96,7 +96,7 @@ export function OpsPanel({ ops, lang, onCancel, onDismiss, onRetryElevated, elev
               </div>
             )}
             <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-surface-3">
-              <div className="h-full rounded-full bg-blue-500 transition-[width]" style={{ width: `${percent}%` }} />
+              <div className="h-full rounded-full bg-accent transition-[width]" style={{ width: `${percent}%` }} />
             </div>
             <div className="mt-1 text-right text-[0.625rem] tabular text-muted-2">{percent}%</div>
             {op.failed.length > 0 && (
@@ -124,7 +124,7 @@ export function OpsPanel({ ops, lang, onCancel, onDismiss, onRetryElevated, elev
                   data-op-elevate
                   disabled={elevating === op.opId}
                   onClick={() => onRetryElevated(op.opId)}
-                  className="mt-1.5 w-full rounded border border-blue-500/40 bg-blue-500/10 px-1.5 py-1 text-[0.65625rem] text-blue-600 hover:bg-blue-500/20 disabled:opacity-50 dark:text-blue-300"
+                  className="mt-1.5 w-full rounded border border-accent/40 bg-accent/10 px-1.5 py-1 text-[0.65625rem] text-accent-strong hover:bg-accent/20 disabled:opacity-50 dark:text-accent-faint"
                 >
                   {t('op.retryElevated')}
                 </button>

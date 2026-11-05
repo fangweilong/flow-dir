@@ -200,7 +200,7 @@ const TreeRow = memo(function TreeRow({
 
 /** Static glyphs: the tree must not queue one shell-icon request per folder. */
 function Glyph({ kind, active }: { kind: 'drive' | 'network' | 'folder'; active: boolean }) {
-  const tone = active ? 'text-blue-500' : 'text-muted-2'
+  const tone = active ? 'text-accent' : 'text-muted-2'
   if (kind === 'drive') {
     return (
       <svg viewBox="0 0 16 16" className={`h-4 w-4 shrink-0 ${tone}`} fill="currentColor">

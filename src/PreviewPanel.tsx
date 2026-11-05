@@ -219,7 +219,7 @@ export function PreviewPanel({
             {info.kind === 'folder' && (
               <div className="grid h-full place-items-center px-4 text-center">
                 <div>
-                  <svg viewBox="0 0 48 48" className="mx-auto h-12 w-12 text-amber-400" fill="currentColor" aria-hidden>
+                  <svg viewBox="0 0 48 48" className="mx-auto h-12 w-12 text-warning-soft" fill="currentColor" aria-hidden>
                     <path d="M4 12a4 4 0 0 1 4-4h11l4 5h17a4 4 0 0 1 4 4v19a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4V12Z" />
                   </svg>
                   <div className="mt-2 text-[0.75rem] font-medium text-fg-strong">{t('preview.folder')}</div>

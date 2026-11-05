@@ -116,6 +116,8 @@ export const en: Record<BaseKey, string> = {
   'settings.themeLight': 'Light',
   'settings.themeSepia': 'Sepia',
   'settings.themeMist': 'Mist',
+  'settings.themeLightGreen': 'Bean Green',
+  'settings.themeDarkGreen': 'Dark Bean Green',
   'settings.themeDark': 'Dark',
   'settings.themeMidnight': 'Midnight',
   'settings.themeGraphite': 'Graphite',

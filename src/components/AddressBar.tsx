@@ -265,7 +265,7 @@ export const AddressBar = forwardRef<AddressBarHandle, AddressBarProps>(function
           title={addressBad ? t('address.invalidPath') : undefined}
           style={navFieldStyle}
           className={`mx-0.5 min-w-0 flex-1 rounded border bg-surface px-1.5 outline-none ${
-            addressBad ? 'border-red-400 text-red-500' : 'border-blue-400'
+            addressBad ? 'border-red-400 text-red-500' : 'border-accent-soft'
           }`}
         />
       ) : (

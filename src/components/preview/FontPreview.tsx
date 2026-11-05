@@ -41,7 +41,7 @@ export function FontPreview({ url, name, mtime, t }: Props) {
           value={customText}
           onChange={(e) => setCustomText(e.target.value)}
           placeholder={t('preview.fontCustom')}
-          className="h-7 w-full rounded border border-line bg-surface-2 px-2 text-[0.6875rem] text-fg outline-none placeholder:text-muted-2 focus:border-blue-400"
+          className="h-7 w-full rounded border border-line bg-surface-2 px-2 text-[0.6875rem] text-fg outline-none placeholder:text-muted-2 focus:border-accent-soft"
         />
       </div>
 

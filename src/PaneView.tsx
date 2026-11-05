@@ -629,7 +629,7 @@ export function PaneView({
       {!root && list.truncated && (
         <div
           data-truncated
-          className="flex shrink-0 items-center gap-1 border-b border-amber-300 bg-amber-50 px-2 py-1 text-[0.75em] text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200"
+          className="flex shrink-0 items-center gap-1 border-b border-warning-faint bg-warning-wash px-2 py-1 text-[0.75em] text-warning-tint dark:border-warning-tint dark:bg-warning-night/40 dark:text-warning-border"
         >
           {t('list.truncated', { count: list.entries.length })}
         </div>
@@ -784,9 +784,9 @@ export function PaneView({
       {dropHint && (
         <div className="pointer-events-none absolute inset-0 z-20">
           {dropHint === 'center' ? (
-            <div className="absolute inset-0 border-2 border-blue-400 bg-blue-400/10" />
+            <div className="absolute inset-0 border-2 border-accent-soft bg-accent-soft/10" />
           ) : (
-            <div className={`absolute bg-blue-400/25 outline outline-2 outline-blue-400 ${HINT_STYLE[dropHint]}`} />
+            <div className={`absolute bg-accent-soft/25 outline outline-2 outline-accent-soft ${HINT_STYLE[dropHint]}`} />
           )}
         </div>
       )}

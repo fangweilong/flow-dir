@@ -108,7 +108,7 @@ export function DrivesOverview({
             style={{ height: rowHeight, gridTemplateColumns: driveGrid }}
             className={`grid cursor-default items-center gap-2 border-b border-row-line px-1.5 transition-colors ${
               isSelected
-                ? 'bg-surface-3 ring-1 ring-inset ring-blue-500/50'
+                ? 'bg-surface-3 ring-1 ring-inset ring-accent/50'
                 : 'hover:bg-surface-3'
             } ${unavailable ? 'text-muted-2' : ''}`}
           >

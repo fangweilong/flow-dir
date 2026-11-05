@@ -36,7 +36,7 @@ export function DragOverlay({
       {target && (
         <div
           data-drag-target
-          className="pointer-events-none fixed z-[59] rounded-[3px] bg-blue-400/10 ring-2 ring-inset ring-blue-400/70"
+          className="pointer-events-none fixed z-[59] rounded-[3px] bg-accent-soft/10 ring-2 ring-inset ring-accent-soft/70"
           style={{
             left: target.left,
             top: target.top,
