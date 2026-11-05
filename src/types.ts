@@ -1,5 +1,6 @@
 export type ApiError = { code: string; detail?: string }
-export type RawEntry = [string, number, number, number, number]
+/** `[name, size, mtime, attrs, id, href]`; `href` is set for shell-namespace items. */
+export type RawEntry = [string, number, number, number, number, string | null]
 export type DirBatch = {
   gen: number
   scanned: number
@@ -145,7 +146,15 @@ export type UpdateProgress = {
   bytesPerSec: number
 }
 
-export type Entry = { name: string; size: number; mtime: number; attrs: number; id: number }
+export type Entry = {
+  name: string
+  size: number
+  mtime: number
+  attrs: number
+  id: number
+  /** Shell parsing name for recycle-bin/control-panel items; absent for filesystem rows. */
+  href?: string
+}
 
 export type SortKey = 'name' | 'size' | 'mtime' | 'type'
 export type SortDir = 'asc' | 'desc'

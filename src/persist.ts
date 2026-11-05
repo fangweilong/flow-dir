@@ -8,6 +8,20 @@ export type QuickPlace = { name: string; path: string }
 /** Program used for extensions the built-in previewer cannot render. */
 export type ExternalPreviewRule = { ext: string; command: string }
 
+/**
+ * Paint rule for the file lists: `pattern` is a case-insensitive glob (`*`, `?`) or a
+ * plain substring when it has no wildcard. Empty colors inherit the theme.
+ */
+export type ColorRule = {
+  pattern: string
+  /** `#rrggbb`, or empty to keep the theme's text color. */
+  foreground: string
+  /** `#rrggbb`, or empty for no highlight background. */
+  background: string
+  /** Also paint directories that match; off by default so files stand out. */
+  folders: boolean
+}
+
 /** Backend diagnostic log verbosity. */
 export type LogLevel = 'error' | 'warn' | 'info' | 'debug'
 
@@ -25,6 +39,7 @@ export type Settings = {
   customPlaces: QuickPlace[]
   hiddenPlaces: string[]
   externalPreview: ExternalPreviewRule[]
+  colorRules: ColorRule[]
   shortcuts: ShortcutOverride[]
   gpuAccel: boolean
   reclaimMemory: boolean
@@ -120,6 +135,7 @@ export const DEFAULT_SETTINGS: Settings = {
   customPlaces: [],
   hiddenPlaces: [],
   externalPreview: [],
+  colorRules: [],
   shortcuts: [],
   gpuAccel: true,
   reclaimMemory: false,
@@ -217,6 +233,13 @@ export function fromSnapshot(value: unknown): Workspace | null {
     if (!pane.tabIds.every((id) => id in tabMap)) return null
     if (!(pane.activeTabId in tabMap)) return null
     if (!pane.sort || typeof pane.sort.key !== 'string') return null
+    // `layout.json` is hand-editable; an unknown view would leave the pane with no body.
+    if (
+      pane.view !== undefined &&
+      !['details', 'list', 'icons', 'thumbs'].includes(pane.view as string)
+    ) {
+      delete pane.view
+    }
   }
   for (const tab of Object.values(tabMap)) {
     // An empty path is the drive overview tab and must survive a restart.

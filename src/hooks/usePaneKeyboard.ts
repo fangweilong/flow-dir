@@ -4,7 +4,7 @@ import type { TabState } from '../workspace'
 import type { ShortcutId } from '../shortcuts'
 import { matchBinding } from '../shortcuts'
 import { matchTypeAhead } from '../typeahead'
-import { isInsideArchive, joinPath } from '../paths'
+import { entryPath, isInsideArchive, joinPath } from '../paths'
 import type { MenuPoint } from '../PaneView'
 import type { AddressBarHandle } from '../components/AddressBar'
 
@@ -14,6 +14,8 @@ export interface UsePaneKeyboardOptions {
   anchorIdx: number
   visibleSelected: Set<string>
   rowHeight: number
+  /** Tiles per row in the grid views; 1 for the details list. */
+  columns?: number
   keys: Record<ShortcutId, string>
   /** True while a modal panel owns the window; the list must not act behind it. */
   disabled?: boolean
@@ -48,6 +50,7 @@ export function usePaneKeyboard({
   anchorIdx,
   visibleSelected,
   rowHeight,
+  columns = 1,
   keys,
   disabled,
   scrollRef,
@@ -261,13 +264,18 @@ export function usePaneKeyboard({
             anchored ? { ...d, selected: selection } : { ...d, anchor: name, selected: selection },
           )
         }
-        virtualizer.scrollToIndex(target, { align: 'auto' })
+        virtualizer.scrollToIndex(Math.floor(target / columns), { align: 'auto' })
       }
 
-      if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+      if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp' || ev.key === 'ArrowLeft' || ev.key === 'ArrowRight') {
         ev.preventDefault()
         if (!view.length) return
-        const step = ev.key === 'ArrowDown' ? 1 : -1
+        const step = {
+          ArrowDown: columns,
+          ArrowUp: -columns,
+          ArrowLeft: -1,
+          ArrowRight: 1,
+        }[ev.key]
         const at = cursorIndex()
         const current = at < 0 ? (step > 0 ? -1 : 0) : at
         moveTo(current + step, ev.shiftKey)
@@ -283,7 +291,7 @@ export function usePaneKeyboard({
         ev.preventDefault()
         const page = Math.max(
           1,
-          Math.floor((scrollRef.current?.clientHeight ?? rowHeight * 10) / rowHeight) - 1,
+          (Math.floor((scrollRef.current?.clientHeight ?? rowHeight * 10) / rowHeight) - 1) * columns,
         )
         const at = cursorIndex()
         const current = at < 0 ? 0 : at
@@ -387,7 +395,11 @@ export function usePaneKeyboard({
       if (matchBinding(ev, keys.copyPath)) {
         ev.preventDefault()
         if (visibleSelected.size > 0) {
-          const paths = Array.from(visibleSelected).map((name) => joinPath(tab.path, name))
+          const byName = new Map(view.map((item) => [item.name, item]))
+          const paths = Array.from(visibleSelected).map((name) => {
+            const item = byName.get(name)
+            return item ? entryPath(tab.path, item) : joinPath(tab.path, name)
+          })
           onCopyPath?.(paths.join('\n'))
         } else if (tab.path) {
           onCopyPath?.(tab.path)

@@ -506,6 +506,8 @@ unsafe fn build_items(
             .into_iter()
             .collect();
         let extract = extract.filter(|_| extract_applies(paths));
+        // Shell-namespace items cannot be read as files; compression has nothing to add.
+        let compress = compress.filter(|_| !paths.iter().any(|p| crate::shellfs::is_shell_path(p)));
         let outcome = track(hwnd, &context, x, y, flags, &extras, extract, compress);
         drop(context);
         drop(array);
@@ -817,12 +819,19 @@ unsafe fn create_owner() -> windows::core::Result<HWND> {
 
 /// Opens the shell property sheet (`Alt+Enter`), independent of the menu path.
 pub fn properties(hwnd: Option<isize>, path: &str) -> Result<(), ApiError> {
-    use windows::Win32::UI::Shell::{SHObjectProperties, SHOP_FILEPATH};
+    use windows::Win32::UI::Shell::{SHObjectProperties, SHOP_FILEPATH, SHOP_TYPE};
 
+    // Shell-namespace items (`::{CLSID}\…`) only resolve as parsing names.
+    const SHOP_PARSE_NAME: SHOP_TYPE = SHOP_TYPE(3);
+    let kind = if crate::shellfs::is_shell_path(path) {
+        SHOP_PARSE_NAME
+    } else {
+        SHOP_FILEPATH
+    };
     let wide = HSTRING::from(path);
     unsafe {
         let owner = hwnd.map(|raw| HWND(raw as *mut c_void));
-        let ok = SHObjectProperties(owner, SHOP_FILEPATH, &wide, PCWSTR::null());
+        let ok = SHObjectProperties(owner, kind, &wide, PCWSTR::null());
         if !ok.as_bool() {
             return Err(ApiError::new(
                 "SHELL_FAILED",

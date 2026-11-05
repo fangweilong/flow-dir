@@ -15,9 +15,9 @@ import type { SortItem } from '../api'
 import { EMPTY_LIST, emptyList } from '../types'
 import type { Drive, Entry, GitStatus, ListData, SortState } from '../types'
 import type { Settings } from '../persist'
-import { baseName, isDir, markVirtualRoot, parentPath, pathKey } from '../paths'
+import { baseName, isDir, isFsPath, markVirtualRoot, parentPath, pathKey } from '../paths'
 import { pushHistory, samePath, stepHistory } from '../workspace'
-import type { Workspace } from '../workspace'
+import type { ViewMode, Workspace } from '../workspace'
 
 const KEEP_TABS = 8
 
@@ -33,7 +33,14 @@ const sameEntries = (a: Entry[], b: Entry[]): boolean => {
   for (let i = 0; i < a.length; i++) {
     const x = a[i]
     const y = b[i]
-    if (x.name !== y.name || x.size !== y.size || x.mtime !== y.mtime || x.attrs !== y.attrs || x.id !== y.id) {
+    if (
+      x.name !== y.name ||
+      x.size !== y.size ||
+      x.mtime !== y.mtime ||
+      x.attrs !== y.attrs ||
+      x.id !== y.id ||
+      x.href !== y.href
+    ) {
       return false
     }
   }
@@ -150,8 +157,8 @@ export function useDirectoryScanner({
           }))
           return
         }
-        for (const [name, size, mtime, attrs, id] of batch.items) {
-          acc.push({ name, size, mtime, attrs, id })
+        for (const [name, size, mtime, attrs, id, href] of batch.items) {
+          acc.push({ name, size, mtime, attrs, id, href: href ?? undefined })
         }
         if (keep && !batch.done) return
         // The folder the user just climbed out of is selected as soon as its row arrives,
@@ -310,6 +317,16 @@ export function useDirectoryScanner({
     [setWs, startScan, wsRef],
   )
 
+  /** Presentation only; the listing stays loaded, so switching never rescans. */
+  const setPaneView = useCallback(
+    (paneId: string, view: ViewMode) => {
+      setWs((prev) =>
+        prev ? { ...prev, panes: { ...prev.panes, [paneId]: { ...prev.panes[paneId], view } } } : prev,
+      )
+    },
+    [setWs],
+  )
+
   const toggleHidden = useCallback(
     (paneId: string) => {
       const current = wsRef.current
@@ -364,7 +381,8 @@ export function useDirectoryScanner({
       const rewatching = watched.current.get(paneId) !== path
       if (rewatching) {
         invalidateGit(path)
-        void watchSet(paneId, path).catch(() => undefined)
+        // Shell locations have no filesystem watcher; they refresh after shell commands.
+        if (isFsPath(path)) void watchSet(paneId, path).catch(() => undefined)
       }
       if (switched && listDataRef.current[tab.id] && lastScan.current.has(tab.id)) {
         startScan(tab.id, path, pane.sort, pane.hidden, true)
@@ -557,6 +575,7 @@ export function useDirectoryScanner({
     retryTab,
     historyMove,
     setPaneSort,
+    setPaneView,
     toggleHidden,
     refreshPanes,
     manualRefresh,

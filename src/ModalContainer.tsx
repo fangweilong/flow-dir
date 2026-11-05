@@ -338,6 +338,7 @@ export function ModalContainer({
             includeHidden={activePane?.hidden ?? settings.showHidden}
             fontSize={settings.fontSize}
             iconSize={settings.iconSize}
+            colorRules={settings.colorRules}
             hashRateBytes={settings.dupMaxMbPerSec * 1024 * 1024}
             onClose={() => setCompareOpen(false)}
             onToast={showToast}

@@ -13,8 +13,9 @@ export function resolveAddress(base: string, raw: string): string {
   if (!text) return ''
   text = text.replace(/\//g, '\\')
   if (/^[a-zA-Z]:$/.test(text)) return `${text}\\`
-  if (/^[a-zA-Z]:/.test(text) || text.startsWith('\\\\')) return text
-  if (!base) return text
+  if (/^[a-zA-Z]:/.test(text) || text.startsWith('\\\\') || isShellPath(text)) return text
+  // A shell location has no parent to resolve relative names against.
+  if (!base || isShellPath(base)) return text
 
   const combined = `${base.replace(/\\+$/, '')}\\${text}`
   const unc = combined.startsWith('\\\\')
@@ -39,6 +40,13 @@ export function resolveAddress(base: string, raw: string): string {
 export const joinPath = (dir: string, name: string) =>
   dir.endsWith('\\') ? `${dir}${name}` : `${dir}\\${name}`
 
+/** Shell-namespace location (recycle bin, control panel) rather than a filesystem path. */
+export const isShellPath = (path: string) => path.startsWith('shell:') || path.startsWith('::')
+
+/** Full path of a row: shell items carry their own parsing name, filesystem rows join. */
+export const entryPath = (dir: string, entry: { name: string; href?: string }) =>
+  entry.href || joinPath(dir, entry.name)
+
 /** Trailing segment of a path, for building a destination from a source path. */
 export const baseName = (path: string) => {
   const cut = Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'))
@@ -48,7 +56,7 @@ export const baseName = (path: string) => {
 export function parentPath(p: string): string {
   const norm = p.replace(/\\+$/, '')
   // The drive overview is the top; a drive or share root climbs back to it.
-  if (!norm) return ''
+  if (!norm || isShellPath(norm)) return ''
   if (/^[a-zA-Z]:$/.test(norm)) return ''
   if (norm.startsWith('\\\\')) {
     const parts = norm.slice(2).split('\\')
@@ -63,6 +71,7 @@ export function parentPath(p: string): string {
 /** Drive root (`C:\`) or UNC share root (`\\server\share`) that contains `p`. */
 export function volumeRoot(p: string): string {
   const norm = p.replace(/\//g, '\\')
+  if (isShellPath(norm)) return ''
   if (norm.startsWith('\\\\')) {
     const parts = norm.slice(2).split('\\').filter(Boolean)
     return parts.length >= 2 ? `\\\\${parts[0]}\\${parts[1]}` : norm
@@ -83,6 +92,8 @@ export function treeChain(path: string): string[] {
 }
 
 export function crumbs(p: string): { label: string; path: string }[] {
+  // Shell locations are one opaque node; their parsing name is not a filesystem hierarchy.
+  if (isShellPath(p)) return [{ label: p, path: p }]
   const norm = p.replace(/\\+$/, '') || p
   if (p.startsWith('\\\\')) {
     const parts = norm.slice(2).split('\\')

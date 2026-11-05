@@ -6,6 +6,7 @@ import { FONT_SIZE_MAX, REGION_FONT_SIZE_MIN } from '../../fonts'
 
 export type SectionId =
   | 'general'
+  | 'colors'
   | 'columns'
   | 'shortcuts'
   | 'integration'
@@ -19,6 +20,7 @@ export type SectionId =
 
 export const SECTIONS: { id: SectionId; label: Key }[] = [
   { id: 'general', label: 'settings.general' },
+  { id: 'colors', label: 'settings.colorRules' },
   { id: 'columns', label: 'settings.columns' },
   { id: 'shortcuts', label: 'settings.shortcuts' },
   { id: 'integration', label: 'settings.integration' },

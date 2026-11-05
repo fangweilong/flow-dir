@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import type { MenuItem } from './ContextMenu'
 import { ModalContainer } from './ModalContainer'
 import { useFileOperations } from './hooks/useFileOperations'
+import { useFolderSize } from './hooks/useFolderSize'
 import { useDragAndDrop } from './hooks/useDragAndDrop'
 import { useTreeAndGit } from './hooks/useTreeAndGit'
 import { useWorkspaceLayout } from './hooks/useWorkspaceLayout'
@@ -41,7 +42,7 @@ import { errorKey, makeT, setUiLanguage } from './i18n'
 import type { Translate } from './i18n'
 import { DEFAULT_SETTINGS } from './persist'
 import type { Settings } from './persist'
-import { isDir, isFsPath, isInsideArchive, joinPath } from './paths'
+import { isDir, isFsPath, isInsideArchive, isShellPath, joinPath } from './paths'
 import { formatBinding, resolveShortcuts } from './shortcuts'
 
 // Non-first-paint surfaces stay out of the main chunk: preview, search and the operation
@@ -217,6 +218,7 @@ export default function App() {
     retryTab,
     historyMove,
     setPaneSort,
+    setPaneView,
     toggleHidden,
     refreshPanes,
     manualRefresh,
@@ -322,6 +324,8 @@ export default function App() {
   })
 
   // Hook: drag and drop
+  const folderSize = useFolderSize()
+
   const { rowDrag, osDrag, startRowDrag } = useDragAndDrop({
     wsRef,
     listData,
@@ -480,6 +484,7 @@ export default function App() {
     requestCompress,
     setFileTools,
     setCompareOpen,
+    startFolderSize: folderSize.start,
     closeTab,
     closeOthers,
     closeRight,
@@ -568,7 +573,8 @@ export default function App() {
       const pane = current.panes[current.activePaneId]
       const tab = pane ? current.tabs[pane.activeTabId] : undefined
       if (!tab) return
-      if (!isFsPath(path)) {
+      // Shell locations are listed by the backend too; anything else is handed to the shell.
+      if (!isFsPath(path) && !isShellPath(path)) {
         openTarget(path)
         return
       }
@@ -678,6 +684,8 @@ export default function App() {
               lang={lang}
               settings={settings}
               keyboardDisabled={overlayOpen}
+              folderSizeByTab={folderSize.byTab}
+              onFolderSizeCancel={folderSize.cancel}
               driveList={driveList}
               keys={keys}
               historyEpoch={historyEpoch}
@@ -692,6 +700,7 @@ export default function App() {
               historyMove={historyMove}
               startTabDrag={startTabDrag}
               setPaneSort={setPaneSort}
+              setPaneView={setPaneView}
               toggleHidden={toggleHidden}
               copySelection={copySelection}
               copyCurrentPath={copyCurrentPath}
@@ -830,6 +839,7 @@ export default function App() {
             lang={lang}
             fontSize={settings.fontSize}
             iconSize={settings.iconSize}
+            colorRules={settings.colorRules}
             preferEverything={settings.useEverything}
             showHidden={settings.showHidden}
             onClose={() => {

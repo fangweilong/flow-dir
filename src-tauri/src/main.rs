@@ -12,6 +12,7 @@ mod fs;
 mod git;
 mod hash;
 mod dup;
+mod folder_size;
 mod icons;
 mod layout;
 mod logging;
@@ -25,6 +26,7 @@ mod search;
 mod settings;
 mod shell_integration;
 mod shell_menu;
+mod shellfs;
 mod store;
 mod taskbar;
 mod theme;
@@ -102,7 +104,7 @@ impl Drop for ScanGuard {
 }
 
 #[derive(Serialize, Clone)]
-struct EntryDto(String, u64, u64, u32, u64);
+struct EntryDto(String, u64, u64, u32, u64, Option<String>);
 
 #[derive(Serialize, Clone)]
 struct DirBatch {
@@ -163,8 +165,11 @@ fn list_dir(
                 error: None,
             });
         }
+        let shell_dir = shellfs::is_shell_path(&path);
         let outcome = if let Some((archive_path, inner_path)) = archive_target {
             archive::enumerate_virtual(&archive_path, &inner_path, &cancel)
+        } else if shell_dir {
+            shellfs::enumerate(&path, hidden, &cancel)
         } else {
             fs::enumerate_reporting(&path, hidden, &cancel, &mut |count| {
                 if count < reported + 256 {
@@ -222,6 +227,7 @@ fn list_dir(
                 entry.mtime,
                 entry.attrs,
                 entry.id,
+                entry.href,
             ));
             if batch.len() == BATCH_SIZE {
                 scanned += batch.len() as u32;
@@ -787,6 +793,18 @@ fn hash_start(
 ) -> Result<(), ApiError> {
     log::info!(target: "flowdir::hash", "hash_start items={} algo={algorithm}", paths.len());
     hash::start_hash(&state, job_id, paths, algorithm, on_progress)
+}
+
+/// Recursive file count and byte total for one folder. Progress arrives on the channel
+/// and `tool_cancel` stops it; the result is a one-shot readout, not a stored column.
+#[tauri::command(rename_all = "camelCase")]
+fn folder_size_start(
+    state: tauri::State<'_, hash::ToolState>,
+    job_id: String,
+    path: String,
+    on_event: Channel<folder_size::FolderSizeProgress>,
+) -> Result<(), ApiError> {
+    folder_size::start(&state, job_id, path, on_event)
 }
 
 /// Lists one level of the two compare roots; the frontend expands a folder by asking for
@@ -1381,6 +1399,9 @@ async fn open_path(path: String) -> Result<(), ApiError> {
     // A member inside an archive is decompressed first; that and the shell hand-off can
     // take seconds, and a sync command body runs on the WebView2 thread.
     tauri::async_runtime::spawn_blocking(move || {
+        if shellfs::is_shell_path(&path) {
+            return shellfs::open(&path);
+        }
         let target_path =
             if let Some((archive_path, inner_path)) = archive::resolve_archive_path(&path) {
                 if !inner_path.is_empty() {
@@ -1903,6 +1924,7 @@ fn main() {
             archive_extract_items,
             hash_start,
             dup_start,
+            folder_size_start,
             compare_level,
             compare_counts_start,
             compare_hash_start,

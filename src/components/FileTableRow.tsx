@@ -2,11 +2,13 @@ import React from 'react'
 import { FileIcon } from '../icons'
 import { GitItemBadge } from './GitBadges'
 import { EntryStateBadges, entryStateTitle, entryStateTone } from './EntryStateBadge'
+import { colorRuleFor, colorRuleStyle } from '../colorRules'
+import type { ColorRule } from '../persist'
 import type { Entry } from '../types'
 import type { GitBadges as GitBadgesData } from '../git'
 import type { Translate } from '../i18n'
 import type { MenuPoint } from '../PaneView'
-import { formatSize, formatTime, isDir, joinPath } from '../paths'
+import { entryPath, formatSize, formatTime, isDir } from '../paths'
 
 const typeOf = (name: string, dir: boolean, t: Translate): string => {
   if (dir) return t('list.typeFolder')
@@ -25,6 +27,7 @@ export interface FileTableRowProps {
   listScale: number
   iconPx: number
   gitBadges: GitBadgesData
+  colorRules: ColorRule[]
   t: Translate
   showSize: boolean
   showType: boolean
@@ -50,6 +53,7 @@ export function FileTableRow({
   listScale,
   iconPx,
   gitBadges,
+  colorRules,
   t,
   showSize,
   showType,
@@ -64,10 +68,12 @@ export function FileTableRow({
   isRowSelected,
 }: FileTableRowProps) {
   const dir = isDir(entry.attrs)
-  const fullPath = joinPath(tabPath, entry.name)
+  const fullPath = entryPath(tabPath, entry)
   const stateTitle = entryStateTitle(entry.name, entry.attrs, t)
   const stateTone = entryStateTone(entry.name, entry.attrs)
   const nameTone = stateTone || (dir ? 'text-fg-strong' : '')
+  const rule = colorRuleFor(entry.name, dir, colorRules)
+  const ruleStyle = colorRuleStyle(rule)
 
   return (
     <div
@@ -109,7 +115,8 @@ export function FileTableRow({
           <GitItemBadge name={entry.name} dir={dir} badges={gitBadges} iconSize={iconPx} t={t} />
         </span>
         <span
-          className={`truncate ${dir ? 'font-medium' : ''} ${nameTone}`}
+          className={`truncate ${dir ? 'font-medium' : ''} ${nameTone} ${rule?.background ? 'rounded px-1' : ''}`}
+          style={ruleStyle}
           title={stateTitle || undefined}
         >
           {entry.name}

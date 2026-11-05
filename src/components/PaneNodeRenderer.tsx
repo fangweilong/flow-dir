@@ -3,10 +3,11 @@ import { PaneView } from '../PaneView'
 import type { MenuPoint } from '../PaneView'
 import { SplitView } from './SplitView'
 import type { Drive, Entry, GitStatus, Lang, ListData, SortState } from '../types'
-import type { Node, Workspace } from '../workspace'
+import type { Node, ViewMode, Workspace } from '../workspace'
 import type { Settings } from '../persist'
 import type { ShortcutId } from '../shortcuts'
 import type { DragState } from '../hooks/useWorkspaceLayout'
+import type { FolderSizeState } from '../hooks/useFolderSize'
 import { pathKey } from '../paths'
 
 export interface PaneNodeRendererProps {
@@ -21,6 +22,9 @@ export interface PaneNodeRendererProps {
   keys: Record<ShortcutId, string>
   /** True while a modal panel is open; list shortcuts must not act behind it. */
   keyboardDisabled: boolean
+  /** Recursive-size readout for the active tab, per tab id. */
+  folderSizeByTab: Record<string, FolderSizeState>
+  onFolderSizeCancel: (tabId: string) => void
   historyEpoch: number
   registerPane: (id: string, el: HTMLDivElement | null) => void
   focusPane: (paneId: string) => void
@@ -33,6 +37,7 @@ export interface PaneNodeRendererProps {
   historyMove: (tabId: string, delta: number) => void
   startTabDrag: (tabId: string, ev: React.PointerEvent) => void
   setPaneSort: (paneId: string, sort: SortState) => void
+  setPaneView: (paneId: string, view: ViewMode) => void
   toggleHidden: (paneId: string) => void
   copySelection: (paneId: string, cut: boolean) => void
   copyCurrentPath: (path: string) => void
@@ -78,6 +83,9 @@ export function PaneNodeRenderer(props: PaneNodeRendererProps) {
           active={ws.activePaneId === pane.id}
           lang={lang}
           iconSize={settings.iconSize}
+          colorRules={settings.colorRules}
+          folderSize={props.folderSizeByTab[pane.activeTabId]}
+          onFolderSizeCancel={() => props.onFolderSizeCancel(pane.activeTabId)}
           tabFontSize={settings.tabFontSize}
           listFontSize={settings.listFontSize}
           navFontSize={settings.navFontSize}
@@ -105,6 +113,7 @@ export function PaneNodeRenderer(props: PaneNodeRendererProps) {
           onHistoryMove={props.historyMove}
           onTabDragStart={props.startTabDrag}
           onSortChange={(sort) => props.setPaneSort(pane.id, sort)}
+          onViewChange={(view) => props.setPaneView(pane.id, view)}
           onToggleHidden={() => props.toggleHidden(pane.id)}
           onClipboard={(cut) => props.copySelection(pane.id, cut)}
           onCopyPath={props.copyCurrentPath}

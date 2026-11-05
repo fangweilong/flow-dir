@@ -12,7 +12,7 @@ import type { ListData } from '../types'
 import type { Translate } from '../i18n'
 import { errorKey } from '../i18n'
 import type { Workspace } from '../workspace'
-import { baseName, hasArchiveAncestor, isArchiveMember, isInsideArchive, joinPath } from '../paths'
+import { baseName, entryPath, hasArchiveAncestor, isArchiveMember, isInsideArchive, joinPath } from '../paths'
 
 const errorCode = (err: unknown): string =>
   err && typeof err === 'object' && 'code' in err && typeof err.code === 'string'
@@ -87,9 +87,14 @@ export function useFileActionHandlers({
       const tabId = wsRef.current?.panes[paneId]?.activeTabId
       const tab = tabId ? wsRef.current?.tabs[tabId] : undefined
       if (!tab?.path) return []
-      return names.map((name) => joinPath(tab.path, name))
+      const listed = listData[tab.id]?.entries
+      const byName = listed ? new Map(listed.map((entry) => [entry.name, entry])) : null
+      return names.map((name) => {
+        const entry = byName?.get(name)
+        return entry ? entryPath(tab.path, entry) : joinPath(tab.path, name)
+      })
     },
-    [wsRef],
+    [listData, wsRef],
   )
 
   const focusList = useCallback(

@@ -3,7 +3,7 @@ import type { ShortcutId } from '../shortcuts'
 import { isTextInput, matchBinding } from '../shortcuts'
 import type { PaneState, TabState } from '../workspace'
 import type { ListData } from '../types'
-import { isDir, joinPath } from '../paths'
+import { entryPath, isDir, isShellPath } from '../paths'
 
 export interface UseGlobalShortcutsOptions {
   keys: Record<ShortcutId, string>
@@ -142,9 +142,9 @@ export function useGlobalShortcuts({
       if (matchBinding(event, keys.externalPreview)) {
         if (!activeTab || !previewName) return
         const entry = activeList?.entries.find((item) => item.name === previewName)
-        if (!entry || isDir(entry.attrs)) return
+        if (!entry || isDir(entry.attrs) || isShellPath(activeTab.path)) return
         event.preventDefault()
-        openExternalPreview(joinPath(activeTab.path, previewName))
+        openExternalPreview(entryPath(activeTab.path, entry))
       }
       if (matchBinding(event, keys.cyclePane)) {
         event.preventDefault()

@@ -6,7 +6,7 @@ import type { Settings } from '../persist'
 import { errorKey } from '../i18n'
 import type { Translate } from '../i18n'
 import type { TabState } from '../workspace'
-import { joinPath } from '../paths'
+import { isShellPath, joinPath } from '../paths'
 
 const errorCode = (err: unknown): string =>
   err && typeof err === 'object' && 'code' in err && typeof err.code === 'string'
@@ -73,7 +73,8 @@ export function usePreviewController({
 
   // Preview fetch effect
   useEffect(() => {
-    if (!previewOpen || !activeTab || !previewName) {
+    // Shell items have no readable content; their parsing names are not file paths.
+    if (!previewOpen || !activeTab || !previewName || isShellPath(activeTab.path)) {
       previewRequest.current += 1
       setPreview({ info: null, loading: false, error: null })
       return

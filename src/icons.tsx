@@ -90,6 +90,7 @@ export function FileIcon({
   path,
   scale = 1,
   size,
+  thumb = false,
 }: {
   name: string
   dir?: boolean
@@ -98,12 +99,29 @@ export function FileIcon({
   scale?: number
   /** Explicit pixel size for the icon, overriding the default 1.25em. */
   size?: number
+  /** Ask the shell for a content thumbnail, falling back to the icon when none exists. */
+  thumb?: boolean
 }) {
   const theme = useIconTheme()
   const [failed, setFailed] = useState<string | null>(null)
   const revision = useSyncExternalStore(subscribeIconRevision, iconRevisionSnapshot)
   const dim = size ? `${size}px` : '1.25em'
   const style = { width: dim, height: dim }
+  if (thumb && path && !dir && failed !== 'thumb') {
+    const px = Math.max(16, Math.round((size ?? 96) * (window.devicePixelRatio || 1)))
+    return (
+      <img
+        src={`http://fd.localhost/icon?path=${encodeURIComponent(path)}&s=${px}&v=${revision}&thumb=1`}
+        width={size ?? 16}
+        height={size ?? 16}
+        alt=""
+        draggable={false}
+        className="shrink-0 object-contain"
+        style={style}
+        onError={() => setFailed('thumb')}
+      />
+    )
+  }
   if (theme.assets) {
     const key = dir ? folderIconKey(name) : fileIconKey(name)
     const src = theme.assets[key] ?? theme.assets[dir ? 'folder' : 'file']

@@ -18,6 +18,7 @@ import {
   isFsPath,
   isArchiveMember,
   isInsideArchive,
+  isShellPath,
   joinPath,
   parentPath,
   pathKey,
@@ -90,7 +91,8 @@ export function useDragAndDrop({
     const hit = document.elementFromPoint(x, y)
     const el = hit instanceof Element ? hit.closest<HTMLElement>('[data-drop-dir]') : null
     const dir = el?.dataset.dropDir
-    if (!el || !dir) return null
+    // Shell locations are not copy/move targets; their items only accept shell verbs.
+    if (!el || !dir || isShellPath(dir)) return null
     const tabId = el.closest<HTMLElement>('[data-drop-tab]')?.dataset.dropTab
     const rect = el.getBoundingClientRect()
     return { dir, tabId, left: rect.left, top: rect.top, width: rect.width, height: rect.height }
@@ -234,6 +236,7 @@ export function useDragAndDrop({
       const tab = pane && current ? current.tabs[pane.activeTabId] : undefined
       if (!current || !pane || !tab?.path) return
       const sourceDir = tab.path
+      if (isShellPath(sourceDir)) return
       // The pointerdown handler collapses a multi-selection to the pressed row in the same
       // tick, so the committed ref no longer holds what the user sees while dragging.
       const atDown = listData[tab.id]

@@ -135,8 +135,14 @@ export function useQuickPlaces({
       path: place.path,
       custom: true,
     }))
-    return [...builtin, ...custom]
-  }, [places, settings.hiddenPlaces, settings.customPlaces, lang])
+    // Shell-namespace locations have no filesystem path; the backend lists them through
+    // the shell, so they sit next to pinned folders rather than in the drive tree.
+    const shell = [
+      { key: 'shell:recycleBin', label: t('place.recycleBin'), path: 'shell:RecycleBinFolder', custom: false },
+      { key: 'shell:controlPanel', label: t('place.controlPanel'), path: 'shell:ControlPanelFolder', custom: false },
+    ].filter((place) => !settings.hiddenPlaces.includes(place.key))
+    return [...builtin, ...custom, ...shell]
+  }, [places, settings.hiddenPlaces, settings.customPlaces, lang, t])
 
   const removePlace = useCallback(
     (place: QuickPlaceEntry) => {

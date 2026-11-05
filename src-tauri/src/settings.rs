@@ -41,6 +41,19 @@ pub struct ExternalPreview {
     pub command: String,
 }
 
+/// Paint rule for file lists; `pattern` is a glob (`*`, `?`) or a plain substring.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ColorRule {
+    pub pattern: String,
+    /// `#rrggbb`; empty keeps the theme's text color.
+    pub foreground: String,
+    /// `#rrggbb`; empty means no highlight background.
+    pub background: String,
+    /// Also paint matching directories.
+    pub folders: bool,
+}
+
 /// Rebound key combination; only ids the user changed are stored, defaults live in the UI.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase", default)]
@@ -158,6 +171,8 @@ pub struct Settings {
     pub hidden_places: Vec<String>,
     /// Per-extension preview programs for formats the built-in previewer cannot render.
     pub external_preview: Vec<ExternalPreview>,
+    /// Color/highlight rules for file lists, evaluated in order.
+    pub color_rules: Vec<ColorRule>,
     /// Rebound shortcuts; absent ids keep their defaults.
     pub shortcuts: Vec<ShortcutOverride>,
     /// WebView2 hardware compositing. Takes effect on the next launch because the
@@ -411,6 +426,22 @@ fn sanitize_list_col(value: u32, min: u32, fallback: u32) -> u32 {
     }
 }
 
+/// Accepts `#rgb` / `#rrggbb` (case-insensitive) and returns `#rrggbb`; anything else
+/// becomes empty, meaning "no override".
+fn sanitize_color(value: &str) -> String {
+    let raw = value.trim().trim_start_matches('#');
+    let expanded = if raw.len() == 3 {
+        raw.chars().flat_map(|ch| [ch, ch]).collect::<String>()
+    } else {
+        raw.to_string()
+    };
+    if expanded.len() == 6 && expanded.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        format!("#{}", expanded.to_ascii_lowercase())
+    } else {
+        String::new()
+    }
+}
+
 fn default_hotkey() -> String {
     "ctrl+alt+f".to_string()
 }
@@ -444,6 +475,7 @@ impl Default for Settings {
             custom_places: Vec::new(),
             hidden_places: Vec::new(),
             external_preview: Vec::new(),
+            color_rules: Vec::new(),
             shortcuts: Vec::new(),
             gpu_accel: true,
             reclaim_memory: false,
@@ -567,6 +599,16 @@ impl Settings {
         self.dup_concurrency = self.dup_concurrency.min(16);
         self.dup_max_mb_per_sec = self.dup_max_mb_per_sec.min(4096);
         self.dup_exclude.retain(|name| !name.trim().is_empty());
+        self.color_rules.retain(|rule| !rule.pattern.trim().is_empty());
+        self.color_rules.truncate(200);
+        for rule in &mut self.color_rules {
+            rule.pattern = rule.pattern.trim().to_string();
+            if rule.pattern.len() > 120 {
+                rule.pattern.truncate(120);
+            }
+            rule.foreground = sanitize_color(&rule.foreground);
+            rule.background = sanitize_color(&rule.background);
+        }
         self.global_hotkey = self.global_hotkey.trim().to_ascii_lowercase();
         if self.global_hotkey.is_empty() || self.global_hotkey.len() > 64 {
             self.global_hotkey = default_hotkey();
@@ -670,6 +712,12 @@ hidden_places = []
 # external_preview = [{ ext = "docx", command = '"C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE" "{path}"' }]
 external_preview = []
 
+# 颜色/高亮规则：按文件名通配符（* ?）或包含匹配，可改文字色与背景色；folders 控制是否作用于文件夹
+# color/highlight rules: name glob (* ?) or substring, optional text and background colors;
+# folders = true also paints matching directories
+# color_rules = [{ pattern = "*.ps1", foreground = '#2563eb', background = '', folders = false }]
+color_rules = []
+
 # 快捷键覆盖（只记录改过的项，默认值内置）/ shortcut overrides, defaults live in the app
 # shortcuts = [{ id = "search", keys = "ctrl+shift+f" }]
 shortcuts = []
@@ -769,6 +817,7 @@ struct FileSettings {
     custom_places: Vec<QuickPlace>,
     hidden_places: Vec<String>,
     external_preview: Vec<ExternalPreview>,
+    color_rules: Vec<ColorRule>,
     shortcuts: Vec<ShortcutOverride>,
     undo_limit: u32,
     preview_max_file_mb: u32,
@@ -827,6 +876,7 @@ impl Default for FileSettings {
             custom_places: base.custom_places,
             hidden_places: base.hidden_places,
             external_preview: base.external_preview,
+            color_rules: base.color_rules,
             shortcuts: base.shortcuts,
             undo_limit: base.undo_limit,
             preview_max_file_mb: base.preview_max_file_mb,
@@ -886,6 +936,7 @@ impl From<FileSettings> for Settings {
             custom_places: file.custom_places,
             hidden_places: file.hidden_places,
             external_preview: file.external_preview,
+            color_rules: file.color_rules,
             shortcuts: file.shortcuts,
             undo_limit: file.undo_limit,
             preview_max_file_mb: file.preview_max_file_mb,
@@ -1170,6 +1221,17 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), A
         external.push(Value::InlineTable(entry));
     }
     set_value(&mut doc, "external_preview", Value::Array(external));
+
+    let mut colors = toml_edit::Array::new();
+    for rule in &settings.color_rules {
+        let mut entry = toml_edit::InlineTable::new();
+        entry.insert("pattern", Value::from(rule.pattern.as_str()));
+        entry.insert("foreground", Value::from(rule.foreground.as_str()));
+        entry.insert("background", Value::from(rule.background.as_str()));
+        entry.insert("folders", Value::from(rule.folders));
+        colors.push(Value::InlineTable(entry));
+    }
+    set_value(&mut doc, "color_rules", Value::Array(colors));
 
     let mut shortcuts = toml_edit::Array::new();
     for shortcut in &settings.shortcuts {

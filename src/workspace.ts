@@ -9,12 +9,15 @@ export type TabState = {
   /** Pinned tabs survive "close others" and are restored first at launch. */
   pinned?: boolean
 }
+/** Listing presentation; absent in older layouts and then treated as `details`. */
+export type ViewMode = 'details' | 'list' | 'icons' | 'thumbs'
 export type PaneState = {
   id: string
   tabIds: string[]
   activeTabId: string
   sort: SortState
   hidden: boolean
+  view?: ViewMode
 }
 export type Node =
   | { t: 'split'; id: string; dir: 'row' | 'col'; ratio: number; a: Node; b: Node }

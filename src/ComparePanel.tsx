@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { compareCountsStart, compareHashStart, compareLevel, exportText, pickFolder, toolCancel } from './api'
 import type { CompareOptions } from './api'
+import type { ColorRule } from './persist'
 import { makeT, describeError } from './i18n'
 import { joinPath } from './paths'
 import { BASE_FONT_SIZE, clampFontSize, clampIconSize } from './fonts'
@@ -66,6 +67,7 @@ type Props = {
   includeHidden: boolean
   fontSize: number
   iconSize?: number
+  colorRules: ColorRule[]
   /** Byte rate for hash verification, from the duplicate scanner setting. */
   hashRateBytes: number
   onClose: () => void
@@ -82,6 +84,7 @@ export function ComparePanel({
   includeHidden,
   fontSize,
   iconSize,
+  colorRules,
   hashRateBytes,
   onClose,
   onToast,
@@ -818,6 +821,7 @@ export function ComparePanel({
               onEnter={(rel) => session && void loadLevel(rel, session)}
               iconScale={iconScale}
               iconPx={iconPx}
+              colorRules={colorRules}
               statusLabel={statusLabel}
               statusClass={statusClass}
               statusMark={statusMark}

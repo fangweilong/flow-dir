@@ -1,5 +1,5 @@
 import { Channel, invoke } from '@tauri-apps/api/core'
-import type { AppInfo, Clip, CompareCount, CompareHashEvent, CompareHashPair, CompareLevel, DirBatch, Drive, DupProgress, ElevatedReport, HashProgress, MenuOutcome, OpKind, OpProgress, Place, UpdateStatus } from './types'
+import type { ApiError, AppInfo, Clip, CompareCount, CompareHashEvent, CompareHashPair, CompareLevel, DirBatch, Drive, DupProgress, ElevatedReport, HashProgress, MenuOutcome, OpKind, OpProgress, Place, UpdateStatus } from './types'
 import type { GitStatus, LaunchRequest, PreviewInfo, SearchBatch } from './types'
 import type { Settings } from './persist'
 
@@ -187,6 +187,26 @@ export function dupStart(
     exclude: options.exclude,
     onProgress: channel,
   })
+}
+
+export type FolderSizeProgress = {
+  files: number
+  dirs: number
+  bytes: number
+  done: boolean
+  aborted: boolean
+  error: ApiError | null
+}
+
+/** One-shot recursive size for `path`; cancel through `toolCancel(jobId)`. */
+export function folderSizeStart(
+  jobId: string,
+  path: string,
+  onProgress: (progress: FolderSizeProgress) => void,
+) {
+  const channel = new Channel<FolderSizeProgress>()
+  channel.onmessage = onProgress
+  return invoke<void>('folder_size_start', { jobId, path, onProgress: channel })
 }
 
 export const toolCancel = (jobId: string) => invoke<void>('tool_cancel', { jobId })

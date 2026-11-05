@@ -10,7 +10,7 @@ import type { ShortcutId } from '../shortcuts'
 import type { Translate } from '../i18n'
 import { driveKindLabel } from '../i18n'
 import { menuHint } from '../shortcuts'
-import { baseName, isArchiveName, isDir, isFsPath, isInsideArchive, joinPath } from '../paths'
+import { baseName, entryPath, isArchiveName, isDir, isFsPath, isInsideArchive, isShellPath, joinPath } from '../paths'
 import {
   clipboardCopy,
   COMPRESS_FORMATS,
@@ -58,6 +58,7 @@ export interface UsePaneContextMenusOptions {
   requestCompress: (paths: string[], dir: string, format: CompressFormat) => void
   setFileTools: (val: { mode: 'hash'; paths: string[] } | { mode: 'dup'; root: string } | null) => void
   setCompareOpen: (open: boolean) => void
+  startFolderSize: (tabId: string, path: string) => void
   closeTab: (paneId: string, tabId: string) => void
   closeOthers: (paneId: string, tabId: string) => void
   closeRight: (paneId: string, tabId: string) => void
@@ -97,6 +98,7 @@ export function usePaneContextMenus({
   requestCompress,
   setFileTools,
   setCompareOpen,
+  startFolderSize,
   closeTab,
   closeOthers,
   closeRight,
@@ -158,7 +160,7 @@ export function usePaneContextMenus({
       const tabPath = pane ? wsRef.current?.tabs[pane.activeTabId]?.path : undefined
       const inArchive = Boolean(tabPath && isInsideArchive(tabPath))
       const isArchive = !dir && paths.length === 1 && tabPath && !inArchive && isArchiveName(entry.name)
-      const archivePath = isArchive ? joinPath(tabPath!, entry.name) : null
+      const archivePath = isArchive ? entryPath(tabPath!, entry) : null
       const archiveMenu: MenuItem[] = archivePath
         ? [
             { kind: 'sep' },
@@ -194,7 +196,7 @@ export function usePaneContextMenus({
             const pane = current?.panes[paneId]
             const tab = pane ? current?.tabs[pane.activeTabId] : undefined
             if (!tab) return
-            const target = joinPath(tab.path, entry.name)
+            const target = entryPath(tab.path, entry)
             if (dir || isArchive) navigate(tab.id, target)
             else openTarget(target)
           },
@@ -206,7 +208,7 @@ export function usePaneContextMenus({
                 label: t('menu.openInNewTab'),
                 onSelect: () => {
                   if (tabPath) {
-                    const target = joinPath(tabPath, entry.name)
+                    const target = entryPath(tabPath, entry)
                     if (openTabAt) openTabAt(paneId, target)
                     else if (pane) navigate(pane.activeTabId, target)
                   }
@@ -318,7 +320,14 @@ export function usePaneContextMenus({
       if (!tab) return
       const selected = listData[tab.id]?.selected
       const names = selected && selected.has(entry.name) ? Array.from(selected) : [entry.name]
-      const paths = names.map((name) => joinPath(tab.path, name))
+      // Rows from a shell folder carry their own parsing names; joining the folder path
+      // would produce a name the shell cannot resolve.
+      const listed = listData[tab.id]?.entries
+      const byName = listed ? new Map(listed.map((item) => [item.name, item])) : null
+      const paths = names.map((name) => {
+        const item = byName?.get(name)
+        return item ? entryPath(tab.path, item) : joinPath(tab.path, name)
+      })
       if (tab.path && isInsideArchive(tab.path)) {
         setMenu({ x: point.clientX, y: point.clientY, items: rowFallback(paneId, entry, paths) })
         return
@@ -374,9 +383,12 @@ export function usePaneContextMenus({
       const tab = pane ? current.tabs[pane.activeTabId] : undefined
       if (!tab) return
       const inArchive = Boolean(tab.path && isInsideArchive(tab.path))
+      // Shell locations expose only the shell's own commands; local file operations and
+      // scans have no filesystem path to run against.
+      const inShell = Boolean(tab.path && isShellPath(tab.path))
       const items: MenuItem[] = tab.path
         ? [
-            ...(!inArchive
+            ...(!inArchive && !inShell
               ? [
                   { kind: 'item' as const, label: t('menu.newFolder'), onSelect: () => createFolder(paneId) },
                   { kind: 'item' as const, label: t('menu.paste'), hint: menuHint(keys.paste), onSelect: () => pasteInto(paneId) },
@@ -400,7 +412,7 @@ export function usePaneContextMenus({
               },
             },
             { kind: 'sep' },
-            ...(!inArchive
+            ...(!inArchive && !inShell
               ? [
                   {
                     kind: 'item' as const,
@@ -425,16 +437,25 @@ export function usePaneContextMenus({
               label: pane.hidden ? t('list.hideHidden') : t('list.showHidden'),
               onSelect: () => toggleHidden(paneId),
             },
-            {
-              kind: 'item',
-              label: t('menu.findDuplicates'),
-              onSelect: () => setFileTools({ mode: 'dup', root: tab.path }),
-            },
-            {
-              kind: 'item',
-              label: t('compare.entry'),
-              onSelect: () => setCompareOpen(true),
-            },
+            ...(!inShell
+              ? [
+                  {
+                    kind: 'item' as const,
+                    label: t('menu.folderSize'),
+                    onSelect: () => startFolderSize(tab.id, tab.path),
+                  },
+                  {
+                    kind: 'item' as const,
+                    label: t('menu.findDuplicates'),
+                    onSelect: () => setFileTools({ mode: 'dup', root: tab.path }),
+                  },
+                  {
+                    kind: 'item' as const,
+                    label: t('compare.entry'),
+                    onSelect: () => setCompareOpen(true),
+                  },
+                ]
+              : []),
           ]
         : [{ kind: 'item', label: t('menu.refresh'), hint: menuHint(keys.refresh), onSelect: () => manualRefresh() }]
 
@@ -492,7 +513,7 @@ export function usePaneContextMenus({
         })
         .catch(() => blankFallbackMenu(paneId, point))
     },
-    [blankFallbackMenu, listData, refreshPanes, setCompareOpen, setFileTools, t, toggleHidden, wsRef],
+    [blankFallbackMenu, listData, refreshPanes, setCompareOpen, setFileTools, startFolderSize, t, toggleHidden, wsRef],
   )
 
   const openTabMenu = useCallback(

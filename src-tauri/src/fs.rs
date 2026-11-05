@@ -49,6 +49,8 @@ pub struct Entry {
     pub mtime: u64,
     pub attrs: u32,
     pub id: u64,
+    /// Shell parsing name for recycle-bin/control-panel rows; `None` for filesystem rows.
+    pub href: Option<String>,
     ext_key: Vec<u8>,
     /// NUL-terminated UTF-16 of `name`, kept so the Explorer collation can compare
     /// without allocating once per comparison.
@@ -70,6 +72,7 @@ impl Entry {
             mtime,
             attrs,
             id,
+            href: None,
             ext_key,
             wide,
         }

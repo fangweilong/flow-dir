@@ -1,14 +1,16 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { crumbs, isArchiveName, isDir, isInsideArchive, joinPath, parentPath, underPath } from './paths'
+import { crumbs, entryPath, isArchiveName, isDir, isInsideArchive, parentPath, underPath } from './paths'
 import { buildGitBadges } from './git'
-import { HeaderCell, ColDivider } from './components/TableHeader'
-import { AddressBar, type AddressBarHandle } from './components/AddressBar'
+import { ColDivider } from './components/TableHeader'
+import type { AddressBarHandle } from './components/AddressBar'
+import { PaneNavBar } from './components/PaneNavBar'
+import { FileTableHeader } from './components/FileTableHeader'
 import { DrivesOverview } from './components/DrivesOverview'
 import { PaneTabBar } from './components/PaneTabBar'
 import { PaneStatusBar } from './components/PaneStatusBar'
 import { usePaneColumnResize } from './hooks/usePaneColumnResize'
-import { FileTableRow } from './components/FileTableRow'
+import { FileListBody } from './components/FileListBody'
 import type { ShortcutId } from './shortcuts'
 import { usePaneKeyboard } from './hooks/usePaneKeyboard'
 import { EMPTY_LIST, filterList, filterMatches } from './types'
@@ -22,7 +24,9 @@ import {
   clampIconSize,
   clampRegionFontSize,
 } from './fonts'
-import type { DropMode, PaneState, TabState } from './workspace'
+import type { DropMode, PaneState, TabState, ViewMode } from './workspace'
+import type { ColorRule } from './persist'
+import type { FolderSizeState } from './hooks/useFolderSize'
 
 /** Metrics at the default 13 px text size; every pane scales them by the settings font size. */
 const ROW_H = 26
@@ -63,6 +67,11 @@ type Props = {
   lang: Lang
   /** File and drive list icon size in px (14–32). */
   iconSize: number
+  /** Color/highlight rules shared by the file list, search and compare views. */
+  colorRules: ColorRule[]
+  /** One-shot recursive-size readout for the active tab. */
+  folderSize?: FolderSizeState
+  onFolderSizeCancel: () => void
   /** Tab-strip text size in px; drives strip height and tab icons. */
   tabFontSize: number
   /** File-list text size in px; drives rows, columns and icons. */
@@ -108,6 +117,8 @@ type Props = {
   onHistoryMove: (tabId: string, delta: number) => void
   onTabDragStart: (tabId: string, ev: React.PointerEvent) => void
   onSortChange: (sort: SortState) => void
+  /** Switches details / list / icons / thumbnails without reloading the folder. */
+  onViewChange: (view: ViewMode) => void
   onToggleHidden: () => void
   onClipboard: (cut: boolean) => void
   /** Copies the tab's folder path verbatim; the breadcrumb button calls this. */
@@ -156,6 +167,9 @@ export function PaneView({
   active,
   lang,
   iconSize,
+  colorRules,
+  folderSize,
+  onFolderSizeCancel,
   tabFontSize,
   listFontSize,
   navFontSize,
@@ -183,6 +197,7 @@ export function PaneView({
   onHistoryMove,
   onTabDragStart,
   onSortChange,
+  onViewChange,
   onToggleHidden,
   onClipboard,
   onCopyPath,
@@ -348,10 +363,32 @@ export function PaneView({
     return next
   }, [viewNameSet, list.selected])
 
+  const viewMode: ViewMode = pane.view ?? 'details'
+  // Grid views flow left to right; the virtualizer still walks whole rows.
+  const iconCell = Math.max(32, iconPx * 2)
+  const cellWidth =
+    viewMode === 'list'
+      ? Math.max(180, Math.round(220 * listScale))
+      : viewMode === 'icons'
+        ? Math.max(96, iconCell + 24)
+        : viewMode === 'thumbs'
+          ? Math.max(116, Math.round(128 * listScale))
+          : 0
+  const cellHeight =
+    viewMode === 'list'
+      ? rowHeight
+      : viewMode === 'icons'
+        ? iconCell + Math.round(listFont * 2.6) + 12
+        : viewMode === 'thumbs'
+          ? 96 + Math.round(listFont * 2.6) + 12
+          : rowHeight
+  const columns = viewMode === 'details' ? 1 : Math.max(1, Math.floor((width - 6) / cellWidth))
+  const rowCount = viewMode === 'details' ? view.length : Math.ceil(view.length / columns)
+
   const virtualizer = useVirtualizer({
-    count: view.length,
+    count: rowCount,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => rowHeight,
+    estimateSize: () => (viewMode === 'details' ? rowHeight : cellHeight),
     overscan: 10,
   })
 
@@ -359,7 +396,7 @@ export function PaneView({
   // scrollbar and spacer keep the old row height after the font size changes.
   useEffect(() => {
     virtualizer.measure()
-  }, [rowHeight, virtualizer])
+  }, [rowHeight, cellHeight, viewMode, virtualizer])
 
   // A launch request asks for one row to be selected and shown. The id makes the request
   // one-shot: later filtering or scrolling must not pull the list back.
@@ -372,7 +409,7 @@ export function PaneView({
     const index = view.findIndex(
       (entry) => entry.name.toLowerCase() === (revealName ?? '').toLowerCase(),
     )
-    if (index >= 0) virtualizer.scrollToIndex(index, { align: 'center' })
+    if (index >= 0) virtualizer.scrollToIndex(Math.floor(index / columns), { align: 'center' })
     // `view` comes from the render that delivered the request; depending on it would
     // re-run on every filter change and fight the user's scrolling.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -387,7 +424,7 @@ export function PaneView({
     const el = scrollRef.current
     if (!el) return
     setGutter(el.offsetWidth - el.clientWidth)
-  }, [view.length, list.loading, list.error, rowHeight, width])
+  }, [view.length, list.loading, list.error, rowHeight, cellHeight, viewMode, width])
 
   const selectedSize = useMemo(
     () =>
@@ -403,7 +440,7 @@ export function PaneView({
 
   const activate = (entry: Entry) => {
     if (!tab) return
-    const full = joinPath(tab.path, entry.name)
+    const full = entryPath(tab.path, entry)
     const shouldNavigate = isDir(entry.attrs) || (!isInsideArchive(tab.path) && isArchiveName(entry.name))
     if (shouldNavigate) onNavigate(tab.id, full)
     else onOpenTarget(full)
@@ -420,7 +457,9 @@ export function PaneView({
     view,
     anchorIdx,
     visibleSelected,
-    rowHeight,
+    // Page keys move by whole visible rows, so the grid's tile height is the row height.
+    rowHeight: viewMode === 'details' ? rowHeight : cellHeight,
+    columns,
     keys,
     disabled: keyboardDisabled,
     scrollRef,
@@ -447,7 +486,19 @@ export function PaneView({
   })
 
   // Inside a location the first crumb is the location itself, never the WebDAV share root.
-  const parts = location
+  // Shell locations cannot show their raw parsing name; both the sidebar and the crumb
+// use the same localized label.
+  const shellLabel = (path: string) => {
+    switch (path.toLowerCase()) {
+      case 'shell:recyclebinfolder':
+        return t('place.recycleBin')
+      case 'shell:controlpanelfolder':
+        return t('place.controlPanel')
+      default:
+        return null
+    }
+  }
+  const parts = (location
     ? [
         { label: location.name, path: location.root },
         ...crumbs(tab?.path ?? '')
@@ -457,6 +508,10 @@ export function PaneView({
     : tab?.path
       ? crumbs(tab.path)
       : []
+  ).map((part) => {
+    const label = shellLabel(part.path)
+    return label ? { ...part, label } : part
+  })
 
   return (
     <section
@@ -486,126 +541,52 @@ export function PaneView({
         draggingTabId={draggingTabId}
       />
 
-      <div
-        className="typo-nav flex shrink-0 items-center gap-0.5 border-b border-line bg-surface px-1"
-        style={{ height: navBarHeight }}
-      >
-        <AddressBar
-          ref={addressBarRef}
-          tab={tab}
-          keys={keys}
+      <PaneNavBar
+        addressBarRef={addressBarRef}
+        tab={tab}
+        keys={keys}
+        t={t}
+        location={location}
+        root={root}
+        parts={parts}
+        upTarget={upTarget}
+        navButtonStyle={navButtonStyle}
+        navFieldStyle={navFieldStyle}
+        height={navBarHeight}
+        hidden={pane.hidden}
+        showFilter={showFilter}
+        filter={list.filter}
+        onFilterChange={(text) => tab && update(tab.id, (d) => filterList(d, text))}
+        onToggleHidden={onToggleHidden}
+        onHistoryMove={onHistoryMove}
+        onNavigate={onNavigate}
+        onDriveMenu={onDriveMenu}
+        onCopyPath={onCopyPath}
+        onPathInvalid={onPathInvalid}
+        onOpenInNewTab={onOpenInNewTab}
+        newTabOnMiddleClick={newTabOnMiddleClick}
+      />
+
+      {!root && viewMode === 'details' && (
+        <FileTableHeader
           t={t}
-          location={location}
-          root={root}
-          parts={parts}
-          upTarget={upTarget}
-          navButtonStyle={navButtonStyle}
-          navFieldStyle={navFieldStyle}
-          onHistoryMove={onHistoryMove}
-          onNavigate={onNavigate}
-          onDriveMenu={onDriveMenu}
-          onCopyPath={onCopyPath}
-          onPathInvalid={onPathInvalid}
-          onOpenInNewTab={onOpenInNewTab}
-          newTabOnMiddleClick={newTabOnMiddleClick}
+          sort={pane.sort}
+          onSort={changeSort}
+          showSize={showSize}
+          showType={showType}
+          showTime={showTime}
+          grid={grid}
+          listMinWidth={listMinWidth}
+          listSpan={listSpan}
+          height={headerHeight}
+          gutter={gutter}
+          headerRef={headerRef}
+          nameWidth={nameWidth}
+          startColDrag={startColDrag}
+          resetCol={resetCol}
+          startNameDrag={startNameDrag}
+          onResetNameWidth={() => onListNameWidth(0)}
         />
-
-        {showFilter && !root && (
-          <input
-            value={list.filter}
-            onChange={(e) => tab && update(tab.id, (d) => filterList(d, e.target.value))}
-            placeholder={t('list.filter')}
-            style={navFieldStyle}
-            className="w-[5.25rem] shrink-0 rounded border border-line bg-surface-2 px-1.5 text-[0.92em] outline-none placeholder:text-muted-2 focus:border-blue-400 focus:bg-surface"
-          />
-        )}
-        {!showFilter && !root && list.filter && (
-          // The input is gone at this width, but the filter still decides what the list
-          // shows: keep a chip so it is never invisible and never sticky.
-          <button
-            type="button"
-            data-filter-clear
-            onClick={() => tab && update(tab.id, (d) => filterList(d, ''))}
-            title={t('list.filterActive', { query: list.filter })}
-            style={navFieldStyle}
-            className="ml-0.5 flex max-w-[5rem] shrink-0 items-center gap-0.5 rounded border border-line bg-surface-3 px-1 text-[0.85em] text-fg"
-          >
-            <span className="truncate">{list.filter}</span>
-            <span className="shrink-0 text-muted">×</span>
-          </button>
-        )}
-        <button
-          type="button"
-          onClick={onToggleHidden}
-          title={pane.hidden ? t('list.hideHidden') : t('list.showHidden')}
-          style={navButtonStyle}
-          className={`grid shrink-0 place-items-center rounded hover:bg-surface-3 ${
-            pane.hidden ? 'text-blue-500' : 'text-muted-2'
-          }`}
-        >
-          <svg viewBox="0 0 16 16" className="h-[1.17em] w-[1.17em]" fill="none" stroke="currentColor" strokeWidth="1.4">
-            <path d="M1.5 8s2.4-4 6.5-4 6.5 4 6.5 4-2.4 4-6.5 4-6.5-4-6.5-4Z" />
-            <circle cx="8" cy="8" r="1.8" />
-          </svg>
-        </button>
-      </div>
-
-      {!root && (
-        <div
-          className="relative shrink-0 overflow-hidden"
-          style={{ height: headerHeight, marginRight: gutter }}
-        >
-          <div
-            ref={headerRef}
-            className="typo-list relative grid h-full items-center border-b border-line bg-surface-2 pr-1.5 text-muted"
-            style={{ gridTemplateColumns: grid, minWidth: listMinWidth, width: listSpan }}
-          >
-            <HeaderCell label={t('list.name')} k="name" sort={pane.sort} onSort={changeSort} align="left" />
-            {showSize && (
-              <div className="relative flex h-full min-w-0">
-                <HeaderCell label={t('list.size')} k="size" sort={pane.sort} onSort={changeSort} align="right" />
-                <ColDivider
-                  label={t('list.size')}
-                  onPointerDown={(ev) => startColDrag('size', ev)}
-                  onDoubleClick={() => resetCol('size')}
-                />
-              </div>
-            )}
-            {showType && (
-              <div className="relative flex h-full min-w-0">
-                <HeaderCell label={t('list.type')} k="type" sort={pane.sort} onSort={changeSort} align="left" />
-                <ColDivider
-                  label={t('list.type')}
-                  onPointerDown={(ev) => startColDrag('type', ev)}
-                  onDoubleClick={() => resetCol('type')}
-                />
-              </div>
-            )}
-            {showTime && (
-              <div className="relative flex h-full min-w-0">
-                <HeaderCell label={t('list.mtime')} k="mtime" sort={pane.sort} onSort={changeSort} align="left" />
-                <ColDivider
-                  label={t('list.mtime')}
-                  onPointerDown={(ev) => startColDrag('time', ev)}
-                  onDoubleClick={() => resetCol('time')}
-                />
-              </div>
-            )}
-          </div>
-          {/* Pinned to the row's right edge, or to the visible edge while the list scrolls
-              horizontally, so the handle is always reachable. */}
-          <span
-            role="separator"
-            aria-orientation="vertical"
-            aria-label={t('list.nameWidth')}
-            title={t('list.nameWidthHint')}
-            data-gutter-handle
-            onPointerDown={startNameDrag}
-            onDoubleClick={() => onListNameWidth(0)}
-            style={{ left: nameWidth > 0 ? `min(${listMinWidth}, 100%)` : '100%' }}
-            className="absolute inset-y-0 z-10 w-1.5 -translate-x-full cursor-col-resize touch-none select-none hover:bg-blue-400/60 active:bg-blue-500"
-          />
-        </div>
       )}
 
       {root && (
@@ -687,7 +668,7 @@ export function PaneView({
         className="typo-list relative min-h-0 flex-1 overflow-auto outline-none"
         // Blank strip under the last row: the container is the click target there, so a
         // right-click reaches the folder menu even when the list fills the pane.
-        style={{ paddingBottom: rowHeight * 2 }}
+        style={{ paddingBottom: cellHeight * 2 }}
       >
         <input
           ref={typeAheadRef}
@@ -739,57 +720,36 @@ export function PaneView({
         )}
 
         {!root && (
-        <div style={{ height: virtualizer.getTotalSize(), position: 'relative', minWidth: listMinWidth, width: listSpan }}>
-          {virtualizer.getVirtualItems().map((vi) => {
-            const entry = view[vi.index]
-            if (!entry) return null
-            const isSelected = list.selected.has(entry.name)
-            return (
-              <FileTableRow
-                key={`${entry.name}-${vi.index}`}
-                entry={entry}
-                index={vi.index}
-                tabPath={tab.path}
-                rowHeight={rowHeight}
-                startOffset={vi.start}
-                grid={grid}
-                isSelected={isSelected}
-                listScale={listScale}
-                iconPx={iconPx}
-                gitBadges={gitBadges}
-                t={t}
-                showSize={showSize}
-                showType={showType}
-                showTime={showTime}
-                newTabOnMiddleClick={newTabOnMiddleClick}
-                selectRow={selectRow}
-                onRowDragStart={onRowDragStart}
-                onOpenInNewTab={onOpenInNewTab}
-                onRowContextMenu={onRowContextMenu}
-                onDoubleClick={() => activate(entry)}
-                pointOf={pointOf}
-                isRowSelected={list.selected.has(entry.name)}
-              />
-            )
-          })}
-        </div>
-        )}
-
-        {!root && !list.error && !view.length && (
-          <div className="grid h-full place-items-center text-center text-muted-2">
-            {list.loading ? (
-              <div className="flex flex-col items-center gap-2">
-                <div className="h-4 w-4 animate-spin rounded-full border-2 border-line border-t-blue-500" />
-                <div className="text-[0.88em]">
-                  {t('list.loading')} {list.scanned > 0 && t('list.scanned', { count: list.scanned })}
-                </div>
-              </div>
-            ) : list.filter ? (
-              <div className="text-[0.88em]">{t('list.noMatch', { query: list.filter })}</div>
-            ) : (
-              <div className="text-[0.88em]">{t('list.empty')}</div>
-            )}
-          </div>
+          <FileListBody
+            view={view}
+            list={list}
+            viewMode={viewMode}
+            columns={columns}
+            rowHeight={rowHeight}
+            cellHeight={cellHeight}
+            listMinWidth={listMinWidth}
+            listSpan={listSpan}
+            grid={grid}
+            listScale={listScale}
+            iconPx={iconPx}
+            showSize={showSize}
+            showType={showType}
+            showTime={showTime}
+            gitBadges={gitBadges}
+            colorRules={colorRules}
+            t={t}
+            tabPath={tab.path}
+            virtualizer={virtualizer}
+            newTabOnMiddleClick={newTabOnMiddleClick}
+            selectRow={selectRow}
+            onRowDragStart={onRowDragStart}
+            onOpenInNewTab={onOpenInNewTab}
+            onRowContextMenu={onRowContextMenu}
+            onActivate={activate}
+            pointOf={pointOf}
+            loading={list.loading}
+            filter={list.filter}
+          />
         )}
       </div>
 
@@ -806,6 +766,10 @@ export function PaneView({
         loading={list.loading}
         scanned={list.scanned}
         path={tab?.path}
+        folderSize={folderSize?.path === tab?.path ? folderSize : undefined}
+        onFolderSizeCancel={onFolderSizeCancel}
+        view={viewMode}
+        onViewChange={onViewChange}
       />
 
       {typed && (

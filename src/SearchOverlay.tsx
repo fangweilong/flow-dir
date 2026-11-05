@@ -5,6 +5,8 @@ import { errorKey, makeT } from './i18n'
 import { formatSize, parentPath, volumeRoot } from './paths'
 import { FileIcon } from './icons'
 import { EntryStateBadges, entryStateTitle, entryStateTone } from './components/EntryStateBadge'
+import { colorRuleFor, colorRuleStyle } from './colorRules'
+import type { ColorRule } from './persist'
 import { BASE_FONT_SIZE, clampFontSize, clampIconSize } from './fonts'
 import type { ApiError, Lang, SearchItem } from './types'
 import {
@@ -34,6 +36,7 @@ type Props = {
   lang: Lang
   fontSize: number
   iconSize?: number
+  colorRules: ColorRule[]
   preferEverything: boolean
   /** Built-in scan follows the pane's show-hidden setting. */
   showHidden: boolean
@@ -52,6 +55,7 @@ export function SearchOverlay({
   lang,
   fontSize,
   iconSize,
+  colorRules,
   preferEverything,
   showHidden,
   onClose,
@@ -641,6 +645,7 @@ export function SearchOverlay({
           )}
           {visible.map((item, offset) => {
             const index = start + offset
+            const rule = colorRuleFor(item.name, item.isDir, colorRules)
             return (
               <div
                 key={`${item.path}-${index}`}
@@ -672,7 +677,8 @@ export function SearchOverlay({
                   </span>
                   <span className="flex min-w-0 flex-1 flex-col">
                     <span
-                      className={`truncate text-[0.75rem] ${entryStateTone(item.name, item.attrs) || 'text-fg-strong'}`}
+                      className={`truncate text-[0.75rem] ${entryStateTone(item.name, item.attrs) || 'text-fg-strong'} ${rule?.background ? 'rounded px-1' : ''}`}
+                      style={colorRuleStyle(rule)}
                       title={entryStateTitle(item.name, item.attrs, t) || undefined}
                     >
                       {item.name}

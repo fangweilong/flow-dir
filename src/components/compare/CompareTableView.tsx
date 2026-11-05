@@ -2,6 +2,8 @@ import { describeError, type Translate } from '../../i18n'
 import type { CompareCount, CompareEntry, CompareHashResult, CompareStatus } from '../../types'
 import { FileIcon } from '../../icons'
 import { EntryStateBadges, entryStateTitle, entryStateTone } from '../EntryStateBadge'
+import { colorRuleFor, colorRuleStyle } from '../../colorRules'
+import type { ColorRule } from '../../persist'
 import { formatSize, joinPath } from '../../paths'
 
 export interface CompareTableViewProps {
@@ -13,6 +15,7 @@ export interface CompareTableViewProps {
   onEnter: (rel: string) => void
   iconScale: number
   iconPx?: number
+  colorRules: ColorRule[]
   statusLabel: (status: CompareStatus) => string
   statusClass: (status: CompareStatus) => string
   statusMark: (status: CompareStatus) => string
@@ -29,6 +32,7 @@ export function CompareTableView({
   onEnter,
   iconScale,
   iconPx,
+  colorRules,
   statusLabel,
   statusClass,
   statusMark,
@@ -41,6 +45,7 @@ export function CompareTableView({
       return <div className="min-w-0 bg-surface-2/40 px-2 py-1 text-muted-2/40">—</div>
     }
     const root = side === 'left' ? leftPath : rightPath
+    const rule = colorRuleFor(entry.name, meta.isDir, colorRules)
     const canEnter = !!entry.left?.isDir && !!entry.right?.isDir
     const count = counts[entry.rel]
     const hash = hashResults[entry.rel]
@@ -68,7 +73,8 @@ export function CompareTableView({
           className={`truncate ${
             entryStateTone(entry.name, meta.attrs) ||
             (entry.status === 'same' ? 'text-muted' : 'text-fg-strong')
-          }`}
+          } ${rule?.background ? 'rounded px-1' : ''}`}
+          style={colorRuleStyle(rule)}
           title={entryStateTitle(entry.name, meta.attrs, t) || entry.rel}
         >
           {entry.name}

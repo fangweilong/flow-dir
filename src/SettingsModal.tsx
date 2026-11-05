@@ -12,6 +12,7 @@ import { ColumnsSection, ConfigSection, GraphicsSection } from './components/set
 import { ShortcutsSection } from './components/settings/ShortcutsSection'
 import { IntegrationSection } from './components/settings/IntegrationSection'
 import { QuickAccessSection } from './components/settings/QuickAccessSection'
+import { ColorRulesSection } from './components/settings/ColorRulesSection'
 import { ExternalPreviewSection } from './components/settings/ExternalPreviewSection'
 import { UpdatesSection } from './components/settings/UpdatesSection'
 import { DiagnosticsSection } from './components/settings/DiagnosticsSection'
@@ -88,6 +89,11 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
       t('settings.fontSizeHint'),
       t('settings.iconSizeHint'),
       t('settings.themeSystem'),
+    ].join(' '),
+    colors: [
+      t('settings.colorRules'),
+      t('settings.colorRulesHint'),
+      ...settings.colorRules.map((rule) => rule.pattern),
     ].join(' '),
     columns: [t('settings.columns'), t('list.size'), t('list.type'), t('list.mtime'), t('settings.columnsHint')].join(' '),
     shortcuts: [t('settings.shortcuts'), ...SHORTCUTS.map((shortcut) => t(shortcut.label))].join(' '),
@@ -249,6 +255,13 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
               t={t}
               visible={isSectionVisible('general')}
               everything={everything}
+            />
+
+            <ColorRulesSection
+              settings={settings}
+              onChange={onChange}
+              t={t}
+              visible={isSectionVisible('colors')}
             />
 
             <ColumnsSection

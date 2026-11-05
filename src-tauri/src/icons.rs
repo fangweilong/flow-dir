@@ -27,12 +27,13 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::UI::Shell::{
     IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF, SIIGBF_BIGGERSIZEOK,
-    SIIGBF_ICONONLY,
+    SIIGBF_ICONONLY, SIIGBF_THUMBNAILONLY,
 };
 
 use crate::preview::PreviewCache;
 
-const PNG_BUFFER: usize = 256 * 1024;
+// Room for a photo thumbnail at the 256 px cap, not just a small icon.
+const PNG_BUFFER: usize = 512 * 1024;
 
 /// HTTP response for `http://fd.localhost/icon?path=…&s=16`.
 pub fn handle_request<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) -> Response<Vec<u8>> {
@@ -57,10 +58,11 @@ pub fn handle_request<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) ->
     let Some(path) = params.get("path") else {
         return plain(StatusCode::BAD_REQUEST, "missing path");
     };
-    if path.is_empty() || path.len() > 1024 || !FsPath::new(path).is_absolute() {
+    let shell = crate::shellfs::is_shell_path(path);
+    if path.is_empty() || path.len() > 2048 || (!shell && !FsPath::new(path).is_absolute()) {
         return plain(StatusCode::BAD_REQUEST, "invalid path");
     }
-    if !FsPath::new(path).exists() {
+    if !shell && !FsPath::new(path).exists() {
         return plain(StatusCode::NOT_FOUND, "not found");
     }
     let size = params
@@ -69,12 +71,15 @@ pub fn handle_request<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) ->
         .unwrap_or(16)
         // The frontend asks for `iconSize * devicePixelRatio`; at 200 % scaling a 32 px
         // icon is 64 px, and 96 px on a 300 % display, so the old cap blurred it.
-        .clamp(16, 128);
+        .clamp(16, 256);
+    // Thumbnail view asks for the real preview; everything else wants the plain icon.
+    let thumb = params.get("thumb").map(String::as_str) == Some("1");
 
     let key = format!(
-        "icon:{}?s={size}&v={}",
+        "icon:{}?s={size}&v={}&t={}",
         path,
-        params.get("v").map(String::as_str).unwrap_or_default()
+        params.get("v").map(String::as_str).unwrap_or_default(),
+        u8::from(thumb)
     );
     let cache = app.state::<PreviewCache>();
     if let Some(bytes) = cache.get(&key) {
@@ -84,7 +89,7 @@ pub fn handle_request<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) ->
         }
         return ok(bytes);
     }
-    match render(path, size) {
+    match render(path, size, thumb) {
         Ok(bytes) => {
             cache.put(key, bytes.clone());
             ok(bytes)
@@ -120,13 +125,21 @@ impl Drop for ComMtaGuard {
     }
 }
 
-fn render(path: &str, size: i32) -> Result<Vec<u8>, windows::core::Error> {
+fn render(path: &str, size: i32, thumb: bool) -> Result<Vec<u8>, windows::core::Error> {
     let _com = ComMtaGuard::new();
     unsafe {
         let factory: IShellItemImageFactory =
             SHCreateItemFromParsingName(&HSTRING::from(path), None)?;
-        let flags = SIIGBF(SIIGBF_ICONONLY.0 | SIIGBF_BIGGERSIZEOK.0);
-        let bitmap = factory.GetImage(SIZE { cx: size, cy: size }, flags)?;
+        let icon = SIIGBF(SIIGBF_ICONONLY.0 | SIIGBF_BIGGERSIZEOK.0);
+        // Not every item has a thumbnail handler (and image-less files fall back often);
+        // retrying as a plain icon keeps the tile filled instead of blank.
+        let bitmap = if thumb {
+            factory
+                .GetImage(SIZE { cx: size, cy: size }, SIIGBF(SIIGBF_THUMBNAILONLY.0 | SIIGBF_BIGGERSIZEOK.0))
+                .or_else(|_| factory.GetImage(SIZE { cx: size, cy: size }, icon))?
+        } else {
+            factory.GetImage(SIZE { cx: size, cy: size }, icon)?
+        };
         let result = bitmap_to_png(bitmap);
         let _ = DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(bitmap.0));
         result
