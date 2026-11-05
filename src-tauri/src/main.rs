@@ -1078,11 +1078,16 @@ struct Dependency {
     version: &'static str,
     license: &'static str,
     kind: &'static str,
+    /// Browsable repository URL; crates.io / npmjs when the package declares none.
+    repository: &'static str,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct AppInfo {
     version: &'static str,
+    repository_url: String,
+    profile_url: String,
     dependencies: Vec<Dependency>,
 }
 
@@ -1344,17 +1349,32 @@ async fn update_install(app: tauri::AppHandle) -> Result<(), ApiError> {
         .map_err(|e| ApiError::new("UPDATE_TASK", e.to_string()))?
 }
 
+/// Release history for the About/Updates page. Cached in `update.json`; `force` is the
+/// manual refresh path.
+#[tauri::command]
+async fn update_history(
+    app: tauri::AppHandle,
+    force: bool,
+) -> Result<Vec<update::ReleaseEntry>, ApiError> {
+    tauri::async_runtime::spawn_blocking(move || update::history(&app, force))
+        .await
+        .map_err(|e| ApiError::new("UPDATE_TASK", e.to_string()))?
+}
+
 #[tauri::command]
 fn app_info() -> AppInfo {
     AppInfo {
         version: env!("CARGO_PKG_VERSION"),
+        repository_url: update::repository_url(),
+        profile_url: update::profile_url(),
         dependencies: DEPS
             .iter()
-            .map(|(kind, name, version, license)| Dependency {
+            .map(|(kind, name, version, license, repository)| Dependency {
                 kind,
                 name,
                 version,
                 license,
+                repository,
             })
             .collect(),
     }
@@ -1442,6 +1462,44 @@ async fn open_path(path: String) -> Result<(), ApiError> {
     .await
     .map_err(|e| ApiError::new("THREAD", e.to_string()))?
 }
+
+/// Opens an http(s) link in the default browser. Separate from `open_path` so a link can
+/// never be interpreted as a shell namespace path, archive member or local file.
+#[tauri::command]
+async fn open_url(url: String) -> Result<(), ApiError> {
+    let target = url.trim().to_string();
+    let lower = target.to_ascii_lowercase();
+    if !(lower.starts_with("https://") || lower.starts_with("http://")) {
+        return Err(ApiError::new("URL_SCHEME", target));
+    }
+    if target.chars().any(|ch| ch.is_control() || ch.is_whitespace()) {
+        return Err(ApiError::new("URL_INVALID", target));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let wide: Vec<u16> = target.encode_utf16().chain(std::iter::once(0)).collect();
+        let result = unsafe {
+            ShellExecuteW(
+                None,
+                w!("open"),
+                PCWSTR(wide.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        let code = result.0 as isize;
+        if code > 32 {
+            return Ok(());
+        }
+        Err(ApiError::new(
+            "SHELL_FAILED",
+            format!("ShellExecuteW 返回 {code}"),
+        ))
+    })
+    .await
+    .map_err(|e| ApiError::new("THREAD", e.to_string()))?
+}
+
 fn parse_command_line(input: &str) -> (String, Option<String>) {
     let text = input.trim();
     if let Some(unquoted) = text.strip_prefix('"') {
@@ -1890,6 +1948,7 @@ fn main() {
             git_status,
             quick_access,
             open_path,
+            open_url,
             execute_address_command,
             open_with,
             explorer_open,
@@ -1953,7 +2012,8 @@ fn main() {
             app_info,
             config_warnings,
             update_check,
-            update_install
+            update_install,
+            update_history
         ])
         .run(tauri::generate_context!())
         .expect("FlowDir failed to start");

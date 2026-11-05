@@ -144,12 +144,12 @@ Tauri 2 + Rust 后端，React 19 前端。
 
 ## 更新
 
-设置 → 更新：显示当前版本与构建形态，可手动检查、一键下载安装。
+设置 → 关于与更新：显示当前版本与构建形态，可手动检查、一键下载安装，并展开查看每个版本的发布记录（来自 GitHub Releases，缓存 6 小时）。同一页还提供项目地址、作者主页与依赖仓库/许可链接。
 
 | 项 | 说明 |
 | --- | --- |
 | 自动检查间隔 | 6 / 12 / 24 / 72 小时或关闭；默认 24 小时，`0` = 仅手动 |
-| 版本来源 | Release 资产 `latest.json`（版本号 + 两个安装包的文件名、大小、SHA-256） |
+| 版本来源 | Release 资产 `latest.json`（版本号 + 两个安装包的文件名、大小、SHA-256）；版本记录经 GitHub Releases API 读取并缓存 |
 | 下载校验 | 大小、PE 头、SHA-256 摘要全部通过后才执行替换/安装 |
 | 仓库要求 | 必须保持 **public**，否则匿名拉取 `latest.json` 会失败 |
 
@@ -181,7 +181,7 @@ Tauri 2 + Rust 后端，React 19 前端。
 | --- | --- |
 | `%APPDATA%\FlowDir\settings.toml` | 语言、主题、界面字体与字号（`font_family` / `font_size`）、GPU、快速访问、更新间隔等；带注释，手工改也安全，非法字号回退 13 |
 | `%APPDATA%\FlowDir\layout.json` | 窗格/标签/窗口几何，启动恢复；损坏时降级并保留 `.rejected.json` |
-| `%APPDATA%\FlowDir\update.json` | 上次更新检查时间与最近一次发现的版本 |
+| `%APPDATA%\FlowDir\update.json` | 上次更新检查时间、最近一次发现的版本与发布记录缓存 |
 | `%LOCALAPPDATA%\FlowDir\EBWebView` | WebView2 浏览器配置 |
 
 ## 性能

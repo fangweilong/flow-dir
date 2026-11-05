@@ -4,33 +4,20 @@ import type { Theme } from '../../types'
 import { themeIsDark } from '../../themes'
 import { FONT_SIZE_MAX, REGION_FONT_SIZE_MIN } from '../../fonts'
 
-export type SectionId =
-  | 'general'
-  | 'colors'
-  | 'columns'
-  | 'shortcuts'
-  | 'integration'
-  | 'graphics'
-  | 'quickAccess'
-  | 'preview'
-  | 'config'
-  | 'updates'
-  | 'diagnostics'
-  | 'about'
+export type SectionId = 'general' | 'colors' | 'shortcuts' | 'quickAccess' | 'about' | 'diagnostics'
 
+/**
+ * Tabs are grouped by task, not by implementation: list columns and graphics live under
+ * General, system integration under Shortcuts, external preview under Quick access,
+ * updates under About, and the config folder under Diagnostics.
+ */
 export const SECTIONS: { id: SectionId; label: Key }[] = [
   { id: 'general', label: 'settings.general' },
   { id: 'colors', label: 'settings.colorRules' },
-  { id: 'columns', label: 'settings.columns' },
-  { id: 'shortcuts', label: 'settings.shortcuts' },
-  { id: 'integration', label: 'settings.integration' },
-  { id: 'graphics', label: 'settings.graphics' },
-  { id: 'quickAccess', label: 'settings.quickAccess' },
-  { id: 'preview', label: 'settings.previewSection' },
-  { id: 'config', label: 'settings.configDir' },
-  { id: 'updates', label: 'settings.updates' },
-  { id: 'diagnostics', label: 'settings.diagnostics' },
-  { id: 'about', label: 'settings.about' },
+  { id: 'shortcuts', label: 'settings.shortcutsIntegration' },
+  { id: 'quickAccess', label: 'settings.quickAccessPreview' },
+  { id: 'about', label: 'settings.aboutUpdates' },
+  { id: 'diagnostics', label: 'settings.diagnosticsConfig' },
 ]
 
 export const formatBytes = (bytes: number) => {

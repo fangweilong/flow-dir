@@ -1,5 +1,5 @@
 import { Channel, invoke } from '@tauri-apps/api/core'
-import type { ApiError, AppInfo, Clip, CompareCount, CompareHashEvent, CompareHashPair, CompareLevel, DirBatch, Drive, DupProgress, ElevatedReport, HashProgress, MenuOutcome, OpKind, OpProgress, Place, UpdateStatus } from './types'
+import type { ApiError, AppInfo, Clip, CompareCount, CompareHashEvent, CompareHashPair, CompareLevel, DirBatch, Drive, DupProgress, ElevatedReport, HashProgress, MenuOutcome, OpKind, OpProgress, Place, ReleaseEntry, UpdateStatus } from './types'
 import type { GitStatus, LaunchRequest, PreviewInfo, SearchBatch } from './types'
 import type { Settings } from './persist'
 
@@ -30,6 +30,8 @@ export const expandPath = (raw: string) => invoke<string>('expand_path', { raw }
 export const gitStatus = (path: string) => invoke<GitStatus>('git_status', { path })
 export const quickAccess = () => invoke<Place[]>('quick_access')
 export const openPath = (path: string) => invoke<void>('open_path', { path })
+/** Opens an http(s) link in the default browser; other schemes are rejected by the backend. */
+export const openUrl = (url: string) => invoke<void>('open_url', { url })
 /** Executes a command typed in the address bar (e.g. `cmd`, `pwsh`, `powershell`, `wt`, `calc`) in `workingDir`. */
 export const executeAddressCommand = (command: string, workingDir?: string) =>
   invoke<void>('execute_address_command', { command, workingDir })
@@ -314,6 +316,8 @@ export const shellMenuBackgroundShow = (
   })
 export const appInfo = () => invoke<AppInfo>('app_info')
 export const updateCheck = (force: boolean) => invoke<UpdateStatus>('update_check', { force })
+/** Release history from GitHub; `force` refreshes the backend cache. */
+export const updateHistory = (force: boolean) => invoke<ReleaseEntry[]>('update_history', { force })
 export const updateInstall = () => invoke<void>('update_install')
 export const configPath = () => invoke<string>('config_path')
 

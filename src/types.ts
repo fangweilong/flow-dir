@@ -39,7 +39,14 @@ export type Theme =
   | 'graphite'
   | 'nord'
   | 'forest'
-export type Dependency = { name: string; version: string; license: string; kind: string }
+export type Dependency = {
+  name: string
+  version: string
+  license: string
+  kind: string
+  /** Browsable repository URL; crates.io / npmjs when the package declares none. */
+  repository: string
+}
 export type Clip = { paths: string[]; cut: boolean }
 export type EverythingStatus = { usable: boolean; version: string | null; reason: string | null }
 /** `action` is FlowDir's own appended entry (e.g. the hidden-items toggle), not a shell verb. */
@@ -125,7 +132,23 @@ export type ElevatedReport = {
   failedIndices?: number[]
   error: ApiError | null
 }
-export type AppInfo = { version: string; dependencies: Dependency[] }
+export type AppInfo = {
+  version: string
+  repositoryUrl: string
+  profileUrl: string
+  dependencies: Dependency[]
+}
+
+/** One GitHub release, as returned by `update_history`. */
+export type ReleaseEntry = {
+  version: string
+  name: string | null
+  notes: string | null
+  /** ISO-8601 timestamp. */
+  publishedAt: string | null
+  url: string | null
+  prerelease: boolean
+}
 
 export type UpdateStatus = {
   current: string

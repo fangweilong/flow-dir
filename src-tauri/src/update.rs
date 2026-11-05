@@ -37,6 +37,12 @@ use crate::store;
 
 const STATE_FILE: &str = "update.json";
 const AGENT: &str = concat!("FlowDir/", env!("CARGO_PKG_VERSION"));
+/// Used when a local build has no `FLOWDIR_UPDATE_REPO`; the About page still needs a
+/// working project link.
+const DEFAULT_REPO: &str = "fangweilong/flow-dir";
+/// The GitHub API is unauthenticated here (60 requests/hour/IP); the About page reuses
+/// this cache instead of asking on every open.
+const HISTORY_TTL: u64 = 6 * 3600;
 
 /// `owner/repo`, injected by the release workflow so the binary knows where to look.
 fn repo() -> Option<String> {
@@ -50,6 +56,22 @@ fn repo() -> Option<String> {
         .trim_start_matches("github.com/")
         .to_string();
     (slug.matches('/').count() == 1).then_some(slug)
+}
+
+fn repo_or_default() -> String {
+    repo().unwrap_or_else(|| DEFAULT_REPO.to_string())
+}
+
+/// Browser URL for the project, shown in Settings.
+pub fn repository_url() -> String {
+    format!("https://github.com/{}", repo_or_default())
+}
+
+/// The repository owner's profile URL, shown next to the project link.
+pub fn profile_url() -> String {
+    let slug = repo_or_default();
+    let owner = slug.split('/').next().unwrap_or("").to_string();
+    format!("https://github.com/{owner}")
 }
 
 #[derive(Serialize, Clone)]
@@ -80,12 +102,29 @@ pub struct UpdateProgress {
     pub bytes_per_sec: u64,
 }
 
+/// One published release, as shown in the version history list.
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseEntry {
+    /// Tag without the leading `v`.
+    pub version: String,
+    pub name: Option<String>,
+    pub notes: Option<String>,
+    /// ISO-8601 timestamp from GitHub.
+    pub published_at: Option<String>,
+    pub url: Option<String>,
+    pub prerelease: bool,
+}
+
 #[derive(Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct State {
     last_check: u64,
     latest: Option<String>,
     notes: Option<String>,
+    history: Vec<ReleaseEntry>,
+    /// Unix seconds of the last successful history fetch.
+    history_at: u64,
 }
 
 #[derive(Deserialize, Clone)]
@@ -187,14 +226,13 @@ pub fn check<R: Runtime>(app: &AppHandle<R>, force: bool) -> UpdateStatus {
     match fetch_manifest(&slug) {
         Ok(manifest) => {
             let now = now_secs();
-            write_state(
-                app,
-                &State {
-                    last_check: now,
-                    latest: Some(manifest.version.clone()),
-                    notes: manifest.notes.clone(),
-                },
-            );
+            // Mutate the cached state instead of replacing it: the release history lives
+            // in the same file and must survive an update check.
+            let mut state = cached;
+            state.last_check = now;
+            state.latest = Some(manifest.version.clone());
+            state.notes = manifest.notes.clone();
+            write_state(app, &state);
             status.last_check = Some(now);
             status.latest = Some(manifest.version.clone());
             status.notes = manifest.notes;
@@ -206,6 +244,91 @@ pub fn check<R: Runtime>(app: &AppHandle<R>, force: bool) -> UpdateStatus {
         Err(err) => status.error = Some(err),
     }
     status
+}
+
+/// Release history for the settings page. Cached for [`HISTORY_TTL`]; a failed refresh
+/// keeps the previous list because GitHub's unauthenticated API is rate limited.
+pub fn history<R: Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec<ReleaseEntry>, ApiError> {
+    let slug = repo_or_default();
+    let state = read_state(app);
+    if !force
+        && !state.history.is_empty()
+        && now_secs() < state.history_at.saturating_add(HISTORY_TTL)
+    {
+        return Ok(state.history);
+    }
+    match fetch_history(&slug) {
+        Ok(list) => {
+            let mut next = state;
+            next.history = list.clone();
+            next.history_at = now_secs();
+            write_state(app, &next);
+            Ok(list)
+        }
+        Err(err) if !state.history.is_empty() => {
+            log::warn!(
+                target: "flowdir::update",
+                "update_history failed, keeping cached list: {} {}",
+                err.code,
+                err.detail
+            );
+            Ok(state.history)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+#[derive(Deserialize)]
+struct GhRelease {
+    tag_name: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    published_at: Option<String>,
+    #[serde(default)]
+    html_url: Option<String>,
+    #[serde(default)]
+    prerelease: bool,
+    #[serde(default)]
+    draft: bool,
+}
+
+fn fetch_history(slug: &str) -> Result<Vec<ReleaseEntry>, ApiError> {
+    let path = format!("/repos/{slug}/releases?per_page=30");
+    let bytes = http_get("api.github.com", &path)?;
+    parse_releases(&bytes)
+}
+
+fn parse_releases(bytes: &[u8]) -> Result<Vec<ReleaseEntry>, ApiError> {
+    let releases: Vec<GhRelease> = serde_json::from_slice(bytes)
+        .map_err(|e| ApiError::new("UPDATE_HISTORY", e.to_string()))?;
+    Ok(releases
+        .into_iter()
+        .filter(|release| !release.draft)
+        .map(|release| ReleaseEntry {
+            version: release.tag_name.trim().trim_start_matches('v').to_string(),
+            name: release.name.filter(|name| !name.trim().is_empty()),
+            notes: release
+                .body
+                .map(|body| clip(body, 8_000))
+                .filter(|body| !body.trim().is_empty()),
+            published_at: release.published_at,
+            url: release.html_url,
+            prerelease: release.prerelease,
+        })
+        .collect())
+}
+
+/// A release body is arbitrary markdown; bound what reaches the WebView.
+fn clip(text: String, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text;
+    }
+    let mut clipped: String = text.chars().take(max).collect();
+    clipped.push('…');
+    clipped
 }
 
 /// Downloads the asset for the running flavor, verifies its digest, swaps it in, and
@@ -1079,5 +1202,36 @@ mod tests {
             ..ok
         };
         assert!(validate_asset(&traversal).is_err());
+    }
+
+    #[test]
+    fn history_skips_drafts_and_strips_v_prefix() {
+        let json = br#"[
+            {"tag_name":"v0.6.29","name":"v0.6.29","body":"Changes\n- item","published_at":"2026-11-01T00:00:00Z","html_url":"https://github.com/o/r/releases/tag/v0.6.29","prerelease":false,"draft":false},
+            {"tag_name":"v0.7.0-rc1","name":"","body":"","published_at":null,"html_url":null,"prerelease":true,"draft":false},
+            {"tag_name":"v0.8.0","name":"draft","body":null,"published_at":null,"html_url":null,"prerelease":false,"draft":true}
+        ]"#;
+        let releases = parse_releases(json).unwrap();
+        assert_eq!(releases.len(), 2);
+        assert_eq!(releases[0].version, "0.6.29");
+        assert_eq!(releases[0].notes.as_deref(), Some("Changes\n- item"));
+        assert_eq!(releases[1].version, "0.7.0-rc1");
+        assert_eq!(releases[1].name, None);
+        assert_eq!(releases[1].notes, None);
+        assert!(releases[1].prerelease);
+    }
+
+    #[test]
+    fn release_notes_are_clipped_on_char_boundaries() {
+        let text = "更".repeat(10);
+        let clipped = clip(text.clone(), 4);
+        assert_eq!(clipped, "更更更更…");
+        assert_eq!(clip(text, 10).chars().count(), 10);
+    }
+
+    #[test]
+    fn repository_links_are_browsable() {
+        assert_eq!(repository_url(), "https://github.com/fangweilong/flow-dir");
+        assert_eq!(profile_url(), "https://github.com/fangweilong");
     }
 }

@@ -16,7 +16,7 @@ import { ColorRulesSection } from './components/settings/ColorRulesSection'
 import { ExternalPreviewSection } from './components/settings/ExternalPreviewSection'
 import { UpdatesSection } from './components/settings/UpdatesSection'
 import { DiagnosticsSection } from './components/settings/DiagnosticsSection'
-import { AboutSection } from './components/settings/AboutSection'
+import { AboutSection, DependenciesSection } from './components/settings/AboutSection'
 
 type Props = {
   settings: Settings
@@ -89,15 +89,28 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
       t('settings.fontSizeHint'),
       t('settings.iconSizeHint'),
       t('settings.themeSystem'),
+      // Merged tabs: list columns and graphics/performance.
+      t('settings.columns'),
+      t('settings.columnsHint'),
+      t('list.size'),
+      t('list.type'),
+      t('list.mtime'),
+      t('settings.graphics'),
+      t('settings.gpuAccel'),
+      t('settings.gpuAccelHint'),
+      t('settings.reclaimMemory'),
+      t('settings.reclaimMemoryHint'),
+      t('settings.restartNow'),
     ].join(' '),
     colors: [
       t('settings.colorRules'),
       t('settings.colorRulesHint'),
       ...settings.colorRules.map((rule) => rule.pattern),
     ].join(' '),
-    columns: [t('settings.columns'), t('list.size'), t('list.type'), t('list.mtime'), t('settings.columnsHint')].join(' '),
-    shortcuts: [t('settings.shortcuts'), ...SHORTCUTS.map((shortcut) => t(shortcut.label))].join(' '),
-    integration: [
+    shortcuts: [
+      t('settings.shortcutsIntegration'),
+      t('settings.shortcuts'),
+      ...SHORTCUTS.map((shortcut) => t(shortcut.label)),
       t('settings.integration'),
       t('settings.hotkey'),
       t('settings.contextMenu'),
@@ -105,18 +118,36 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
       t('settings.autostart'),
       settings.globalHotkey,
     ].join(' '),
-    graphics: [t('settings.graphics'), t('settings.gpuAccel'), t('settings.reclaimMemory'), t('settings.restartNow')].join(' '),
-    quickAccess: [t('settings.quickAccess'), ...settings.customPlaces.map((place) => place.name)].join(' '),
-    preview: [t('settings.previewSection'), t('settings.externalPreview'), ...settings.externalPreview.map((rule) => rule.ext)].join(' '),
-    config: [t('settings.configDir'), t('settings.configOpen')].join(' '),
-    updates: [t('settings.updates'), t('settings.updateInterval'), t('settings.updateCheck')].join(' '),
+    quickAccess: [
+      t('settings.quickAccessPreview'),
+      t('settings.quickAccess'),
+      ...settings.customPlaces.map((place) => place.name),
+      t('settings.previewSection'),
+      t('settings.externalPreview'),
+      ...settings.externalPreview.map((rule) => rule.ext),
+    ].join(' '),
+    about: [
+      t('settings.aboutUpdates'),
+      t('settings.about'),
+      t('settings.version'),
+      t('settings.repository'),
+      t('settings.profile'),
+      t('settings.dependencies'),
+      t('settings.dependenciesHint'),
+      t('settings.updates'),
+      t('settings.updateInterval'),
+      t('settings.updateCheck'),
+      t('settings.updateHistory'),
+    ].join(' '),
     diagnostics: [
+      t('settings.diagnosticsConfig'),
       t('settings.diagnostics'),
       t('settings.logLevel'),
       t('settings.logOpen'),
       t('settings.logExport'),
+      t('settings.configDir'),
+      t('settings.configOpen'),
     ].join(' '),
-    about: [t('settings.about'), t('settings.version'), t('settings.dependencies')].join(' '),
   }
 
   const isSectionVisible = (id: SectionId) => {
@@ -257,18 +288,25 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
               everything={everything}
             />
 
+            <ColumnsSection
+              settings={settings}
+              onChange={onChange}
+              t={t}
+              visible={isSectionVisible('general')}
+            />
+
+            <GraphicsSection
+              settings={settings}
+              onChange={onChange}
+              t={t}
+              visible={isSectionVisible('general')}
+            />
+
             <ColorRulesSection
               settings={settings}
               onChange={onChange}
               t={t}
               visible={isSectionVisible('colors')}
-            />
-
-            <ColumnsSection
-              settings={settings}
-              onChange={onChange}
-              t={t}
-              visible={isSectionVisible('columns')}
             />
 
             <ShortcutsSection
@@ -283,14 +321,7 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
               settings={settings}
               onChange={onChange}
               t={t}
-              visible={isSectionVisible('integration')}
-            />
-
-            <GraphicsSection
-              settings={settings}
-              onChange={onChange}
-              t={t}
-              visible={isSectionVisible('graphics')}
+              visible={isSectionVisible('shortcuts')}
             />
 
             <QuickAccessSection
@@ -306,14 +337,13 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
               keys={keys}
               onChange={onChange}
               t={t}
-              visible={isSectionVisible('preview')}
+              visible={isSectionVisible('quickAccess')}
             />
 
-            <ConfigSection
-              configDir={configDir}
-              onOpenLocation={onOpenLocation}
+            <AboutSection
+              info={info}
               t={t}
-              visible={isSectionVisible('config')}
+              visible={isSectionVisible('about')}
             />
 
             <UpdatesSection
@@ -322,7 +352,13 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
               lang={lang}
               onChange={onChange}
               t={t}
-              visible={isSectionVisible('updates')}
+              visible={isSectionVisible('about')}
+            />
+
+            <DependenciesSection
+              info={info}
+              t={t}
+              visible={isSectionVisible('about')}
             />
 
             <DiagnosticsSection
@@ -333,10 +369,11 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
               visible={isSectionVisible('diagnostics')}
             />
 
-            <AboutSection
-              info={info}
+            <ConfigSection
+              configDir={configDir}
+              onOpenLocation={onOpenLocation}
               t={t}
-              visible={isSectionVisible('about')}
+              visible={isSectionVisible('diagnostics')}
             />
           </div>
         </div>

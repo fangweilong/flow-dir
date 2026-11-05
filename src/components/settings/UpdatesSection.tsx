@@ -1,10 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { errorKey } from '../../i18n'
 import type { Translate } from '../../i18n'
 import type { Settings } from '../../persist'
-import type { AppInfo, Lang, UpdateProgress, UpdateStatus } from '../../types'
-import { taskbarProgress, updateCheck, updateInstall } from '../../api'
+import type { AppInfo, Lang, ReleaseEntry, UpdateProgress, UpdateStatus } from '../../types'
+import { openUrl, taskbarProgress, updateCheck, updateHistory, updateInstall } from '../../api'
 import { UPDATE_INTERVALS, formatBytes, ipcErrorText } from './SettingsShared'
 
 export type UpdatesSectionProps = {
@@ -16,16 +16,46 @@ export type UpdatesSectionProps = {
   visible: boolean
 }
 
+/** GitHub's generated notes are markdown; drop the markers that would otherwise show as
+ * syntax. HTML is never injected, so arbitrary release text stays inert. */
+function readableNotes(notes: string): string {
+  return notes
+    .replace(/\r\n/g, '\n')
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/^\s*[-*]\s+/gm, '• ')
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .trim()
+}
+
 export function UpdatesSection({ settings, info, lang, onChange, t, visible }: UpdatesSectionProps) {
   const [update, setUpdate] = useState<UpdateStatus | null>(null)
   const [checking, setChecking] = useState(false)
   const [installing, setInstalling] = useState(false)
   const [updateError, setUpdateError] = useState<string | null>(null)
   const [updateProgress, setUpdateProgress] = useState<UpdateProgress | null>(null)
+  const [history, setHistory] = useState<ReleaseEntry[]>([])
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [historyError, setHistoryError] = useState<string | null>(null)
+
+  const loadHistory = useCallback((force: boolean) => {
+    setHistoryLoading(true)
+    setHistoryError(null)
+    void updateHistory(force)
+      .then(setHistory)
+      .catch((err: unknown) => setHistoryError(ipcErrorText(err)))
+      .finally(() => setHistoryLoading(false))
+  }, [])
 
   useEffect(() => {
     void updateCheck(false).then(setUpdate).catch(() => undefined)
   }, [])
+
+  // Only fetch when the (merged) About tab is actually shown; opening Settings must not
+  // spend GitHub API quota on a page the user never looks at.
+  useEffect(() => {
+    if (visible) loadHistory(false)
+  }, [visible, loadHistory])
 
   useEffect(() => {
     let disposed = false
@@ -54,7 +84,11 @@ export function UpdatesSection({ settings, info, lang, onChange, t, visible }: U
     setChecking(true)
     setUpdateError(null)
     void updateCheck(true)
-      .then(setUpdate)
+      .then((next) => {
+        setUpdate(next)
+        // The manual check is also the explicit refresh path for the release history.
+        loadHistory(true)
+      })
       .catch((err: unknown) => setUpdateError(ipcErrorText(err)))
       .finally(() => setChecking(false))
   }
@@ -93,6 +127,12 @@ export function UpdatesSection({ settings, info, lang, onChange, t, visible }: U
         timeStyle: 'short',
       })
     : null
+  const releaseDate = (iso: string | null) => {
+    if (!iso) return ''
+    const date = new Date(iso)
+    if (Number.isNaN(date.getTime())) return ''
+    return date.toLocaleDateString(lang === 'zh-CN' ? 'zh-CN' : 'en-US', { dateStyle: 'medium' })
+  }
 
   if (!visible) return null
 
@@ -201,6 +241,67 @@ export function UpdatesSection({ settings, info, lang, onChange, t, visible }: U
               </option>
             ))}
           </select>
+        </div>
+        <div className="border-t border-line pt-2" data-update-history>
+          <div className="flex items-center justify-between gap-2 pb-1">
+            <span className="text-[0.71875rem] text-fg">{t('settings.updateHistory')}</span>
+            {historyLoading && (
+              <span className="text-[0.625rem] text-muted-2">{t('settings.updateHistoryLoading')}</span>
+            )}
+          </div>
+          {historyError && (
+            <div className="text-[0.625rem] text-red-500">
+              {t('settings.updateHistoryFailed')}: {historyError}
+            </div>
+          )}
+          {!history.length && !historyLoading && !historyError && (
+            <div className="text-[0.625rem] text-muted-2">{t('settings.updateHistoryEmpty')}</div>
+          )}
+          {history.length > 0 && (
+            <div className="max-h-56 space-y-1 overflow-y-auto pr-1">
+              {history.map((release) => (
+                <details
+                  key={`${release.version}-${release.publishedAt ?? ''}`}
+                  className="rounded border border-line bg-surface-2/40"
+                >
+                  <summary className="flex cursor-pointer list-none items-center gap-2 px-2 py-1">
+                    <span className="font-mono text-[0.6875rem] text-fg">v{release.version}</span>
+                    {release.version === info?.version && (
+                      <span className="rounded bg-blue-500/15 px-1 py-px text-[0.59375rem] text-blue-600 dark:text-blue-400">
+                        {t('settings.updateCurrentVersion')}
+                      </span>
+                    )}
+                    {release.prerelease && (
+                      <span className="rounded bg-amber-500/15 px-1 py-px text-[0.59375rem] text-amber-600 dark:text-amber-400">
+                        {t('settings.prerelease')}
+                      </span>
+                    )}
+                    <span className="ml-auto shrink-0 text-[0.625rem] text-muted-2">
+                      {releaseDate(release.publishedAt)}
+                    </span>
+                  </summary>
+                  <div className="space-y-1 border-t border-line px-2 py-1.5">
+                    {release.notes ? (
+                      <div className="max-h-40 overflow-y-auto whitespace-pre-wrap break-words text-[0.65625rem] leading-relaxed text-muted">
+                        {readableNotes(release.notes)}
+                      </div>
+                    ) : (
+                      <div className="text-[0.625rem] text-muted-2">{t('settings.updateNoNotes')}</div>
+                    )}
+                    {release.url && (
+                      <button
+                        type="button"
+                        onClick={() => void openUrl(release.url!).catch(() => undefined)}
+                        className="rounded px-1 py-0.5 text-[0.625rem] text-blue-600 hover:bg-surface-3 dark:text-blue-400"
+                      >
+                        {t('settings.releasePage')}
+                      </button>
+                    )}
+                  </div>
+                </details>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </section>
