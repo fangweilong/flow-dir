@@ -149,9 +149,9 @@ unsafe fn read_item(
     show_hidden: bool,
 ) -> Option<Entry> {
     unsafe {
-        let mut sfgao = (SFGAO_FOLDER.0 | SFGAO_HIDDEN.0 | SFGAO_LINK.0) as u32;
+        let mut sfgao = SFGAO_FOLDER.0 | SFGAO_HIDDEN.0 | SFGAO_LINK.0;
         folder.GetAttributesOf(&[pidl], &mut sfgao).ok()?;
-        let hidden = sfgao & SFGAO_HIDDEN.0 as u32 != 0;
+        let hidden = sfgao & SFGAO_HIDDEN.0 != 0;
         if hidden && !show_hidden {
             return None;
         }
@@ -165,13 +165,13 @@ unsafe fn read_item(
         let href = shell_name(absolute.0, SIGDN_DESKTOPABSOLUTEPARSING)?;
 
         let mut attrs = 0u32;
-        if sfgao & SFGAO_FOLDER.0 as u32 != 0 {
+        if sfgao & SFGAO_FOLDER.0 != 0 {
             attrs |= ATTR_DIRECTORY;
         }
         if hidden {
             attrs |= ATTR_HIDDEN;
         }
-        if sfgao & SFGAO_LINK.0 as u32 != 0 {
+        if sfgao & SFGAO_LINK.0 != 0 {
             attrs |= ATTR_REPARSE_POINT;
         }
 
