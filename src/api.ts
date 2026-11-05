@@ -95,6 +95,8 @@ export type OpRequest = {
   permanent?: boolean
   /** Answer the shell's replace prompt automatically; used by the sync preview. */
   overwrite?: boolean
+  /** Paths the user confirmed for the `protect_confirm` tier. */
+  confirmedProtected?: string[]
 }
 
 export function opStart(request: OpRequest, onProgress: (progress: OpProgress) => void) {
@@ -109,6 +111,7 @@ export function opStart(request: OpRequest, onProgress: (progress: OpProgress) =
     newNames: request.newNames ?? null,
     permanent: request.permanent ?? false,
     overwrite: request.overwrite ?? false,
+    confirmedProtected: request.confirmedProtected ?? null,
     onProgress: channel,
   })
 }
@@ -230,6 +233,7 @@ export function opRetryElevated(request: OpRequest) {
       newNames: request.newNames ?? null,
       permanent: request.permanent ?? false,
       overwrite: request.overwrite ?? false,
+      confirmedProtected: request.confirmedProtected ?? null,
     },
   })
 }

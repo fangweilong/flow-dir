@@ -20,6 +20,8 @@ import {
   type CompressFormat,
 } from '../api'
 import { baseName, joinPath, parentPath } from '../paths'
+import { protectionError, protectWord } from '../protection'
+import type { ProtectPromptState } from '../protection'
 import { undoEntryFor, UNDO_LIMIT } from '../undo'
 import type { OpRequestShape, UndoEntry, UndoPayload } from '../undo'
 export const errorCode = (err: unknown): string =>
@@ -37,6 +39,8 @@ export type RunOpOptions = {
   newNames?: string[]
   permanent?: boolean
   overwrite?: boolean
+  /** Paths the user already confirmed for the `protect_confirm` tier. */
+  confirmedProtected?: string[]
   after?: () => void
   record?: boolean
   dirsAfter?: string[]
@@ -63,6 +67,7 @@ export function useFileOperations({
   const [ops, setOps] = useState<Record<string, OpProgress>>({})
   const [elevating, setElevating] = useState<string | null>(null)
   const [historyEpoch, setHistoryEpoch] = useState(0)
+  const [protectPrompt, setProtectPrompt] = useState<ProtectPromptState | null>(null)
 
   const [passwordPrompt, setPasswordPrompt] = useState<{
     archive: string
@@ -122,6 +127,7 @@ export function useFileOperations({
         newNames: options?.newNames,
         permanent: options?.permanent,
         overwrite: options?.overwrite,
+        confirmedProtected: options?.confirmedProtected,
       }
       opRequests.current[opId] = { opId, ...request, record: options?.record }
       const recordEntry = (
@@ -180,108 +186,142 @@ export function useFileOperations({
         showToast(text)
         remind(text)
       }
-      opStart(
-        {
-          opId,
-          kind,
-          sources,
-          targetDir: options?.targetDir,
-          newName: options?.newName,
-          newNames: options?.newNames,
-          permanent: options?.permanent,
-          overwrite: options?.overwrite,
-        },
-        (progress) => {
-          setOps((prev) => (prev[opId] ? { ...prev, [opId]: progress } : prev))
-          if (!progress.done) return
-          const denied =
-            progress.error?.code === 'ACCESS_DENIED' ||
-            progress.failed.some((failure) => failure.code === 'ACCESS_DENIED')
-          if (progress.error) {
-            announce(t('op.failed', { code: t(errorKey(progress.error.code)) }))
-            options?.onDone?.(false)
-            if (!denied) drop(5000)
-            return
-          }
-          if (progress.aborted) {
-            // Items that finished before the cancel are already on disk; without a record
-            // Ctrl+Z cannot reverse them. `succeeded` is authoritative (the failure list
-            // is capped), and `undoEntryFor` keeps positional rename names aligned.
-            const done = [...new Set(progress.succeeded ?? [])].sort((a, b) => a - b)
-            if (done.length) {
-              const landed = new Set(done)
+      const launch = (confirmedProtected?: string[]) => {
+        const pending = opRequests.current[opId]
+        // A rule change between the prompt and the retry can surface a second path; keep
+        // the earlier confirmations instead of asking the same question twice.
+        const merged = confirmedProtected
+          ? [...new Set([...(pending?.confirmedProtected ?? []), ...confirmedProtected])]
+          : undefined
+        if (pending && merged) pending.confirmedProtected = merged
+        opStart(
+          {
+            opId,
+            kind,
+            sources,
+            targetDir: options?.targetDir,
+            newName: options?.newName,
+            newNames: options?.newNames,
+            permanent: options?.permanent,
+            overwrite: options?.overwrite,
+            confirmedProtected: merged,
+          },
+          (progress) => {
+            setOps((prev) => (prev[opId] ? { ...prev, [opId]: progress } : prev))
+            if (!progress.done) return
+            const denied =
+              progress.error?.code === 'ACCESS_DENIED' ||
+              progress.failed.some((failure) => failure.code === 'ACCESS_DENIED')
+            if (progress.error) {
+              announce(t('op.failed', { code: t(errorKey(progress.error.code)) }))
+              options?.onDone?.(false)
+              if (!denied) drop(5000)
+              return
+            }
+            if (progress.aborted) {
+              // Items that finished before the cancel are already on disk; without a record
+              // Ctrl+Z cannot reverse them. `succeeded` is authoritative (the failure list
+              // is capped), and `undoEntryFor` keeps positional rename names aligned.
+              const done = [...new Set(progress.succeeded ?? [])].sort((a, b) => a - b)
+              if (done.length) {
+                const landed = new Set(done)
+                recordEntry(
+                  undoEntryFor(kind, sources, {
+                    ...options,
+                    skip: sources.filter((_, index) => !landed.has(index)),
+                  }),
+                  options?.dirsAfter ?? [],
+                  narrow(done),
+                )
+              }
+              options?.after?.()
+              refreshPanes()
+              announce(t('op.canceled'))
+              options?.onDone?.(false)
+              drop(2500)
+              return
+            }
+            if (progress.failedCount > 0) {
+              const failed = progress.failedCount
+              const ok = Math.max(0, progress.total - failed)
+              announce(t('op.partial', { ok, failed }))
+              // The backend caps the failure list; past that point the index list is the
+              // only way to know which items landed (and must not be recorded as undoable).
+              const succeeded = progress.succeeded
+              const failedIndices = progress.failedIndices
+              let keep = succeeded ?? []
+              if (!keep.length) {
+                if (failedIndices?.length) {
+                  const failedSet = new Set(failedIndices)
+                  keep = sources.map((_, index) => index).filter((index) => !failedSet.has(index))
+                } else if (
+                  progress.failed.length === progress.failedCount &&
+                  // A batch-level failure carries an empty path; treating it as a path
+                  // match would mark every source as landed and record a phantom undo.
+                  progress.failed.every((failure) => failure.path)
+                ) {
+                  // The list is complete, so the paths identify the landed items. When it is
+                  // capped, deriving from it would record items that never landed.
+                  const failedSet = new Set(
+                    progress.failed.map((failure) => failure.path.toLowerCase()),
+                  )
+                  keep = sources
+                    .map((_, index) => index)
+                    .filter((index) => !failedSet.has(sources[index].toLowerCase()))
+                }
+              }
+              const landed = new Set(keep)
               recordEntry(
                 undoEntryFor(kind, sources, {
                   ...options,
                   skip: sources.filter((_, index) => !landed.has(index)),
                 }),
                 options?.dirsAfter ?? [],
-                narrow(done),
+                narrow(keep),
               )
+              options?.after?.()
+              refreshPanes()
+              options?.onDone?.(false)
+              drop(denied ? 600_000 : 15000)
+              return
             }
+            recordEntry(undoEntryFor(kind, sources, options), options?.dirsAfter ?? [])
             options?.after?.()
             refreshPanes()
-            announce(t('op.canceled'))
-            options?.onDone?.(false)
-            drop(2500)
-            return
-          }
-          if (progress.failedCount > 0) {
-            const failed = progress.failedCount
-            const ok = Math.max(0, progress.total - failed)
-            announce(t('op.partial', { ok, failed }))
-            // The backend caps the failure list; past that point the index list is the
-            // only way to know which items landed (and must not be recorded as undoable).
-            const succeeded = progress.succeeded
-            const failedIndices = progress.failedIndices
-            let keep = succeeded ?? []
-            if (!keep.length) {
-              if (failedIndices?.length) {
-                const failedSet = new Set(failedIndices)
-                keep = sources.map((_, index) => index).filter((index) => !failedSet.has(index))
-              } else if (
-                progress.failed.length === progress.failedCount &&
-                // A batch-level failure carries an empty path; treating it as a path
-                // match would mark every source as landed and record a phantom undo.
-                progress.failed.every((failure) => failure.path)
-              ) {
-                // The list is complete, so the paths identify the landed items. When it is
-                // capped, deriving from it would record items that never landed.
-                const failedSet = new Set(
-                  progress.failed.map((failure) => failure.path.toLowerCase()),
-                )
-                keep = sources
-                  .map((_, index) => index)
-                  .filter((index) => !failedSet.has(sources[index].toLowerCase()))
-              }
+            remind(t('op.done'))
+            options?.onDone?.(true)
+            drop(800)
+          },
+        ).catch((e: unknown) => {
+          const guard = protectionError(e)
+          if (guard) {
+            const blocked = guard.code === 'PROTECTED'
+            setProtectPrompt({
+              mode: blocked ? 'block' : 'confirm',
+              paths: guard.paths,
+              word: blocked ? '' : protectWord(kind),
+              onConfirm: () => {
+                setProtectPrompt(null)
+                if (!blocked) launch(guard.paths)
+              },
+              onCancel: () => {
+                setProtectPrompt(null)
+                options?.onDone?.(false)
+                if (!blocked) drop(0)
+              },
+            })
+            if (blocked) {
+              options?.onDone?.(false)
+              drop(0)
             }
-            const landed = new Set(keep)
-            recordEntry(
-              undoEntryFor(kind, sources, {
-                ...options,
-                skip: sources.filter((_, index) => !landed.has(index)),
-              }),
-              options?.dirsAfter ?? [],
-              narrow(keep),
-            )
-            options?.after?.()
-            refreshPanes()
-            options?.onDone?.(false)
-            drop(denied ? 600_000 : 15000)
             return
           }
-          recordEntry(undoEntryFor(kind, sources, options), options?.dirsAfter ?? [])
-          options?.after?.()
-          refreshPanes()
-          remind(t('op.done'))
-          options?.onDone?.(true)
-          drop(800)
-        },
-      ).catch((e: unknown) => {
-        showToast(t('op.failed', { code: t(errorKey(errorCode(e))) }))
-        options?.onDone?.(false)
-        drop(4000)
-      })
+          showToast(t('op.failed', { code: t(errorKey(errorCode(e))) }))
+          options?.onDone?.(false)
+          drop(4000)
+        })
+      }
+      launch(options?.confirmedProtected)
     },
     [pushUndo, refreshPanes, settingsRef, showToast, t],
   )
@@ -801,6 +841,7 @@ export function useFileOperations({
       newName: request.newName,
       newNames: request.newNames,
       overwrite: request.overwrite,
+      confirmedProtected: request.confirmedProtected,
       after: afterDirs,
     })
       .then((ok: boolean) => {
@@ -891,6 +932,8 @@ export function useFileOperations({
     undoStack,
     redoStack,
     historyEpoch,
+    protectPrompt,
+    setProtectPrompt,
     passwordPrompt,
     setPasswordPrompt,
     extractTarget,

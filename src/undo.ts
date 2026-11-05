@@ -19,6 +19,7 @@ export type OpRequestShape = {
   newNames?: string[]
   permanent?: boolean
   overwrite?: boolean
+  confirmedProtected?: string[]
 }
 
 export type UndoEntry = UndoPayload & {

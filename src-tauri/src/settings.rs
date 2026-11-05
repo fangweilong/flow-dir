@@ -265,6 +265,12 @@ pub struct Settings {
     pub dup_max_mb_per_sec: u32,
     /// Directory names the duplicate scan never descends into.
     pub dup_exclude: Vec<String>,
+    /// Delete/move/rename on these paths (or their ancestors) is refused outright.
+    #[serde(default = "default_protect_block")]
+    pub protect_block: Vec<String>,
+    /// Delete/move/rename on these paths requires a typed confirmation.
+    #[serde(default = "default_protect_confirm")]
+    pub protect_confirm: Vec<String>,
     /// Global hotkey switch; the combination itself is in `global_hotkey`.
     pub hotkey_enabled: bool,
     /// Canonical combination such as `ctrl+alt+f`; recorded by the settings page.
@@ -461,6 +467,28 @@ fn default_dup_exclude() -> Vec<String> {
     .collect()
 }
 
+/// Environment variables keep the defaults correct on systems where the drive layout or
+/// user profile is not `C:`. They are expanded by `normalize()` before matching.
+fn default_protect_block() -> Vec<String> {
+    [
+        "%SystemRoot%",
+        "%ProgramFiles%",
+        "%ProgramFiles(x86)%",
+        "%ProgramData%",
+        "%USERPROFILE%",
+        "%USERPROFILE%\\AppData",
+        "%APPDATA%",
+        "%LOCALAPPDATA%",
+    ]
+    .iter()
+    .map(|path| path.to_string())
+    .collect()
+}
+
+fn default_protect_confirm() -> Vec<String> {
+    Vec::new()
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -511,6 +539,8 @@ impl Default for Settings {
             dup_concurrency: 0,
             dup_max_mb_per_sec: 0,
             dup_exclude: default_dup_exclude(),
+            protect_block: default_protect_block(),
+            protect_confirm: default_protect_confirm(),
             hotkey_enabled: false,
             global_hotkey: default_hotkey(),
             context_menu: false,
@@ -601,6 +631,8 @@ impl Settings {
         self.dup_concurrency = self.dup_concurrency.min(16);
         self.dup_max_mb_per_sec = self.dup_max_mb_per_sec.min(4096);
         self.dup_exclude.retain(|name| !name.trim().is_empty());
+        self.protect_block = crate::protect::normalize_rules(&self.protect_block);
+        self.protect_confirm = crate::protect::normalize_rules(&self.protect_confirm);
         self.color_rules.retain(|rule| !rule.pattern.trim().is_empty());
         self.color_rules.truncate(200);
         for rule in &mut self.color_rules {
@@ -761,6 +793,24 @@ dup_exclude = [
   "Program Files (x86)",
 ]
 
+# 文件保护：删除、移动或重命名这些路径（及其上级目录）会被直接拒绝
+# file protection: delete/move/rename on these paths or their ancestors is refused
+# 支持 %VAR% 环境变量；驱动器根目录始终受保护 / supports %VAR%; volume roots are always protected
+protect_block = [
+  "%SystemRoot%",
+  "%ProgramFiles%",
+  "%ProgramFiles(x86)%",
+  "%ProgramData%",
+  "%USERPROFILE%",
+  "%USERPROFILE%\\AppData",
+  "%APPDATA%",
+  "%LOCALAPPDATA%",
+]
+
+# 文件保护：这些路径允许操作，但必须先输入指定文字确认
+# file protection: these paths require a typed confirmation before the operation starts
+protect_confirm = []
+
 # 系统集成（全部写入 HKCU，可随时关闭；dev 构建使用独立命名空间）
 # system integration; every entry is user-level and reversible, dev builds use
 # their own key namespace
@@ -831,6 +881,10 @@ struct FileSettings {
     dup_concurrency: u32,
     dup_max_mb_per_sec: u32,
     dup_exclude: Vec<String>,
+    #[serde(default = "default_protect_block")]
+    protect_block: Vec<String>,
+    #[serde(default = "default_protect_confirm")]
+    protect_confirm: Vec<String>,
     hotkey_enabled: bool,
     global_hotkey: String,
     context_menu: bool,
@@ -890,6 +944,8 @@ impl Default for FileSettings {
             dup_concurrency: base.dup_concurrency,
             dup_max_mb_per_sec: base.dup_max_mb_per_sec,
             dup_exclude: base.dup_exclude,
+            protect_block: base.protect_block,
+            protect_confirm: base.protect_confirm,
             hotkey_enabled: base.hotkey_enabled,
             global_hotkey: base.global_hotkey,
             context_menu: base.context_menu,
@@ -950,6 +1006,8 @@ impl From<FileSettings> for Settings {
             dup_concurrency: file.dup_concurrency,
             dup_max_mb_per_sec: file.dup_max_mb_per_sec,
             dup_exclude: file.dup_exclude,
+            protect_block: file.protect_block,
+            protect_confirm: file.protect_confirm,
             hotkey_enabled: file.hotkey_enabled,
             global_hotkey: file.global_hotkey,
             context_menu: file.context_menu,
@@ -1002,7 +1060,7 @@ pub fn load<R: Runtime>(app: &AppHandle<R>) -> Settings {
             }
         }
     }
-    let defaults = Settings::default();
+    let defaults = Settings::default().normalize();
     if unreadable {
         LOAD_FAILED.store(true, Ordering::Relaxed);
     } else if !path.exists() {
@@ -1208,6 +1266,17 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), A
         exclude.push(name.as_str());
     }
     set_value(&mut doc, "dup_exclude", Value::Array(exclude));
+
+    for (key, list) in [
+        ("protect_block", &settings.protect_block),
+        ("protect_confirm", &settings.protect_confirm),
+    ] {
+        let mut paths = toml_edit::Array::new();
+        for path in list {
+            paths.push(path.as_str());
+        }
+        set_value(&mut doc, key, Value::Array(paths));
+    }
 
     let mut hidden = toml_edit::Array::new();
     for key in &settings.hidden_places {

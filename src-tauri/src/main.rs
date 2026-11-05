@@ -21,6 +21,7 @@ mod ops;
 mod pathkey;
 mod preview;
 mod privilege;
+mod protect;
 mod restore;
 mod search;
 mod settings;
@@ -603,6 +604,7 @@ async fn drag_out(app: tauri::AppHandle, paths: Vec<String>) -> Result<String, A
 fn op_start(
     app: tauri::AppHandle,
     state: tauri::State<'_, ops::OpState>,
+    cache: tauri::State<'_, settings::SettingsCache>,
     op_id: String,
     kind: String,
     sources: Vec<String>,
@@ -611,6 +613,7 @@ fn op_start(
     new_names: Option<Vec<String>>,
     permanent: bool,
     overwrite: bool,
+    confirmed_protected: Option<Vec<String>>,
     on_progress: Channel<ops::OpProgress>,
 ) -> Result<(), ApiError> {
     let hwnd = app
@@ -623,6 +626,11 @@ fn op_start(
         sources.len(),
     );
     log::debug!(target: "flowdir::ops", "op target={target_dir:?}");
+    let settings = cache.get(&app);
+    let protection = protect::Protection {
+        block: settings.protect_block.clone(),
+        confirm: settings.protect_confirm.clone(),
+    };
     ops::start(
         &state,
         ops::Request {
@@ -634,7 +642,9 @@ fn op_start(
             new_names,
             permanent,
             overwrite,
+            confirmed_protected: confirmed_protected.unwrap_or_default(),
         },
+        &protection,
         hwnd,
         on_progress,
     )

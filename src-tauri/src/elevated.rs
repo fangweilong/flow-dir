@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED,
@@ -40,6 +40,8 @@ use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
 use crate::error::ApiError;
 use crate::ops;
+use crate::protect;
+use crate::settings;
 
 /// Long copies must not be cut off, but the GUI command thread cannot wait forever either.
 const WAIT_TIMEOUT_MS: u32 = 10 * 60 * 1000;
@@ -88,6 +90,9 @@ fn parse_helper_args<I: Iterator<Item = std::ffi::OsString>>(
 struct Payload {
     nonce: String,
     request: ops::Request,
+    /// The helper has no settings cache, so the guard rules travel with the request.
+    #[serde(default)]
+    protection: protect::Protection,
 }
 
 /// Helper-process body: receives the request from the GUI pipe, runs it synchronously and
@@ -121,7 +126,7 @@ fn helper_body(
     if let Some(name) = cancel_event {
         watch_cancel(name, cancel.clone());
     }
-    let report = ops::run_headless(payload.request, cancel);
+    let report = ops::run_headless(payload.request, payload.protection, cancel);
     let bytes = serde_json::to_vec(&report)
         .map_err(|err| ApiError::new("BAD_ARGS", format!("elevated report: {err}")))?;
     write_message_sync(pipe.0, &bytes)?;
@@ -166,7 +171,13 @@ pub fn request_elevated(
     request: ops::Request,
     cancel: std::sync::Arc<AtomicBool>,
 ) -> Result<ops::ElevatedReport, ApiError> {
-    let _ = app;
+    let protection = {
+        let current = app.state::<settings::SettingsCache>().get(app);
+        protect::Protection {
+            block: current.protect_block.clone(),
+            confirm: current.protect_confirm.clone(),
+        }
+    };
     let nonce = random_hex();
     let pipe_name = format!(r"\\.\pipe\flowdir-elevated-{nonce}");
     let cancel_name = format!(r"flowdir-elevated-cancel-{nonce}");
@@ -183,6 +194,7 @@ pub fn request_elevated(
                 &pipe_name,
                 &nonce,
                 request,
+                protection,
                 cancel,
                 cancel_event,
             )
@@ -224,6 +236,7 @@ fn run_worker(
     pipe_name: &str,
     nonce: &str,
     request: ops::Request,
+    protection: protect::Protection,
     cancel: std::sync::Arc<AtomicBool>,
     cancel_event: OwnedHandle,
 ) -> Result<ops::ElevatedReport, ApiError> {
@@ -252,6 +265,7 @@ fn run_worker(
         let payload = serde_json::to_vec(&Payload {
             nonce: nonce.to_string(),
             request,
+            protection,
         })
         .map_err(|err| ApiError::new("ELEVATED", format!("request: {err}")))?;
         write_message(pipe.0, event.0, process, &payload, &cancel, budget)?;

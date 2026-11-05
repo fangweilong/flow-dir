@@ -12,6 +12,13 @@
 - 升级方式按构建形态自动分流：单文件版改名自身为 `*.old.exe` 后原地替换并等待进程退出再启动；安装版（同目录有 `uninstall.exe`）以 `/S` 静默执行 setup。修改这两条路径前先读该文件的注释与测试。
 - 开发版与正式版靠 identifier 区分：日常开发必须用 `npm run dev:app`（叠加 `src-tauri/tauri.dev.conf.json`，identifier `dev.flowdir.app.dev`）。单实例互斥名、`%APPDATA%\FlowDir-dev`、`%LOCALAPPDATA%\FlowDir-dev`、标题 `FlowDir Dev` 均由该后缀派生（见 `src-tauri/src/store.rs`），不要另建第二套开关。`release.yml` 的正式构建不带 `--config`，不要为此修改工作流。
 
+## 文件保护（危险操作拦截）
+
+- 删除、移动、重命名的路径保护统一在 `src-tauri/src/protect.rs`，由 `ops::validate()` 在 GUI 与提权 helper 两条路径执行；新增操作入口必须走这里，不要只在前端某处检查。
+- 规则来自 `settings.toml` 的 `protect_block`（硬拒绝，返回 `PROTECTED`）与 `protect_confirm`（要求输入确认，返回 `NEEDS_CONFIRM`）；驱动器根目录与 UNC 共享根目录始终硬拒绝。
+- 匹配只覆盖规则目录本身及其上级目录，子目录不受影响；`protect_confirm` 的确认由前端输入指定文字后通过 `confirmedProtected` 回传，后端重新校验，不能靠前端跳过。
+- 默认块规则使用 `%SystemRoot%` 等环境变量，`Settings::normalize()` 会把它们展开成绝对路径再保存。
+
 ## 前端架构与模块划分规范
 
 - **禁止在 `App.tsx` 堆积业务与弹窗**：`App.tsx` 仅作为顶层纯编排层（工具栏骨架、窗格容器挂载与全局快捷键分发）。单个组件或 Hook 文件代码行数原则上不超过 800 行，严禁将多模块逻辑重新塞回单一文件。

@@ -308,6 +308,7 @@ export default function App() {
     undoStack,
     redoStack,
     historyEpoch,
+    protectPrompt,
     passwordPrompt,
     setPasswordPrompt,
     extractTarget,
@@ -808,6 +809,7 @@ export default function App() {
         redoLast={redoLast}
         menu={menu}
         setMenu={setMenu}
+        protectPrompt={protectPrompt}
         passwordPrompt={passwordPrompt}
         setPasswordPrompt={setPasswordPrompt}
         extractTarget={extractTarget}

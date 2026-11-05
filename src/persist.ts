@@ -109,6 +109,10 @@ export type Settings = {
   dupMaxMbPerSec: number
   /** Directory names the duplicate scan never descends into. */
   dupExclude: string[]
+  /** Delete/move/rename on these paths (or their ancestors) is refused outright. */
+  protectBlock: string[]
+  /** Delete/move/rename on these paths requires a typed confirmation. */
+  protectConfirm: string[]
   /** Global hotkey switch; the combination itself is in `globalHotkey`. */
   hotkeyEnabled: boolean
   /** Canonical combination such as `ctrl+alt+f`. */
@@ -179,6 +183,19 @@ export const DEFAULT_SETTINGS: Settings = {
     'Program Files',
     'Program Files (x86)',
   ],
+  // The backend expands the %VAR% placeholders on load; these values only cover the
+  // window between the initial render and `settings_load`.
+  protectBlock: [
+    '%SystemRoot%',
+    '%ProgramFiles%',
+    '%ProgramFiles(x86)%',
+    '%ProgramData%',
+    '%USERPROFILE%',
+    '%USERPROFILE%\\AppData',
+    '%APPDATA%',
+    '%LOCALAPPDATA%',
+  ],
+  protectConfirm: [],
   hotkeyEnabled: false,
   globalHotkey: 'ctrl+alt+f',
   contextMenu: false,

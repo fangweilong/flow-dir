@@ -12,6 +12,7 @@ import { ColumnsSection, ConfigSection, GraphicsSection } from './components/set
 import { ShortcutsSection } from './components/settings/ShortcutsSection'
 import { IntegrationSection } from './components/settings/IntegrationSection'
 import { QuickAccessSection } from './components/settings/QuickAccessSection'
+import { ProtectionSection } from './components/settings/ProtectionSection'
 import { ColorRulesSection } from './components/settings/ColorRulesSection'
 import { ExternalPreviewSection } from './components/settings/ExternalPreviewSection'
 import { UpdatesSection } from './components/settings/UpdatesSection'
@@ -125,6 +126,17 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
       t('settings.previewSection'),
       t('settings.externalPreview'),
       ...settings.externalPreview.map((rule) => rule.ext),
+    ].join(' '),
+    protection: [
+      t('settings.protection'),
+      t('settings.protectionHint'),
+      t('settings.protectionBlock'),
+      t('settings.protectionBlockHint'),
+      t('settings.protectionConfirm'),
+      t('settings.protectionConfirmHint'),
+      t('settings.protectionAlways'),
+      ...settings.protectBlock,
+      ...settings.protectConfirm,
     ].join(' '),
     about: [
       t('settings.aboutUpdates'),
@@ -338,6 +350,13 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
               onChange={onChange}
               t={t}
               visible={isSectionVisible('quickAccess')}
+            />
+
+            <ProtectionSection
+              settings={settings}
+              onChange={onChange}
+              t={t}
+              visible={isSectionVisible('protection')}
             />
 
             <AboutSection

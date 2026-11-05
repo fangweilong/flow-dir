@@ -24,6 +24,7 @@ use windows::Win32::UI::Shell::{
 };
 
 use crate::error::ApiError;
+use crate::protect;
 
 const PROGRESS_INTERVAL_MS: u128 = 80;
 const PHASES: [&str; 6] = ["start", "copy", "move", "delete", "rename", "newdir"];
@@ -309,13 +310,28 @@ pub struct Request {
     /// Sync previews answer the shell's replace prompt up front; ordinary copies keep it.
     #[serde(default)]
     pub overwrite: bool,
+    /// Sources the user explicitly confirmed for the `protect_confirm` tier. The guard
+    /// re-checks them, so a stale or edited list cannot authorise a different path.
+    #[serde(default)]
+    pub confirmed_protected: Vec<String>,
 }
 
 /// Checks a request before it touches the shell; used by both the GUI path and the
 /// elevated helper, which receives the request as JSON from another process.
-fn validate(request: &Request, kind: Kind) -> Result<(), ApiError> {
+fn validate(
+    request: &Request,
+    kind: Kind,
+    protection: &protect::Protection,
+) -> Result<(), ApiError> {
     if request.sources.is_empty() {
         return Err(ApiError::new("EMPTY", "no source paths"));
+    }
+    if matches!(kind, Kind::Delete | Kind::Move | Kind::Rename) {
+        protect::check(
+            &request.sources,
+            protection,
+            &request.confirmed_protected,
+        )?;
     }
     if kind == Kind::Rename {
         match &request.new_names {
@@ -338,7 +354,11 @@ fn validate(request: &Request, kind: Kind) -> Result<(), ApiError> {
 /// Runs an operation to completion on the calling thread. This is the body of the
 /// elevated helper: it has no `AppHandle`, no window and no Channel back to a webview,
 /// so progress is discarded and only the final result matters.
-pub fn run_headless(request: Request, cancel: Arc<AtomicBool>) -> ElevatedReport {
+pub fn run_headless(
+    request: Request,
+    protection: protect::Protection,
+    cancel: Arc<AtomicBool>,
+) -> ElevatedReport {
     let report = |error: Option<ApiError>| ElevatedReport {
         aborted: false,
         failed: Vec::new(),
@@ -356,7 +376,7 @@ pub fn run_headless(request: Request, cancel: Arc<AtomicBool>) -> ElevatedReport
             )))
         }
     };
-    if let Err(err) = validate(&request, kind) {
+    if let Err(err) = validate(&request, kind, &protection) {
         return report(Some(err));
     }
     let outcome = run_guarded(&request.kind, || {
@@ -384,12 +404,13 @@ pub fn run_headless(request: Request, cancel: Arc<AtomicBool>) -> ElevatedReport
 pub fn start(
     state: &OpState,
     request: Request,
+    protection: &protect::Protection,
     hwnd: Option<isize>,
     progress: Channel<OpProgress>,
 ) -> Result<(), ApiError> {
     let kind = Kind::parse(&request.kind)
         .ok_or_else(|| ApiError::new("BAD_KIND", format!("unknown operation {}", request.kind)))?;
-    validate(&request, kind)?;
+    validate(&request, kind, protection)?;
     let token = state.begin(&request.op_id);
     let finish_token = token.clone();
     let err_token = finish_token.clone();
@@ -1090,6 +1111,7 @@ pub(crate) fn recycle_for_test(path: &str) -> u32 {
         new_names: None,
         permanent: false,
         overwrite: false,
+        confirmed_protected: Vec::new(),
     };
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -1171,6 +1193,7 @@ mod tests {
             new_names: None,
             permanent: false,
             overwrite: false,
+            confirmed_protected: Vec::new(),
         };
         state.record_denied(&original);
         let subset = Request {
@@ -1204,7 +1227,9 @@ mod tests {
                 new_names: None,
                 permanent: false,
                 overwrite: false,
+                confirmed_protected: Vec::new(),
             },
+            protect::Protection::default(),
             Arc::new(AtomicBool::new(false)),
         );
         assert!(report.error.is_none(), "{:?}", report.error);
@@ -1227,7 +1252,9 @@ mod tests {
                 new_names: None,
                 permanent: false,
                 overwrite: false,
+                confirmed_protected: Vec::new(),
             },
+            protect::Protection::default(),
             Arc::new(AtomicBool::new(false)),
         );
         assert_eq!(report.error.unwrap().code, "BAD_KIND");
@@ -1245,8 +1272,16 @@ mod tests {
             new_names: Some(vec!["one".into()]),
             permanent: false,
             overwrite: false,
+            confirmed_protected: Vec::new(),
         };
-        let error = start(&OpState::default(), request, None, channel).unwrap_err();
+        let error = start(
+            &OpState::default(),
+            request,
+            &protect::Protection::default(),
+            None,
+            channel,
+        )
+        .unwrap_err();
         assert_eq!(error.code, "BAD_ARGS");
     }
 
@@ -1286,6 +1321,7 @@ mod tests {
             new_names: Some(vec!["one.txt".into(), "two.txt".into()]),
             permanent: false,
             overwrite: false,
+            confirmed_protected: Vec::new(),
         };
         let outcome = run(
             &request,
@@ -1334,8 +1370,16 @@ mod tests {
             new_names: Some(vec!["one.txt".into(), "two.txt".into()]),
             permanent: false,
             overwrite: false,
+            confirmed_protected: Vec::new(),
         };
-        start(&OpState::default(), request, None, channel).unwrap();
+        start(
+            &OpState::default(),
+            request,
+            &protect::Protection::default(),
+            None,
+            channel,
+        )
+        .unwrap();
         let done = rx
             .recv_timeout(std::time::Duration::from_secs(15))
             .expect("the operation must finish");
@@ -1357,6 +1401,7 @@ mod tests {
             new_names: None,
             permanent: false,
             overwrite: false,
+            confirmed_protected: Vec::new(),
         }
     }
 
@@ -1370,6 +1415,7 @@ mod tests {
             new_names: None,
             permanent: false,
             overwrite: false,
+            confirmed_protected: Vec::new(),
         }
     }
 

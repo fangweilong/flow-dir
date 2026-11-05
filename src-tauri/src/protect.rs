@@ -1,0 +1,253 @@
+//! Guard rails for operations that would remove or relocate critical directories.
+//!
+//! The shell performs the actual work, so the guard runs in `ops::validate` before any
+//! item is queued. Both the GUI process and the elevated helper share it; the helper
+//! receives the same rules through its pipe payload because it has no settings cache.
+//!
+//! Matching is deliberately narrow: a rule protects the configured directory itself and
+//! every ancestor of it, but never its descendants. Blocking `%APPDATA%` must not stop a
+//! user from deleting `%APPDATA%\SomeApp`; blocking `%USERPROFILE%` already covers every
+//! profile ancestor such as `C:\Users`.
+
+use std::collections::HashSet;
+
+use serde::{Deserialize, Serialize};
+
+use crate::error::ApiError;
+use crate::fs::expand_path;
+
+/// Upper bound for the user-editable lists; keeps settings.toml and the per-operation
+/// normalisation bounded even if the file is hand-edited.
+pub const MAX_RULES: usize = 200;
+
+/// User-configured path lists. `block` refuses the operation outright; `confirm` allows
+/// it only when the UI collected a typed confirmation for the same sources.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct Protection {
+    pub block: Vec<String>,
+    pub confirm: Vec<String>,
+}
+
+/// Checks `sources` against the two tiers before a delete, move or rename is queued.
+///
+/// A block match wins over a confirm match, and one blocked source rejects the whole
+/// batch: partially applying a mixed selection is exactly the surprise this guard exists
+/// to prevent. `confirmed` carries the paths the user explicitly confirmed; it is matched
+/// by normalised path so a reordered or forward-slash spelling still counts.
+pub fn check(
+    sources: &[String],
+    protection: &Protection,
+    confirmed: &[String],
+) -> Result<(), ApiError> {
+    let block: Vec<String> = protection.block.iter().filter_map(|raw| rule_key(raw)).collect();
+    let confirm: Vec<String> = protection.confirm.iter().filter_map(|raw| rule_key(raw)).collect();
+    let confirmed: HashSet<String> = confirmed.iter().filter_map(|raw| key(raw)).collect();
+    let mut refused = Vec::new();
+    let mut pending = Vec::new();
+
+    for source in sources {
+        let Some(source_key) = key(source) else { continue };
+        if is_volume_root(&source_key) || block.iter().any(|rule| covers(&source_key, rule)) {
+            refused.push(source.clone());
+        } else if confirm.iter().any(|rule| covers(&source_key, rule))
+            && !confirmed.contains(&source_key)
+        {
+            pending.push(source.clone());
+        }
+    }
+
+    if !refused.is_empty() {
+        return Err(ApiError::new("PROTECTED", refused.join("\n")));
+    }
+    if !pending.is_empty() {
+        return Err(ApiError::new("NEEDS_CONFIRM", pending.join("\n")));
+    }
+    Ok(())
+}
+
+/// Expands environment variables and trims/dedupes a user-supplied rule list. The stored
+/// form stays human-readable while matching still resolves `%VAR%` spellings.
+pub fn normalize_rules(list: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for entry in list {
+        let text = expand_path(entry).trim().to_string();
+        if text.is_empty() {
+            continue;
+        }
+        if out.iter().any(|existing| existing.eq_ignore_ascii_case(&text)) {
+            continue;
+        }
+        out.push(text);
+        if out.len() == MAX_RULES {
+            break;
+        }
+    }
+    out
+}
+
+/// Comparison key for a path: absolute, backslash-separated, lexically normalised
+/// (`..` resolved without touching the filesystem) and lowercased.
+///
+/// Returns `None` for relative or device paths that cannot name a filesystem location.
+/// A literal `%` in a real file name must survive, so this does not expand variables;
+/// rule strings go through `rule_key` first.
+pub fn key(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let text = trimmed.replace('/', "\\");
+    // Long-path and device prefixes carry no meaning for comparison, and `\\?\UNC\`
+    // must become an ordinary UNC path before the share-root check sees it.
+    let text = if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else if let Some(rest) = text.strip_prefix(r"\\.\") {
+        rest.to_string()
+    } else {
+        text
+    };
+
+    let (prefix, rest) = if let Some(rest) = text.strip_prefix(r"\\") {
+        (r"\\".to_string(), rest)
+    } else {
+        let bytes = text.as_bytes();
+        if bytes.len() < 2 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' {
+            return None;
+        }
+        (text[..2].to_string(), &text[2..])
+    };
+
+    let mut parts: Vec<&str> = Vec::new();
+    for part in rest.split('\\') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    // `\\server` without a share is not a usable filesystem root.
+    if prefix == "\\\\" && parts.len() < 2 {
+        return None;
+    }
+
+    let mut out = prefix;
+    for part in parts {
+        out.push('\\');
+        out.push_str(part);
+    }
+    Some(out.to_ascii_lowercase())
+}
+
+fn rule_key(raw: &str) -> Option<String> {
+    key(&expand_path(raw))
+}
+
+/// A source covers a rule when it is the rule itself or one of its ancestors.
+fn covers(source: &str, rule: &str) -> bool {
+    source == rule
+        || (rule.len() > source.len()
+            && rule.starts_with(source)
+            && rule.as_bytes().get(source.len()) == Some(&b'\\'))
+}
+
+/// Volume roots cannot be removed through the shell anyway, but rejecting them up front
+/// keeps the user from deleting a whole drive through a path that happens to spell its
+/// root (for example `C:`).
+fn is_volume_root(key: &str) -> bool {
+    let bytes = key.as_bytes();
+    if bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return true;
+    }
+    if let Some(rest) = key.strip_prefix(r"\\") {
+        let parts: Vec<&str> = rest.split('\\').collect();
+        return parts.len() == 2 && parts.iter().all(|part| !part.is_empty());
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn protection(block: &[&str], confirm: &[&str]) -> Protection {
+        Protection {
+            block: block.iter().map(|value| value.to_string()).collect(),
+            confirm: confirm.iter().map(|value| value.to_string()).collect(),
+        }
+    }
+
+    fn sources(paths: &[&str]) -> Vec<String> {
+        paths.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn keys_resolve_dot_segments_and_windows_spellings() {
+        assert_eq!(key(r"C:\Windows\"), key(r"c:/windows"));
+        assert_eq!(key(r"\\?\C:\Windows"), key(r"C:\Windows"));
+        assert_eq!(key(r"C:\Users\me\..\Public"), key(r"C:\Users\Public"));
+        assert_eq!(key(r"\\?\UNC\server\share\dir"), key(r"\\server\share\dir"));
+        assert_eq!(key(r"\\?\C:\"), key("C:"));
+        assert_eq!(key("C:"), Some("c:".to_string()));
+        assert_eq!(key("relative\\path"), None);
+        assert_eq!(key(""), None);
+    }
+
+    #[test]
+    fn a_volume_root_is_always_blocked() {
+        let rules = Protection::default();
+        let error = check(&sources(&[r"C:\"]), &rules, &[]).unwrap_err();
+        assert_eq!(error.code, "PROTECTED");
+        let error = check(&sources(&[r"\\server\share"]), &rules, &[]).unwrap_err();
+        assert_eq!(error.code, "PROTECTED");
+        // A folder inside the share is a normal path.
+        assert!(check(&sources(&[r"\\server\share\dir"]), &rules, &[]).is_ok());
+    }
+
+    #[test]
+    fn block_matches_the_path_and_its_ancestors_only() {
+        let rules = protection(&[r"C:\Users\me\AppData"], &[]);
+        assert!(check(&sources(&[r"C:\Users\me\AppData"]), &rules, &[]).is_err());
+        assert!(check(&sources(&[r"C:\Users\me"]), &rules, &[]).is_err());
+        assert!(check(&sources(&["C:\\Users"]), &rules, &[]).is_err());
+        // Descendants stay usable: cleanup tools routinely clear app caches here.
+        assert!(check(&sources(&[r"C:\Users\me\AppData\Local\Temp"]), &rules, &[]).is_ok());
+        // A name that only shares a prefix must not match.
+        assert!(check(&sources(&[r"C:\Users\me\AppData2"]), &rules, &[]).is_ok());
+    }
+
+    #[test]
+    fn confirm_matches_until_the_same_path_is_confirmed() {
+        let rules = protection(&[], &[r"D:\Projects"]);
+        let source = sources(&[r"D:\Projects"]);
+        let error = check(&source, &rules, &[]).unwrap_err();
+        assert_eq!(error.code, "NEEDS_CONFIRM");
+        assert_eq!(error.detail, r"D:\Projects");
+        assert!(check(&source, &rules, &sources(&[r"d:/projects"])).is_ok());
+        // Confirming one path must not confirm a different one.
+        assert!(check(&source, &rules, &sources(&[r"D:\Other"])).is_err());
+    }
+
+    #[test]
+    fn block_wins_over_confirm() {
+        let rules = protection(&[r"C:\Windows"], &[r"C:\Windows"]);
+        let error = check(&sources(&[r"C:\Windows"]), &rules, &sources(&[r"C:\Windows"]))
+            .unwrap_err();
+        assert_eq!(error.code, "PROTECTED");
+    }
+
+    #[test]
+    fn normalise_expands_and_dedupes_rules() {
+        let expanded = normalize_rules(&[
+            r"C:\Windows".to_string(),
+            "  c:\\windows  ".to_string(),
+            String::new(),
+        ]);
+        assert_eq!(expanded.len(), 1);
+        assert_eq!(expanded[0], r"C:\Windows");
+    }
+}

@@ -4,7 +4,14 @@ import type { Theme } from '../../types'
 import { themeIsDark } from '../../themes'
 import { FONT_SIZE_MAX, REGION_FONT_SIZE_MIN } from '../../fonts'
 
-export type SectionId = 'general' | 'colors' | 'shortcuts' | 'quickAccess' | 'about' | 'diagnostics'
+export type SectionId =
+  | 'general'
+  | 'colors'
+  | 'shortcuts'
+  | 'quickAccess'
+  | 'protection'
+  | 'about'
+  | 'diagnostics'
 
 /**
  * Tabs are grouped by task, not by implementation: list columns and graphics live under
@@ -16,6 +23,7 @@ export const SECTIONS: { id: SectionId; label: Key }[] = [
   { id: 'colors', label: 'settings.colorRules' },
   { id: 'shortcuts', label: 'settings.shortcutsIntegration' },
   { id: 'quickAccess', label: 'settings.quickAccessPreview' },
+  { id: 'protection', label: 'settings.protection' },
   { id: 'about', label: 'settings.aboutUpdates' },
   { id: 'diagnostics', label: 'settings.diagnosticsConfig' },
 ]

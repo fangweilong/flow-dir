@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { makeT } from './i18n'
 import type { Lang } from './types'
 import { FileIcon } from './icons'
@@ -17,6 +17,11 @@ type Props = {
   items?: (string | ConfirmItem)[]
   confirmLabel: string
   danger?: boolean
+  /**
+   * High-risk confirmation: the user must type this text before the confirm button
+   * unlocks. Used for the user-configured `protect_confirm` tier.
+   */
+  requireText?: string
   lang: Lang
   onConfirm: () => void
   onClose: () => void
@@ -33,16 +38,21 @@ export function ConfirmDialog({
   items,
   confirmLabel,
   danger,
+  requireText,
   lang,
   onConfirm,
   onClose,
 }: Props) {
   const t = makeT(lang)
   const cancelRef = useRef<HTMLButtonElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const [typed, setTyped] = useState('')
+  const unlocked = !requireText || typed === requireText
 
   useEffect(() => {
-    cancelRef.current?.focus()
-  }, [])
+    if (requireText) inputRef.current?.focus()
+    else cancelRef.current?.focus()
+  }, [requireText])
 
   useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
@@ -136,6 +146,25 @@ export function ConfirmDialog({
           </div>
         ) : null}
 
+        {requireText && (
+          <div className="mt-3">
+            <div className="pb-1 text-[0.6875rem] text-muted">
+              {t('confirm.typeHint', { word: requireText })}
+            </div>
+            <input
+              ref={inputRef}
+              value={typed}
+              onChange={(ev) => setTyped(ev.target.value)}
+              onKeyDown={(ev) => {
+                if (ev.key === 'Enter' && unlocked) onConfirm()
+              }}
+              spellCheck={false}
+              autoComplete="off"
+              className="h-7 w-full rounded-md border border-line bg-surface-2 px-2 font-mono text-[0.75rem] text-fg outline-none focus:border-accent-soft focus:bg-surface"
+            />
+          </div>
+        )}
+
         <div className="mt-4 flex justify-end gap-2">
           <button
             ref={cancelRef}
@@ -148,8 +177,9 @@ export function ConfirmDialog({
           <button
             type="button"
             data-confirm-ok
+            disabled={!unlocked}
             onClick={onConfirm}
-            className={`rounded-lg px-3.5 py-1.5 text-[0.75rem] font-medium text-white shadow-sm transition-colors ${
+            className={`rounded-lg px-3.5 py-1.5 text-[0.75rem] font-medium text-white shadow-sm transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
               danger
                 ? 'bg-red-600 hover:bg-red-500 active:bg-red-700'
                 : 'bg-accent-strong hover:bg-accent active:bg-accent-deep'

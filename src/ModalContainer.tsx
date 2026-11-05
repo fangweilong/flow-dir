@@ -7,6 +7,7 @@ import type { Translate } from './i18n'
 import type { RunOpOptions } from './hooks/useFileOperations'
 import type { UndoEntry } from './undo'
 import type { SyncAction } from './ComparePanel'
+import type { ProtectPromptState } from './protection'
 import { ContextMenu } from './ContextMenu'
 import type { MenuItem } from './ContextMenu'
 const PromptDialog = lazy(() => import('./PromptDialog').then((m) => ({ default: m.PromptDialog })))
@@ -115,6 +116,7 @@ export interface ModalContainerProps {
 
   deleteConfirm: DeleteConfirmState | null
   setDeleteConfirm: (d: DeleteConfirmState | null) => void
+  protectPrompt: ProtectPromptState | null
   quitBusy: number | null
   setQuitBusy: (q: number | null) => void
   quitApp: () => Promise<void>
@@ -151,6 +153,7 @@ export function ModalContainer({
   menu,
   setMenu,
 
+  protectPrompt,
   passwordPrompt,
   setPasswordPrompt,
 
@@ -375,6 +378,33 @@ export function ModalContainer({
               setDeleteConfirm(null)
               if (pending) focusList(pending.paneId)
             }}
+          />
+        </Suspense>
+      )}
+
+      {protectPrompt && (
+        <Suspense fallback={null}>
+          <ConfirmDialog
+            lang={lang}
+            title={t(
+              protectPrompt.mode === 'block'
+                ? 'confirm.protectBlockTitle'
+                : 'confirm.protectTitle',
+            )}
+            message={t(
+              protectPrompt.mode === 'block'
+                ? 'confirm.protectBlockMessage'
+                : 'confirm.protectMessage',
+              { count: protectPrompt.paths.length },
+            )}
+            items={protectPrompt.paths}
+            confirmLabel={t(
+              protectPrompt.mode === 'block' ? 'dialog.ok' : 'confirm.protectAction',
+            )}
+            danger
+            requireText={protectPrompt.mode === 'confirm' ? protectPrompt.word : undefined}
+            onConfirm={protectPrompt.onConfirm}
+            onClose={protectPrompt.onCancel}
           />
         </Suspense>
       )}
