@@ -42,7 +42,7 @@ import { errorKey, makeT, setUiLanguage } from './i18n'
 import type { Translate } from './i18n'
 import { DEFAULT_SETTINGS } from './persist'
 import type { Settings } from './persist'
-import { isDir, isFsPath, isInsideArchive, isShellPath, joinPath } from './paths'
+import { isDir, isFsPath, isInsideArchive, isShellPath, isWebdavPath, joinPath, setWebdavConnections, WEBDAV_SCHEME } from './paths'
 import { formatBinding, resolveShortcuts } from './shortcuts'
 
 // Non-first-paint surfaces stay out of the main chunk: preview, search and the operation
@@ -179,6 +179,11 @@ export default function App() {
   tRef.current = t
   const keys = useMemo(() => resolveShortcuts(settings.shortcuts), [settings.shortcuts])
 
+  // Breadcrumbs and tab titles read the display name through this registry while the
+  // stored path keeps the stable id. It is updated during render rather than in an effect:
+  // a restored tab would otherwise keep showing the id until some unrelated re-render.
+  setWebdavConnections(settings.webdav)
+
   // Hook: tree & git
   const {
     treeOpen,
@@ -230,6 +235,25 @@ export default function App() {
   listDataRef.current = listData
   cancelDirRef.current = (tabId) => void cancelDir(tabId).catch(() => undefined)
   setDriveListRef.current = scanner.setDriveList
+
+  // The sidebar lists one expandable row per server; the drive overview keeps only real
+  // drives because capacity, eject, and shell properties do not apply to a virtual root.
+  const sidebarDrives = useMemo<Drive[]>(
+    () => [
+      ...driveList,
+      ...settings.webdav.map((conn) => ({
+        root: `${WEBDAV_SCHEME}${conn.id}/`,
+        kind: 'webdav',
+        name: conn.name,
+        label: '',
+        fs: 'WebDAV',
+        total: 0,
+        free: 0,
+        available: true,
+      })),
+    ],
+    [driveList, settings.webdav],
+  )
 
   // Keep tabs rows in memory & evict inactive
   useEffect(() => {
@@ -437,7 +461,17 @@ export default function App() {
         .catch((err: unknown) => {
           const code = errorCode(err)
           if (code === 'NO_ASSOCIATION') {
-            void openWith(targetPath).catch((e: unknown) => {
+            // A remote file has no local path; the backend's error detail carries the
+            // cached copy it downloaded, which is what "Open with" must hand to the shell.
+            const detail =
+              isWebdavPath(targetPath) &&
+              err &&
+              typeof err === 'object' &&
+              'detail' in err &&
+              typeof err.detail === 'string'
+                ? err.detail
+                : ''
+            void openWith(detail || targetPath).catch((e: unknown) => {
               showToast(t('op.failed', { code: t(errorKey(errorCode(e))) }))
             })
             return
@@ -574,8 +608,9 @@ export default function App() {
       const pane = current.panes[current.activePaneId]
       const tab = pane ? current.tabs[pane.activeTabId] : undefined
       if (!tab) return
-      // Shell locations are listed by the backend too; anything else is handed to the shell.
-      if (!isFsPath(path) && !isShellPath(path)) {
+      // Shell locations and WebDAV servers are listed by the backend too; anything else is
+      // handed to the shell.
+      if (!isFsPath(path) && !isShellPath(path) && !isWebdavPath(path)) {
         openTarget(path)
         return
       }
@@ -661,7 +696,7 @@ export default function App() {
               treeFocus={treeFocus}
               openTreePath={openTreePath}
               openPlaceMenu={openPlaceMenu}
-              driveList={driveList}
+              driveList={sidebarDrives}
               treeOpen={treeOpen}
               treeNodes={treeNodes}
               treeTruncated={treeTruncated}

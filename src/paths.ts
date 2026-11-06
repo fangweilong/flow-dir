@@ -1,19 +1,92 @@
 /** Case-insensitive identity for a Windows path, used as a cache/render key. */
 export const pathKey = (path: string) => path.toLowerCase()
 
+/** Virtual address scheme for WebDAV servers, e.g. `webdav://nas/photos`. */
+export const WEBDAV_SCHEME = 'webdav://'
+
 /**
- * Resolves a typed address against the current folder. Absolute drives and UNC paths pass
- * through, while `.`, `..` and nested names are joined and normalized; quotes pasted from
- * Explorer are stripped. Returns '' only for an empty input.
+ * Connection names for the breadcrumb. The backend stores the stable id in the tab path,
+ * so a renamed connection must not require rewriting workspaces.
+ */
+let webdavDirectory: { id: string; name: string }[] = []
+
+export function setWebdavConnections(list: { id: string; name: string }[]) {
+  webdavDirectory = list.map(({ id, name }) => ({ id, name }))
+}
+
+/** Display name for a connection id; the id itself when the connection is gone. */
+export function webdavConnectionName(id: string): string {
+  const found = webdavDirectory.find((entry) => entry.id.toLowerCase() === id.toLowerCase())
+  return found?.name || id
+}
+
+/** Accepts either an id or a display name in the address bar. */
+function webdavId(raw: string): string {
+  const found = webdavDirectory.find(
+    (entry) =>
+      entry.id.toLowerCase() === raw.toLowerCase() || entry.name.toLowerCase() === raw.toLowerCase(),
+  )
+  return found?.id ?? raw
+}
+
+export const isWebdavPath = (path: string) =>
+  path.length >= WEBDAV_SCHEME.length &&
+  path.slice(0, WEBDAV_SCHEME.length).toLowerCase() === WEBDAV_SCHEME
+
+/** `webdav://id/a/b` → connection `id` and `['a','b']`; `.`/`..` are resolved. */
+export function webdavParts(path: string): { id: string; segments: string[] } {
+  const rest = path.slice(WEBDAV_SCHEME.length).replace(/\\/g, '/')
+  const [rawId, ...tail] = rest.split('/')
+  const segments: string[] = []
+  for (const part of tail.join('/').split('/')) {
+    if (!part || part === '.') continue
+    if (part === '..') {
+      segments.pop()
+      continue
+    }
+    segments.push(part)
+  }
+  return { id: webdavId(rawId ?? ''), segments }
+}
+
+/** Canonical virtual address: root keeps a trailing slash, deeper paths do not. */
+function webdavAddress(path: string): string {
+  const { id, segments } = webdavParts(path)
+  if (!id) return ''
+  return segments.length ? `${WEBDAV_SCHEME}${id}/${segments.join('/')}` : `${WEBDAV_SCHEME}${id}/`
+}
+
+/** Paths the panes can list, including shell namespaces and WebDAV servers. */
+export const isNavigablePath = (path: string) =>
+  isFsPath(path) || isShellPath(path) || isWebdavPath(path)
+
+/**
+ * Resolves a typed address against the current folder. Absolute drives, UNC paths and
+ * `webdav://` addresses pass through, while `.`, `..` and nested names are joined and
+ * normalized; quotes pasted from Explorer are stripped. Returns '' only for an empty input.
  */
 export function resolveAddress(base: string, raw: string): string {
   let text = raw.trim()
   const quoted = text.match(/^"(.*)"$/)
   if (quoted) text = quoted[1].trim()
   if (!text) return ''
-  text = text.replace(/\//g, '\\')
-  if (/^[a-zA-Z]:$/.test(text)) return `${text}\\`
-  if (/^[a-zA-Z]:/.test(text) || text.startsWith('\\\\') || isShellPath(text)) return text
+  if (isWebdavPath(text)) return webdavAddress(text)
+  // Absolute Windows targets are recognised with either separator, as before.
+  const windowsText = text.replace(/\//g, '\\')
+  if (/^[a-zA-Z]:$/.test(windowsText)) return `${windowsText}\\`
+  if (
+    /^[a-zA-Z]:/.test(windowsText) ||
+    windowsText.startsWith('\\\\') ||
+    isShellPath(windowsText)
+  ) {
+    return windowsText
+  }
+  // A remote base resolves relative names with forward slashes, not with the Windows
+  // separator the local branch below uses.
+  if (isWebdavPath(base)) {
+    return webdavAddress(`${base.replace(/\/+$/, '')}/${text.replace(/\\/g, '/')}`)
+  }
+  text = windowsText
   // A shell location has no parent to resolve relative names against.
   if (!base || isShellPath(base)) return text
 
@@ -37,8 +110,12 @@ export function resolveAddress(base: string, raw: string): string {
   return parts.join('\\')
 }
 
-export const joinPath = (dir: string, name: string) =>
-  dir.endsWith('\\') ? `${dir}${name}` : `${dir}\\${name}`
+export const joinPath = (dir: string, name: string) => {
+  if (isWebdavPath(dir)) {
+    return `${dir.replace(/\/+$/, '')}/${name.replace(/^\/+/, '')}`
+  }
+  return dir.endsWith('\\') ? `${dir}${name}` : `${dir}\\${name}`
+}
 
 /** Shell-namespace location (recycle bin, control panel) rather than a filesystem path. */
 export const isShellPath = (path: string) => path.startsWith('shell:') || path.startsWith('::')
@@ -47,6 +124,15 @@ export const isShellPath = (path: string) => path.startsWith('shell:') || path.s
 export const entryPath = (dir: string, entry: { name: string; href?: string }) =>
   entry.href || joinPath(dir, entry.name)
 
+/** Short label for chrome that has no room for a full path: the last segment, or a connection name. */
+export function pathLabel(path: string): string {
+  if (isWebdavPath(path)) {
+    const { id, segments } = webdavParts(path)
+    return segments.length ? segments[segments.length - 1] : webdavConnectionName(id)
+  }
+  return path.split('\\').filter(Boolean).pop() ?? path
+}
+
 /** Trailing segment of a path, for building a destination from a source path. */
 export const baseName = (path: string) => {
   const cut = Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'))
@@ -54,6 +140,12 @@ export const baseName = (path: string) => {
 }
 
 export function parentPath(p: string): string {
+  if (isWebdavPath(p)) {
+    const { id, segments } = webdavParts(p)
+    if (!segments.length) return ''
+    segments.pop()
+    return segments.length ? `${WEBDAV_SCHEME}${id}/${segments.join('/')}` : `${WEBDAV_SCHEME}${id}/`
+  }
   const norm = p.replace(/\\+$/, '')
   // The drive overview is the top; a drive or share root climbs back to it.
   if (!norm || isShellPath(norm)) return ''
@@ -70,6 +162,7 @@ export function parentPath(p: string): string {
 
 /** Drive root (`C:\`) or UNC share root (`\\server\share`) that contains `p`. */
 export function volumeRoot(p: string): string {
+  if (isWebdavPath(p)) return `${WEBDAV_SCHEME}${webdavParts(p).id}/`
   const norm = p.replace(/\//g, '\\')
   if (isShellPath(norm)) return ''
   if (norm.startsWith('\\\\')) {
@@ -92,6 +185,16 @@ export function treeChain(path: string): string[] {
 }
 
 export function crumbs(p: string): { label: string; path: string }[] {
+  if (isWebdavPath(p)) {
+    const { id, segments } = webdavParts(p)
+    const out = [{ label: webdavConnectionName(id), path: `${WEBDAV_SCHEME}${id}/` }]
+    let acc = `${WEBDAV_SCHEME}${id}`
+    for (const segment of segments) {
+      acc = `${acc}/${segment}`
+      out.push({ label: segment, path: acc })
+    }
+    return out
+  }
   // Shell locations are one opaque node; their parsing name is not a filesystem hierarchy.
   if (isShellPath(p)) return [{ label: p, path: p }]
   const norm = p.replace(/\\+$/, '') || p
@@ -123,6 +226,9 @@ export const isFsPath = (path: string) => /^[a-zA-Z]:/.test(path) || path.starts
 export function underPath(path: string, root: string): boolean {
   const p = path.toLowerCase()
   const r = root.toLowerCase()
+  if (isWebdavPath(path) || isWebdavPath(root)) {
+    return p === r || p.startsWith(r.endsWith('/') ? r : `${r}/`)
+  }
   return p === r || p.startsWith(r.endsWith('\\') ? r : `${r}\\`)
 }
 
@@ -131,6 +237,13 @@ export function underPath(path: string, root: string): boolean {
  * paths count as their `\\server\share` root, which is the closest thing to a volume.
  */
 export function sameVolume(a: string, b: string): boolean {
+  if (isWebdavPath(a) || isWebdavPath(b)) {
+    // One connection behaves like one volume: drag inside it moves, across servers copies.
+    const connection = (path: string) =>
+      isWebdavPath(path) ? webdavParts(path).id.toLowerCase() : ''
+    const left = connection(a)
+    return left !== '' && left === connection(b)
+  }
   const root = (path: string): string => {
     const drive = /^[a-zA-Z]:/.exec(path)
     if (drive) return drive[0].toLowerCase()

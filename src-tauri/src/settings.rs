@@ -271,6 +271,9 @@ pub struct Settings {
     /// Delete/move/rename on these paths requires a typed confirmation.
     #[serde(default = "default_protect_confirm")]
     pub protect_confirm: Vec<String>,
+    /// Named WebDAV servers shown in the sidebar. Passwords live in Windows Credential
+    /// Manager, keyed by [`WebdavConnection::id`], and never enter this file.
+    pub webdav: Vec<WebdavConnection>,
     /// Global hotkey switch; the combination itself is in `global_hotkey`.
     pub hotkey_enabled: bool,
     /// Canonical combination such as `ctrl+alt+f`; recorded by the settings page.
@@ -283,6 +286,26 @@ pub struct Settings {
     pub autostart: bool,
     /// With `autostart`, launch without showing the main window.
     pub autostart_minimized: bool,
+}
+
+/// One WebDAV server. `id` is the stable key used in `webdav://<id>/…` paths and in the
+/// credential-manager target; renaming the display name must not change it, or open tabs
+/// and saved passwords would lose their server.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WebdavConnection {
+    pub id: String,
+    pub name: String,
+    /// Absolute `http(s)://host[:port]/base` URL, without a trailing slash.
+    pub url: String,
+    pub username: String,
+    /// Optional folder under `url` that becomes the virtual root; no leading/trailing slash.
+    pub root: String,
+    /// Accept self-signed/expired certificates. Scoped to this connection, never global.
+    /// The alias keeps the on-disk spelling snake_case like the rest of `settings.toml`,
+    /// while the IPC payload stays camelCase.
+    #[serde(alias = "insecure_tls")]
+    pub insecure_tls: bool,
 }
 
 fn default_language() -> String {
@@ -541,6 +564,7 @@ impl Default for Settings {
             dup_exclude: default_dup_exclude(),
             protect_block: default_protect_block(),
             protect_confirm: default_protect_confirm(),
+            webdav: Vec::new(),
             hotkey_enabled: false,
             global_hotkey: default_hotkey(),
             context_menu: false,
@@ -643,12 +667,84 @@ impl Settings {
             rule.foreground = sanitize_color(&rule.foreground);
             rule.background = sanitize_color(&rule.background);
         }
+        self.webdav = normalize_webdav(std::mem::take(&mut self.webdav));
         self.global_hotkey = self.global_hotkey.trim().to_ascii_lowercase();
         if self.global_hotkey.is_empty() || self.global_hotkey.len() > 64 {
             self.global_hotkey = default_hotkey();
         }
         self
     }
+}
+
+/// Upper bound for the sidebar list; keeps a hand-edited file from turning the tree into
+/// thousands of HTTP connections.
+const MAX_WEBDAV: usize = 32;
+
+/// Repairs connection entries and removes unusable ones. A URL is only required for a
+/// connection to be kept; a missing name falls back to the URL so the sidebar still has a
+/// label, and a missing id is derived from the name.
+fn normalize_webdav(list: Vec<WebdavConnection>) -> Vec<WebdavConnection> {
+    let mut out: Vec<WebdavConnection> = Vec::new();
+    for mut conn in list.into_iter().take(MAX_WEBDAV) {
+        conn.name = conn.name.trim().to_string();
+        conn.url = conn.url.trim().trim_end_matches('/').to_string();
+        conn.username = conn.username.trim().to_string();
+        if conn.url.is_empty() {
+            continue;
+        }
+        if conn.name.is_empty() {
+            conn.name = conn.url.clone();
+        }
+        conn.id = sanitize_webdav_id(&conn.id);
+        if conn.id.is_empty() {
+            conn.id = sanitize_webdav_id(&conn.name);
+        }
+        if conn.id.is_empty() {
+            conn.id = format!("dav-{}", out.len() + 1);
+        }
+        // Two connections sharing an id would make `webdav://id/…` ambiguous and overwrite
+        // each other's stored password.
+        let base = conn.id.clone();
+        let mut suffix = 1;
+        while out.iter().any(|existing| existing.id.eq_ignore_ascii_case(&conn.id)) {
+            suffix += 1;
+            conn.id = format!("{base}-{suffix}");
+        }
+        conn.root = normalize_webdav_root(&conn.root);
+        out.push(conn);
+    }
+    out
+}
+
+/// Path-safe connection key: letters, digits, `_`, `-` and `.` survive; everything else is
+/// replaced by `-`. Unicode letters are kept so a Chinese name remains readable.
+fn sanitize_webdav_id(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.trim().chars() {
+        if ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.') {
+            out.push(ch);
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_matches('-').chars().take(64).collect()
+}
+
+/// `\a\b\..\c` → `a/c`; leading and trailing separators are dropped.
+fn normalize_webdav_root(raw: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    let normalized = raw.replace('\\', "/");
+    for part in normalized.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            parts.pop();
+            continue;
+        }
+        parts.push(part);
+    }
+    parts.join("/")
 }
 
 const FILE: &str = "settings.toml";
@@ -885,6 +981,8 @@ struct FileSettings {
     protect_block: Vec<String>,
     #[serde(default = "default_protect_confirm")]
     protect_confirm: Vec<String>,
+    /// Passwords are not part of this shape; they live in Credential Manager.
+    webdav: Vec<WebdavConnection>,
     hotkey_enabled: bool,
     global_hotkey: String,
     context_menu: bool,
@@ -946,6 +1044,7 @@ impl Default for FileSettings {
             dup_exclude: base.dup_exclude,
             protect_block: base.protect_block,
             protect_confirm: base.protect_confirm,
+            webdav: base.webdav,
             hotkey_enabled: base.hotkey_enabled,
             global_hotkey: base.global_hotkey,
             context_menu: base.context_menu,
@@ -1008,6 +1107,7 @@ impl From<FileSettings> for Settings {
             dup_exclude: file.dup_exclude,
             protect_block: file.protect_block,
             protect_confirm: file.protect_confirm,
+            webdav: file.webdav,
             hotkey_enabled: file.hotkey_enabled,
             global_hotkey: file.global_hotkey,
             context_menu: file.context_menu,
@@ -1248,6 +1348,21 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), A
         "global_hotkey",
         Value::from(settings.global_hotkey.as_str()),
     );
+    // Connection entries are inline tables for the same reason as `custom_places`: they keep
+    // their position in the document, so the comments around them survive a rewrite.
+    let mut webdav = toml_edit::Array::new();
+    for conn in &settings.webdav {
+        let mut entry = toml_edit::InlineTable::new();
+        entry.insert("id", Value::from(conn.id.as_str()));
+        entry.insert("name", Value::from(conn.name.as_str()));
+        entry.insert("url", Value::from(conn.url.as_str()));
+        entry.insert("username", Value::from(conn.username.as_str()));
+        entry.insert("root", Value::from(conn.root.as_str()));
+        entry.insert("insecure_tls", Value::from(conn.insecure_tls));
+        webdav.push(Value::InlineTable(entry));
+    }
+    set_value(&mut doc, "webdav", Value::Array(webdav));
+
     set_value(&mut doc, "context_menu", Value::from(settings.context_menu));
     set_value(
         &mut doc,
@@ -1528,6 +1643,53 @@ mod tests {
             .list_name_width;
             assert_eq!(got, want, "{bad}");
         }
+    }
+
+    #[test]
+    fn webdav_connections_survive_a_file_round_trip() {
+        // `settings.toml` is snake_case while the IPC payload is camelCase; the alias on
+        // `insecure_tls` is what keeps both readable from the same struct.
+        let text = r#"
+webdav = [{ id = "nas", name = "NAS", url = "https://nas.example/dav", username = "me", root = "photos", insecure_tls = true }]
+"#;
+        let parsed: FileSettings = toml_edit::de::from_str(text).unwrap();
+        let settings = Settings::from(parsed).normalize();
+        assert_eq!(settings.webdav.len(), 1);
+        assert_eq!(settings.webdav[0].id, "nas");
+        assert_eq!(settings.webdav[0].root, "photos");
+        assert!(settings.webdav[0].insecure_tls);
+    }
+
+    #[test]
+    fn webdav_ids_are_repaired_and_deduplicated() {
+        let settings = Settings {
+            webdav: vec![
+                WebdavConnection {
+                    id: "家用 NAS".into(),
+                    name: "家用 NAS".into(),
+                    url: "https://a.example/dav/".into(),
+                    ..Default::default()
+                },
+                WebdavConnection {
+                    id: "".into(),
+                    name: "家用 NAS".into(),
+                    url: "https://b.example/dav".into(),
+                    ..Default::default()
+                },
+                WebdavConnection {
+                    id: "ignored".into(),
+                    name: "no url".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Settings::default()
+        }
+        .normalize();
+        // The entry without a URL is dropped; the second copy of the derived id gets a suffix.
+        assert_eq!(settings.webdav.len(), 2);
+        assert_eq!(settings.webdav[0].id, "家用-NAS");
+        assert_ne!(settings.webdav[0].id, settings.webdav[1].id);
+        assert_eq!(settings.webdav[0].url, "https://a.example/dav");
     }
 
     #[test]

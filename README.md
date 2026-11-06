@@ -35,6 +35,7 @@ Tauri 2 + Rust 后端，React 19 前端。
   - 「容量/剩余」列可拖动宽度，双击恢复默认；
   - 盘符右键可看属性、弹出可移动设备；
   - 同时列出 `%APPDATA%\Microsoft\Windows\Network Shortcuts` 中的「网络位置」（UNC 站内浏览，WebDAV 等 URL 目标交给系统打开）。
+- WebDAV：在设置中维护多个连接，密码保存在 Windows 凭据管理器；侧边栏直接浏览，支持上传/下载、新建、重命名、删除以及本地与远端之间的复制/移动（远端删除不可恢复）。
 - 大目录边扫描边显示进度，达到上限时明确提示截断。
 
 ### 搜索
@@ -183,6 +184,7 @@ Tauri 2 + Rust 后端，React 19 前端。
 | `%APPDATA%\FlowDir\layout.json` | 窗格/标签/窗口几何，启动恢复；损坏时降级并保留 `.rejected.json` |
 | `%APPDATA%\FlowDir\update.json` | 上次更新检查时间、最近一次发现的版本与发布记录缓存 |
 | `%LOCALAPPDATA%\FlowDir\EBWebView` | WebView2 浏览器配置 |
+| `%LOCALAPPDATA%\FlowDir\webdav` | WebDAV 预览/打开时下载的本地缓存，按大小与修改时间复用 |
 
 ## 性能
 
@@ -216,6 +218,7 @@ screenshots/      README 与文档截图
 - 以管理员身份运行时，Windows 的 UIPI 会拦截向普通权限程序（资源管理器、VS Code 等）的拖放；需要拖出时请以普通权限启动 FlowDir。系统关闭 UAC 时所有程序都会以管理员权限启动，标题栏权限按钮会说明此时无法切换；需要普通权限请开启 UAC 并重新登录。
 - 系统通知在单文件免安装形态下可能被 Windows 的 AUMID 规则拦下，此时仍会闪烁任务栏并在界面内提示。
 - Everything 为可选依赖，未安装或未运行时使用内置扫描。
+- WebDAV 文件在预览或「打开」时下载到本地缓存；外部程序对缓存副本的修改不会回传到服务器，需要重新上传。
 
 ## 第三方图标资源
 

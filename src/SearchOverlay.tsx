@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { revealPath, searchCancel, searchStart, sortOrder } from './api'
 import type { ContentOptions } from './api'
 import { errorKey, makeT } from './i18n'
-import { formatSize, parentPath, volumeRoot } from './paths'
+import { formatSize, isWebdavPath, parentPath, volumeRoot } from './paths'
 import { FileIcon } from './icons'
 import { EntryStateBadges, entryStateTitle, entryStateTone } from './components/EntryStateBadge'
 import { colorRuleFor, colorRuleStyle } from './colorRules'
@@ -99,15 +99,29 @@ export function SearchOverlay({
   const inputRef = useRef<HTMLInputElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
-  const driveRoot = volumeRoot(root)
+  // A remote root has no volume to scan and cannot be searched at all.
+  const driveRoot = isWebdavPath(root) ? '' : volumeRoot(root)
   const otherTabs = useMemo(
-    () => openTabs?.filter((tab) => tab.path && tab.path.toLowerCase() !== root.toLowerCase()) ?? [],
+    () =>
+      openTabs?.filter(
+        (tab) =>
+          tab.path &&
+          !isWebdavPath(tab.path) &&
+          tab.path.toLowerCase() !== root.toLowerCase(),
+      ) ?? [],
     [openTabs, root],
   )
   const searchRoots = useMemo(() => {
     if (scope === 'drive' && driveRoot) return [driveRoot]
     if (scope === 'all-tabs' && openTabs?.length) {
-      return Array.from(new Set(openTabs.map((tab) => tab.path).filter(Boolean)))
+      // Remote tabs stay out of the scope: the walker only understands local directories.
+      return Array.from(
+        new Set(
+          openTabs
+            .map((tab) => tab.path)
+            .filter((path): path is string => Boolean(path) && !isWebdavPath(path)),
+        ),
+      )
     }
     if (scope.startsWith('tab:')) {
       const tabPath = scope.slice(4)
@@ -214,6 +228,19 @@ export function SearchOverlay({
       setProvider('')
       setLoading(false)
       setError(null)
+      void searchCancel().catch(() => undefined)
+      return
+    }
+    // A remote server has no enumerable tree for Everything or the local walker. Say so
+    // here instead of starting a job the backend will reject.
+    if (searchRoots.some(isWebdavPath)) {
+      gen.current += 1
+      setItems([])
+      setSelected(new Set())
+      setActivePath(null)
+      setProvider('')
+      setLoading(false)
+      setError({ code: 'WEBDAV_SEARCH', detail: '' })
       void searchCancel().catch(() => undefined)
       return
     }

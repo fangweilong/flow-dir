@@ -1,6 +1,7 @@
 import { useState, useSyncExternalStore } from 'react'
 import { fileIconKey, folderIconKey } from './iconThemes/catalog'
 import { useIconTheme } from './iconThemes'
+import { isWebdavPath } from './paths'
 
 /**
  * Icon URLs are cached by WebView2, so associations changed outside the app would stick
@@ -107,7 +108,10 @@ export function FileIcon({
   const revision = useSyncExternalStore(subscribeIconRevision, iconRevisionSnapshot)
   const dim = size ? `${size}px` : '1.25em'
   const style = { width: dim, height: dim }
-  if (thumb && path && !dir && failed !== 'thumb') {
+  // The icon protocol and shell thumbnails need a local path; WebDAV rows fall through to
+  // the theme or extension icon instead of requesting a file that does not exist.
+  const remote = Boolean(path && isWebdavPath(path))
+  if (thumb && path && !dir && !remote && failed !== 'thumb') {
     const px = Math.max(16, Math.round((size ?? 96) * (window.devicePixelRatio || 1)))
     return (
       <img
@@ -139,7 +143,7 @@ export function FileIcon({
         />
       )
     }
-  } else if (theme.id === 'system' && path && failed !== 'system') {
+  } else if (theme.id === 'system' && path && !remote && failed !== 'system') {
     const px = Math.max(16, Math.round((size ?? 20 * scale) * (window.devicePixelRatio || 1)))
     return (
       <img

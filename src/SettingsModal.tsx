@@ -13,6 +13,7 @@ import { ShortcutsSection } from './components/settings/ShortcutsSection'
 import { IntegrationSection } from './components/settings/IntegrationSection'
 import { QuickAccessSection } from './components/settings/QuickAccessSection'
 import { ProtectionSection } from './components/settings/ProtectionSection'
+import { WebdavSection } from './components/settings/WebdavSection'
 import { ColorRulesSection } from './components/settings/ColorRulesSection'
 import { ExternalPreviewSection } from './components/settings/ExternalPreviewSection'
 import { UpdatesSection } from './components/settings/UpdatesSection'
@@ -126,6 +127,22 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
       t('settings.previewSection'),
       t('settings.externalPreview'),
       ...settings.externalPreview.map((rule) => rule.ext),
+    ].join(' '),
+    webdav: [
+      t('settings.webdav'),
+      t('settings.webdavHint'),
+      t('settings.webdavAdd'),
+      t('settings.webdavEmpty'),
+      t('settings.webdavName'),
+      t('settings.webdavUrl'),
+      t('settings.webdavUsername'),
+      t('settings.webdavRoot'),
+      t('settings.webdavPassword'),
+      t('settings.webdavInsecure'),
+      t('settings.webdavTest'),
+      t('settings.webdavSave'),
+      t('settings.webdavDelete'),
+      ...settings.webdav.map((conn) => `${conn.name} ${conn.url} ${conn.root}`),
     ].join(' '),
     protection: [
       t('settings.protection'),
@@ -350,6 +367,13 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
               onChange={onChange}
               t={t}
               visible={isSectionVisible('quickAccess')}
+            />
+
+            <WebdavSection
+              settings={settings}
+              onChange={onChange}
+              t={t}
+              visible={isSectionVisible('webdav')}
             />
 
             <ProtectionSection

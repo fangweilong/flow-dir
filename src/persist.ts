@@ -25,6 +25,22 @@ export type ColorRule = {
 /** Backend diagnostic log verbosity. */
 export type LogLevel = 'error' | 'warn' | 'info' | 'debug'
 
+/**
+ * One WebDAV server. `id` is the stable address component (`webdav://<id>/…`) and the
+ * credential-manager key; editing the display name must not change it.
+ */
+export type WebdavConnection = {
+  id: string
+  name: string
+  /** Absolute `http(s)://host[:port]/base` URL without a trailing slash. */
+  url: string
+  username: string
+  /** Folder under `url` used as the virtual root; no leading/trailing slash. */
+  root: string
+  /** Accept self-signed or expired certificates for this server only. */
+  insecureTls: boolean
+}
+
 export type Settings = {
   language: Lang
   theme: Theme
@@ -38,6 +54,8 @@ export type Settings = {
   previewWidth: number
   customPlaces: QuickPlace[]
   hiddenPlaces: string[]
+  /** Named WebDAV servers; passwords live in Windows Credential Manager. */
+  webdav: WebdavConnection[]
   externalPreview: ExternalPreviewRule[]
   colorRules: ColorRule[]
   shortcuts: ShortcutOverride[]
@@ -138,6 +156,7 @@ export const DEFAULT_SETTINGS: Settings = {
   previewWidth: 320,
   customPlaces: [],
   hiddenPlaces: [],
+  webdav: [],
   externalPreview: [],
   colorRules: [],
   shortcuts: [],

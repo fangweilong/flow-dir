@@ -19,6 +19,7 @@ import {
   isArchiveMember,
   isInsideArchive,
   isShellPath,
+  isWebdavPath,
   joinPath,
   parentPath,
   pathKey,
@@ -267,6 +268,12 @@ export function useDragAndDrop({
         detach()
         setRowDrag(null)
         const rawPaths = selectedNames().map((name) => joinPath(sourceDir, name))
+        // OLE drops are file-system transfers, and a WebDAV path has no local file for
+        // Explorer to receive. In-app drops remain available (they run through our ops).
+        if (rawPaths.some(isWebdavPath)) {
+          showToast(t('drag.remoteOut'))
+          return
+        }
         void archivePrepareDrag(rawPaths)
           .then((paths) => dragOut(paths))
           .then((effect) => {

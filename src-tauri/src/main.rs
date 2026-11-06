@@ -3,6 +3,7 @@
 
 mod archive;
 mod clipboard;
+mod credentials;
 mod compare;
 mod dragout;
 mod elevated;
@@ -34,6 +35,8 @@ mod theme;
 mod titlebar;
 mod update;
 mod watch;
+mod webdav;
+mod webdav_ops;
 mod webview_mem;
 
 use std::collections::HashMap;
@@ -122,6 +125,8 @@ struct DirBatch {
 
 #[tauri::command(rename_all = "camelCase")]
 fn list_dir(
+    app: tauri::AppHandle,
+    cache: tauri::State<'_, settings::SettingsCache>,
     state: tauri::State<'_, AppState>,
     path: String,
     tab_id: String,
@@ -131,6 +136,7 @@ fn list_dir(
     hidden: bool,
     on_batch: Channel<DirBatch>,
 ) -> Result<(), ApiError> {
+    let settings = cache.get(&app);
     let cancel = state.begin(&tab_id);
     let guard = ScanGuard {
         scans: state.scans.clone(),
@@ -150,7 +156,13 @@ fn list_dir(
         // Progress-only batches go out while the directory is still being read, so a slow
         // share grows the counter instead of leaving the pane on a spinner.
         let mut reported = 0usize;
-        let archive_target = archive::resolve_archive_path(&path);
+        let remote_dir = webdav::is_webdav(&path);
+        // Archives are local files; a virtual path is never probed on disk.
+        let archive_target = if remote_dir {
+            None
+        } else {
+            archive::resolve_archive_path(&path)
+        };
         let archive_dir = archive_target.is_some();
         if archive_dir {
             // Listing an archive means enumerating all of it before the first row is
@@ -166,8 +178,10 @@ fn list_dir(
                 error: None,
             });
         }
-        let shell_dir = shellfs::is_shell_path(&path);
-        let outcome = if let Some((archive_path, inner_path)) = archive_target {
+        let shell_dir = !remote_dir && shellfs::is_shell_path(&path);
+        let outcome = if remote_dir {
+            webdav::list(&settings, &path, hidden, &cancel)
+        } else if let Some((archive_path, inner_path)) = archive_target {
             archive::enumerate_virtual(&archive_path, &inner_path, &cancel)
         } else if shell_dir {
             shellfs::enumerate(&path, hidden, &cancel)
@@ -366,10 +380,20 @@ struct TreeListing {
 /// Children for the sidebar tree. Capped so a pathological folder cannot flood the panel;
 /// the tree only asks for expanded nodes.
 #[tauri::command(rename_all = "camelCase")]
-async fn tree_dirs(path: String, hidden: bool) -> Result<TreeListing, ApiError> {
+async fn tree_dirs(
+    app: tauri::AppHandle,
+    cache: tauri::State<'_, settings::SettingsCache>,
+    path: String,
+    hidden: bool,
+) -> Result<TreeListing, ApiError> {
+    let settings = cache.get(&app);
     tauri::async_runtime::spawn_blocking(move || {
         let cancel = AtomicBool::new(false);
-        let outcome = fs::enumerate_dirs(&path, hidden, TREE_SCAN_LIMIT, &cancel)?;
+        let outcome = if webdav::is_webdav(&path) {
+            webdav::tree_dirs(&settings, &path, hidden, TREE_LIMIT, &cancel)?
+        } else {
+            fs::enumerate_dirs(&path, hidden, TREE_SCAN_LIMIT, &cancel)?
+        };
         let mut entries = outcome.entries;
         fs::sort_entries(&mut entries, "name", "asc");
         let truncated = outcome.truncated || entries.len() > TREE_LIMIT;
@@ -394,8 +418,19 @@ async fn expand_path(raw: String) -> String {
 }
 
 #[tauri::command]
-async fn path_is_dir(path: String) -> bool {
-    tauri::async_runtime::spawn_blocking(move || {
+async fn path_is_dir(
+    app: tauri::AppHandle,
+    cache: tauri::State<'_, settings::SettingsCache>,
+    path: String,
+) -> Result<bool, ApiError> {
+    let settings = cache.get(&app);
+    let is_dir = tauri::async_runtime::spawn_blocking(move || {
+        if webdav::is_webdav(&path) {
+            return webdav::stat(&settings, &path)
+                .ok()
+                .flatten()
+                .is_some_and(|stat| stat.is_dir);
+        }
         let expanded = fs::expand_path(&path);
         let p = std::path::Path::new(&expanded);
         if p.is_dir() {
@@ -404,7 +439,8 @@ async fn path_is_dir(path: String) -> bool {
         archive::is_archive_or_inner_dir(&expanded)
     })
     .await
-    .unwrap_or(false)
+    .map_err(|e| ApiError::new("THREAD", e.to_string()))?;
+    Ok(is_dir)
 }
 
 #[tauri::command]
@@ -416,21 +452,71 @@ async fn quick_access() -> Vec<fs::Place> {
 
 /// Which of `paths` already exist, for a rename/move preview that must not overwrite.
 #[tauri::command]
-async fn paths_exist(paths: Vec<String>) -> Vec<bool> {
+async fn paths_exist(
+    app: tauri::AppHandle,
+    cache: tauri::State<'_, settings::SettingsCache>,
+    paths: Vec<String>,
+) -> Result<Vec<bool>, ApiError> {
+    let settings = cache.get(&app);
     let count = paths.len();
-    tauri::async_runtime::spawn_blocking(move || naming::existing(&paths))
-        .await
-        .unwrap_or_else(|_| vec![false; count])
+    let flags = tauri::async_runtime::spawn_blocking(move || {
+        let local: Vec<String> = paths
+            .iter()
+            .filter(|path| !webdav::is_webdav(path))
+            .cloned()
+            .collect();
+        let mut local_flags = naming::existing(&local).into_iter();
+        paths
+            .iter()
+            .map(|path| {
+                if webdav::is_webdav(path) {
+                    webdav::exists(&settings, path)
+                } else {
+                    local_flags.next().unwrap_or(false)
+                }
+            })
+            .collect()
+    })
+    .await
+    .unwrap_or_else(|_| vec![false; count]);
+    Ok(flags)
 }
 
 /// Free "name (n)" variants of every path, in the same order as the input.
 #[tauri::command]
-async fn unique_paths(paths: Vec<String>, sources: Option<Vec<String>>) -> Vec<String> {
+async fn unique_paths(
+    app: tauri::AppHandle,
+    cache: tauri::State<'_, settings::SettingsCache>,
+    paths: Vec<String>,
+    sources: Option<Vec<String>>,
+) -> Result<Vec<String>, ApiError> {
+    let settings = cache.get(&app);
     let fallback = paths.clone();
     let sources = sources.unwrap_or_default();
-    tauri::async_runtime::spawn_blocking(move || naming::unique(&paths, &sources))
-        .await
-        .unwrap_or(fallback)
+    let unique = tauri::async_runtime::spawn_blocking(move || {
+        let mut out = webdav::unique_paths(&settings, &paths, &sources);
+        // Local entries keep the existing filesystem-aware naming; only remote entries were
+        // answered above.
+        let indices: Vec<usize> = paths
+            .iter()
+            .enumerate()
+            .filter(|(_, path)| !webdav::is_webdav(path))
+            .map(|(index, _)| index)
+            .collect();
+        let local_paths: Vec<String> = indices.iter().map(|index| paths[*index].clone()).collect();
+        let local_sources: Vec<String> = indices
+            .iter()
+            .map(|index| sources.get(*index).cloned().unwrap_or_default())
+            .collect();
+        let named = naming::unique(&local_paths, &local_sources);
+        for (slot, index) in indices.into_iter().enumerate() {
+            out[index] = named[slot].clone();
+        }
+        out
+    })
+    .await
+    .unwrap_or(fallback);
+    Ok(unique)
 }
 
 #[derive(serde::Deserialize)]
@@ -497,7 +583,18 @@ fn settings_save(
     cache: tauri::State<'_, settings::SettingsCache>,
     settings: settings::Settings,
 ) -> Result<Vec<String>, ApiError> {
+    let previous = cache.get(&app);
     let settings = settings.normalize();
+    // A removed connection must not leave its password behind in Credential Manager.
+    for old in &previous.webdav {
+        if !settings
+            .webdav
+            .iter()
+            .any(|conn| conn.id.eq_ignore_ascii_case(&old.id))
+        {
+            let _ = credentials::delete(&old.id);
+        }
+    }
     settings::save(&app, &settings)?;
     crate::logging::set_level(&settings.log_level);
     // Integration switches apply immediately; the returned codes let the frontend toast a
@@ -505,6 +602,34 @@ fn settings_save(
     let warnings = shell_integration::apply(&app, &settings);
     cache.set(settings);
     Ok(warnings)
+}
+
+/// Saves (or clears, for an empty password) the WebDAV password in Credential Manager. The
+/// value is never echoed back and never enters `settings.toml`. The username comes from the
+/// form rather than the cached settings: saving a new connection is debounced, so the
+/// credential write can arrive before the connection exists in the cache.
+#[tauri::command(rename_all = "camelCase")]
+fn webdav_set_password(id: String, username: String, password: String) -> Result<(), ApiError> {
+    credentials::save(&id, &username, &password)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn webdav_has_password(id: String) -> bool {
+    credentials::has(&id)
+}
+
+/// Probes a saved connection, or an unsaved draft from the settings form. A supplied
+/// password is used for this probe only; it is not stored until "save" is pressed.
+#[tauri::command(rename_all = "camelCase")]
+async fn webdav_test(
+    connection: settings::WebdavConnection,
+    password: Option<String>,
+) -> Result<(), ApiError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        webdav::test(&connection, password.as_deref())
+    })
+    .await
+    .map_err(|e| ApiError::new("THREAD", e.to_string()))?
 }
 
 #[tauri::command]
@@ -647,6 +772,7 @@ fn op_start(
         &protection,
         hwnd,
         on_progress,
+        settings,
     )
 }
 
@@ -1114,9 +1240,23 @@ async fn preview_info(
     // Archive central directories and version resources can sit on a network share:
     // never inspect a file on the IPC thread.
     let settings = cache.get(&app);
+    let cache_root = store::cache_dir(&app).ok().map(|dir| dir.join("webdav"));
     let external = settings.external_preview.clone();
     let limits = preview::Limits::from_settings(&settings);
     tauri::async_runtime::spawn_blocking(move || {
+        if webdav::is_webdav(&path) {
+            let root = cache_root
+                .ok_or_else(|| ApiError::new("CONFIG_DIR", "webdav cache unavailable"))?;
+            let local = webdav::ensure_local(&root, &settings, &path, Some(limits.max_bytes))?;
+            return preview::info(
+                local.to_string_lossy().into_owned(),
+                width,
+                bg,
+                &external,
+                limits,
+                hydrate.unwrap_or(false),
+            );
+        }
         if let Some((archive_path, inner_path)) = archive::resolve_archive_path(&path) {
             if !inner_path.is_empty() {
                 if archive::is_inner_dir(&archive_path, &inner_path)? {
@@ -1159,13 +1299,27 @@ async fn preview_info(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn preview_external(
+async fn preview_external(
     app: tauri::AppHandle,
     cache: tauri::State<'_, settings::SettingsCache>,
     path: String,
 ) -> Result<(), ApiError> {
     let settings = cache.get(&app);
-    preview::launch_external(&path, &settings.external_preview)
+    let cache_root = store::cache_dir(&app).ok().map(|dir| dir.join("webdav"));
+    tauri::async_runtime::spawn_blocking(move || {
+        let target = if webdav::is_webdav(&path) {
+            let root = cache_root
+                .ok_or_else(|| ApiError::new("CONFIG_DIR", "webdav cache unavailable"))?;
+            webdav::ensure_local(&root, &settings, &path, None)?
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            path
+        };
+        preview::launch_external(&target, &settings.external_preview)
+    })
+    .await
+    .map_err(|e| ApiError::new("THREAD", e.to_string()))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1188,6 +1342,10 @@ fn search_start(
         Some(list) if !list.is_empty() => list,
         _ => vec![root],
     };
+    // Everything and `jwalk` walk local filesystems; a remote root has no enumerable tree.
+    if search_roots.iter().any(|path| webdav::is_webdav(path)) {
+        return Err(ApiError::new("WEBDAV_SEARCH", "WebDAV paths cannot be searched"));
+    }
     let log_root = if search_roots.len() == 1 {
         search_roots[0].clone()
     } else {
@@ -1425,10 +1583,46 @@ fn config_warnings() -> Vec<&'static str> {
 }
 
 #[tauri::command]
-async fn open_path(path: String) -> Result<(), ApiError> {
+async fn open_path(
+    app: tauri::AppHandle,
+    cache: tauri::State<'_, settings::SettingsCache>,
+    path: String,
+) -> Result<(), ApiError> {
+    let settings = cache.get(&app);
+    let cache_root = store::cache_dir(&app).ok().map(|dir| dir.join("webdav"));
     // A member inside an archive is decompressed first; that and the shell hand-off can
     // take seconds, and a sync command body runs on the WebView2 thread.
     tauri::async_runtime::spawn_blocking(move || {
+        if webdav::is_webdav(&path) {
+            let root = cache_root
+                .ok_or_else(|| ApiError::new("CONFIG_DIR", "webdav cache unavailable"))?;
+            let local = webdav::ensure_local(&root, &settings, &path, None)?;
+            let wide: Vec<u16> = local
+                .to_string_lossy()
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let result = unsafe {
+                ShellExecuteW(
+                    None,
+                    w!("open"),
+                    PCWSTR(wide.as_ptr()),
+                    PCWSTR::null(),
+                    PCWSTR::null(),
+                    SW_SHOWNORMAL,
+                )
+            };
+            let code = result.0 as isize;
+            if code > 32 {
+                return Ok(());
+            }
+            return Err(match code {
+                31 => ApiError::new("NO_ASSOCIATION", local.to_string_lossy().into_owned()),
+                2 => ApiError::new("NOT_FOUND", local.to_string_lossy().into_owned()),
+                5 => ApiError::new("ACCESS_DENIED", local.to_string_lossy().into_owned()),
+                _ => ApiError::new("SHELL_FAILED", format!("ShellExecuteW 返回 {code}")),
+            });
+        }
         if shellfs::is_shell_path(&path) {
             return shellfs::open(&path);
         }
@@ -1969,6 +2163,9 @@ fn main() {
             layout_load,
             settings_load,
             settings_save,
+            webdav_set_password,
+            webdav_has_password,
+            webdav_test,
             take_launch_request,
             tray_recent,
             config_path,

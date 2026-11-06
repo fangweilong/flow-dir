@@ -9,6 +9,7 @@ export type SectionId =
   | 'colors'
   | 'shortcuts'
   | 'quickAccess'
+  | 'webdav'
   | 'protection'
   | 'about'
   | 'diagnostics'
@@ -23,6 +24,7 @@ export const SECTIONS: { id: SectionId; label: Key }[] = [
   { id: 'colors', label: 'settings.colorRules' },
   { id: 'shortcuts', label: 'settings.shortcutsIntegration' },
   { id: 'quickAccess', label: 'settings.quickAccessPreview' },
+  { id: 'webdav', label: 'settings.webdav' },
   { id: 'protection', label: 'settings.protection' },
   { id: 'about', label: 'settings.aboutUpdates' },
   { id: 'diagnostics', label: 'settings.diagnosticsConfig' },

@@ -1277,7 +1277,7 @@ dependencies = [
 
 [[package]]
 name = "flowdir"
-version = "0.6.32"
+version = "0.6.33"
 dependencies = [
  "bzip2",
  "cab",
@@ -1289,6 +1289,7 @@ dependencies = [
  "lzma-rust2 0.24.0",
  "notify",
  "percent-encoding",
+ "quick-xml",
  "regex",
  "ruzstd",
  "serde",

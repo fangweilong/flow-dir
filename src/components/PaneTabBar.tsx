@@ -2,6 +2,7 @@ import React from 'react'
 import type { PaneState, TabState } from '../workspace'
 import type { Translate } from '../i18n'
 import type { MenuPoint } from '../PaneView'
+import { pathLabel } from '../paths'
 
 export interface PaneTabBarProps {
   pane: PaneState
@@ -113,9 +114,7 @@ export function PaneTabBar({
                 </span>
               )}
               <span className="max-w-[9.375rem] truncate">
-                {tabState.path
-                  ? (tabState.path.split('\\').filter(Boolean).pop() ?? tabState.path)
-                  : t('sidebar.thisPc')}
+                {tabState.path ? pathLabel(tabState.path) : t('sidebar.thisPc')}
               </span>
               <button
                 type="button"

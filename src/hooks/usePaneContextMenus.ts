@@ -10,7 +10,7 @@ import type { ShortcutId } from '../shortcuts'
 import type { Translate } from '../i18n'
 import { driveKindLabel } from '../i18n'
 import { menuHint } from '../shortcuts'
-import { baseName, entryPath, isArchiveName, isDir, isFsPath, isInsideArchive, isShellPath, joinPath } from '../paths'
+import { baseName, entryPath, isArchiveName, isDir, isFsPath, isInsideArchive, isShellPath, isWebdavPath, joinPath } from '../paths'
 import {
   clipboardCopy,
   COMPRESS_FORMATS,
@@ -159,7 +159,10 @@ export function usePaneContextMenus({
       const pane = wsRef.current?.panes[paneId]
       const tabPath = pane ? wsRef.current?.tabs[pane.activeTabId]?.path : undefined
       const inArchive = Boolean(tabPath && isInsideArchive(tabPath))
-      const isArchive = !dir && paths.length === 1 && tabPath && !inArchive && isArchiveName(entry.name)
+      // Remote archives cannot be extracted in-process, and the shell menu does not run
+      // for a WebDAV folder at all, so the fallback menu is the only menu they get.
+      const remote = Boolean(tabPath && isWebdavPath(tabPath))
+      const isArchive = !remote && !dir && paths.length === 1 && tabPath && !inArchive && isArchiveName(entry.name)
       const archivePath = isArchive ? entryPath(tabPath!, entry) : null
       const archiveMenu: MenuItem[] = archivePath
         ? [
@@ -177,7 +180,7 @@ export function usePaneContextMenus({
           ]
         : []
       const compressMenu: MenuItem[] =
-        tabPath !== undefined
+        tabPath !== undefined && !remote
           ? [
               {
                 kind: 'item',
@@ -256,13 +259,17 @@ export function usePaneContextMenus({
                 danger: true,
                 onSelect: () => deleteEntries(paneId, [entry.name], false),
               },
-              {
-                kind: 'item' as const,
-                label: t('menu.deletePermanent'),
-                hint: menuHint(`shift+${keys.delete}`),
-                danger: true,
-                onSelect: () => deleteEntries(paneId, [entry.name], true),
-              },
+              ...(remote
+                ? []
+                : [
+                    {
+                      kind: 'item' as const,
+                      label: t('menu.deletePermanent'),
+                      hint: menuHint(`shift+${keys.delete}`),
+                      danger: true,
+                      onSelect: () => deleteEntries(paneId, [entry.name], true),
+                    },
+                  ]),
               ...archiveMenu,
               ...compressMenu,
               ...(dir && paths.length === 1
@@ -273,20 +280,33 @@ export function usePaneContextMenus({
                       label: isPinnedPlace(paths[0]) ? t('sidebar.unpinPlace') : t('sidebar.pinPlace'),
                       onSelect: () => togglePinPlace(paths[0]),
                     },
-                    {
-                      kind: 'item' as const,
-                      label: t('menu.openTerminal'),
-                      onSelect: () =>
-                        void openTerminal(paths[0]).catch((e: unknown) =>
-                          showToast(t('op.failed', { code: errorCode(e) })),
-                        ),
-                    },
+                    ...(remote
+                      ? []
+                      : [
+                          {
+                            kind: 'item' as const,
+                            label: t('menu.openTerminal'),
+                            onSelect: () =>
+                              void openTerminal(paths[0]).catch((e: unknown) =>
+                                showToast(t('op.failed', { code: errorCode(e) })),
+                              ),
+                          },
+                        ]),
                   ]
                 : []),
             ]
           : []),
+        ...(remote
+          ? []
+          : [
+              { kind: 'sep' as const },
+              {
+                kind: 'item' as const,
+                label: t('menu.hash'),
+                onSelect: () => setFileTools({ mode: 'hash', paths }),
+              },
+            ]),
         { kind: 'sep' },
-        { kind: 'item', label: t('menu.hash'), onSelect: () => setFileTools({ mode: 'hash', paths }) },
         { kind: 'item', label: t('menu.copyPath'), onSelect: () => copyPaths(paths) },
       ]
     },
@@ -328,7 +348,7 @@ export function usePaneContextMenus({
         const item = byName?.get(name)
         return item ? entryPath(tab.path, item) : joinPath(tab.path, name)
       })
-      if (tab.path && isInsideArchive(tab.path)) {
+      if (tab.path && (isInsideArchive(tab.path) || isWebdavPath(tab.path))) {
         setMenu({ x: point.clientX, y: point.clientY, items: rowFallback(paneId, entry, paths) })
         return
       }
@@ -386,6 +406,9 @@ export function usePaneContextMenus({
       // Shell locations expose only the shell's own commands; local file operations and
       // scans have no filesystem path to run against.
       const inShell = Boolean(tab.path && isShellPath(tab.path))
+      // WebDAV still supports new folder/paste/refresh, but terminal, Explorer, folder
+      // size, duplicate scan and compare all need a local filesystem path.
+      const remote = Boolean(tab.path && isWebdavPath(tab.path))
       const items: MenuItem[] = tab.path
         ? [
             ...(!inArchive && !inShell
@@ -412,7 +435,7 @@ export function usePaneContextMenus({
               },
             },
             { kind: 'sep' },
-            ...(!inArchive && !inShell
+            ...(!inArchive && !inShell && !remote
               ? [
                   {
                     kind: 'item' as const,
@@ -437,7 +460,7 @@ export function usePaneContextMenus({
               label: pane.hidden ? t('list.hideHidden') : t('list.showHidden'),
               onSelect: () => toggleHidden(paneId),
             },
-            ...(!inShell
+            ...(!inShell && !remote
               ? [
                   {
                     kind: 'item' as const,
@@ -485,7 +508,7 @@ export function usePaneContextMenus({
       const pane = current.panes[paneId]
       const tab = pane ? current.tabs[pane.activeTabId] : undefined
       if (!pane || !tab) return
-      if (!tab.path) {
+      if (!tab.path || isWebdavPath(tab.path)) {
         blankFallbackMenu(paneId, point)
         return
       }
@@ -626,6 +649,7 @@ export function usePaneContextMenus({
       const current = wsRef.current
       const pane = current?.panes[current.activePaneId]
       const tab = pane && current ? current.tabs[pane.activeTabId] : undefined
+      const remote = isWebdavPath(targetPath)
       const items: MenuItem[] = [
         {
           kind: 'item',
@@ -645,14 +669,18 @@ export function usePaneContextMenus({
             else navigate(pane.activeTabId, targetPath)
           },
         },
-        {
-          kind: 'item',
-          label: t('menu.openInExplorer'),
-          onSelect: () =>
-            void explorerOpen(targetPath).catch((e: unknown) =>
-              showToast(t('op.failed', { code: errorCode(e) })),
-            ),
-        },
+        ...(remote
+          ? []
+          : [
+              {
+                kind: 'item' as const,
+                label: t('menu.openInExplorer'),
+                onSelect: () =>
+                  void explorerOpen(targetPath).catch((e: unknown) =>
+                    showToast(t('op.failed', { code: errorCode(e) })),
+                  ),
+              },
+            ]),
         {
           kind: 'item',
           label: isPinnedPlace(targetPath) ? t('sidebar.unpinPlace') : t('sidebar.pinPlace'),
@@ -664,14 +692,18 @@ export function usePaneContextMenus({
           label: t('menu.copyPath'),
           onSelect: () => copyPaths([targetPath]),
         },
-        {
-          kind: 'item',
-          label: t('menu.properties'),
-          onSelect: () =>
-            void shellProperties(targetPath).catch((e: unknown) =>
-              showToast(t('op.failed', { code: errorCode(e) })),
-            ),
-        },
+        ...(remote
+          ? []
+          : [
+              {
+                kind: 'item' as const,
+                label: t('menu.properties'),
+                onSelect: () =>
+                  void shellProperties(targetPath).catch((e: unknown) =>
+                    showToast(t('op.failed', { code: errorCode(e) })),
+                  ),
+              },
+            ]),
       ]
       setMenu({ x: point.clientX, y: point.clientY, items })
     },
@@ -690,7 +722,7 @@ export function usePaneContextMenus({
           disabled: !tab,
           onSelect: () => {
             if (!tab) return
-            if (isFsPath(drive.root)) navigate(tab.id, drive.root)
+            if (isFsPath(drive.root) || isWebdavPath(drive.root)) navigate(tab.id, drive.root)
             else openTarget(drive.root)
           },
         },
@@ -717,14 +749,18 @@ export function usePaneContextMenus({
               },
             ]
           : []),
-        {
-          kind: 'item',
-          label: t('menu.properties'),
-          onSelect: () =>
-            void shellProperties(drive.root).catch((e: unknown) =>
-              showToast(t('op.failed', { code: errorCode(e) })),
-            ),
-        },
+        ...(isWebdavPath(drive.root)
+          ? []
+          : [
+              {
+                kind: 'item' as const,
+                label: t('menu.properties'),
+                onSelect: () =>
+                  void shellProperties(drive.root).catch((e: unknown) =>
+                    showToast(t('op.failed', { code: errorCode(e) })),
+                  ),
+              },
+            ]),
       ]
       if (drive.kind === 'removable' || drive.kind === 'cdrom') {
         items.push(

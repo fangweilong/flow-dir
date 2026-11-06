@@ -1,5 +1,5 @@
 import { memo } from 'react'
-import { isFsPath, joinPath, pathKey } from './paths'
+import { isFsPath, isWebdavPath, joinPath, pathKey } from './paths'
 import type { Drive } from './types'
 
 /** Indent per level, capped so a deep tree cannot consume the whole sidebar. */
@@ -56,7 +56,7 @@ export function SidebarTree({
           path={drive.root}
           name={drive.name}
           depth={0}
-          glyph={drive.kind === 'location' ? 'network' : 'drive'}
+          glyph={drive.kind === 'location' || drive.kind === 'webdav' ? 'network' : 'drive'}
           open={open}
           nodes={nodes}
           truncated={truncated}
@@ -109,7 +109,7 @@ const TreeRow = memo(function TreeRow({
   const expanded = key in open
   const selected = key === selectedKey
   const current = !selected && key === currentKey
-  const expandable = isFsPath(path)
+  const expandable = isFsPath(path) || isWebdavPath(path)
   const kids = expanded ? nodes[key] : undefined
   return (
     <>

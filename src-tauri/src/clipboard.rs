@@ -1,9 +1,11 @@
 use std::ptr;
+use std::sync::Mutex;
 
 use windows::core::{w, BOOL};
 use windows::Win32::Foundation::{GlobalFree, HANDLE, POINT};
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+    CloseClipboard, EmptyClipboard, GetClipboardSequenceNumber, OpenClipboard,
+    RegisterClipboardFormatW, SetClipboardData,
 };
 use windows::Win32::System::Memory::{
     GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
@@ -16,6 +18,17 @@ use crate::error::ApiError;
 const DROPEFFECT_COPY: u32 = 1;
 const DROPEFFECT_MOVE: u32 = 2;
 
+/// A WebDAV path has no `CF_HDROP` form, and writing it anyway would make Explorer paste
+/// a literal `webdav://…` filename. The full selection therefore lives here while the OS
+/// clipboard receives only the local subset. `sequence` is the clipboard sequence number
+/// right after that write: once another app changes the clipboard, the internal copy is
+/// stale and must not resurface.
+struct InternalClip {
+    clip: Clip,
+    sequence: u32,
+}
+
+static INTERNAL: Mutex<Option<InternalClip>> = Mutex::new(None);
 
 fn open_clipboard_with_retry() -> windows::core::Result<()> {
     for _ in 0..5 {
@@ -26,11 +39,39 @@ fn open_clipboard_with_retry() -> windows::core::Result<()> {
     }
     unsafe { OpenClipboard(None) }
 }
-/// Puts `paths` on the clipboard as `CF_HDROP` so Explorer can paste them.
+
+/// Puts `paths` on the clipboard as `CF_HDROP` so Explorer can paste them. A selection
+/// containing WebDAV paths keeps the complete list in-process (see [`InternalClip`]).
 pub fn copy_paths(paths: &[String], cut: bool) -> Result<(), ApiError> {
     if paths.is_empty() {
         return Err(ApiError::new("EMPTY", "没有选中任何项目"));
     }
+    let local: Vec<String> = paths
+        .iter()
+        .filter(|path| !crate::webdav::is_webdav(path))
+        .cloned()
+        .collect();
+    let has_remote = local.len() != paths.len();
+
+    write_os_paths(&local, cut)?;
+    let mut internal = INTERNAL.lock().unwrap();
+    if has_remote {
+        *internal = Some(InternalClip {
+            clip: Clip {
+                paths: paths.to_vec(),
+                cut,
+            },
+            sequence: unsafe { GetClipboardSequenceNumber() },
+        });
+    } else {
+        *internal = None;
+    }
+    Ok(())
+}
+
+/// Writes the shell-compatible subset. An empty list still empties the clipboard, so a
+/// remote-only copy cannot leave an unrelated file list behind for a later paste.
+fn write_os_paths(paths: &[String], cut: bool) -> Result<(), ApiError> {
     let mut wide: Vec<u16> = Vec::new();
     for path in paths {
         wide.extend(path.encode_utf16());
@@ -45,6 +86,9 @@ pub fn copy_paths(paths: &[String], cut: bool) -> Result<(), ApiError> {
         open_clipboard_with_retry().map_err(|e| ApiError::new("CLIPBOARD", e.to_string()))?;
         let result = (|| -> windows::core::Result<()> {
             EmptyClipboard()?;
+            if paths.is_empty() {
+                return Ok(());
+            }
             let hglobal = GlobalAlloc(GMEM_MOVEABLE, size)?;
             let target = GlobalLock(hglobal);
             if target.is_null() {
@@ -108,10 +152,23 @@ pub struct Clip {
     pub cut: bool,
 }
 
-/// Reads `CF_HDROP` (plus `Preferred DropEffect`) written by Explorer or by us.
+/// Reads `CF_HDROP` (plus `Preferred DropEffect`) written by Explorer or by us. A still
+/// current in-process WebDAV selection takes precedence because it also carries the remote
+/// paths that `CF_HDROP` could not represent.
 pub fn read_paths() -> Result<Clip, ApiError> {
     use windows::Win32::System::DataExchange::GetClipboardData;
     use windows::Win32::UI::Shell::DragQueryFileW;
+
+    let sequence = unsafe { GetClipboardSequenceNumber() };
+    {
+        let mut internal = INTERNAL.lock().unwrap();
+        if let Some(stored) = internal.as_ref() {
+            if stored.sequence == sequence {
+                return Ok(stored.clip.clone());
+            }
+            *internal = None;
+        }
+    }
 
     unsafe {
         open_clipboard_with_retry().map_err(|e| ApiError::new("CLIPBOARD", e.to_string()))?;

@@ -5,7 +5,7 @@ import { EMPTY_GIT } from '../types'
 import type { Settings } from '../persist'
 import type { Workspace } from '../workspace'
 import { gitStatus, treeDirs } from '../api'
-import { isFsPath, pathKey } from '../paths'
+import { isFsPath, isWebdavPath, pathKey } from '../paths'
 
 export const GIT_CACHE_LIMIT = 64
 
@@ -46,7 +46,7 @@ export function useTreeAndGit({
 
   const loadTree = useCallback((path: string, force = false) => {
     const key = pathKey(path)
-    if (!isFsPath(path) || treePending.current.has(key)) return
+    if ((!isFsPath(path) && !isWebdavPath(path)) || treePending.current.has(key)) return
     if (!force && (treeNodesRef.current[key] || treeErrorsRef.current[key])) return
     treePending.current.add(key)
     const generation = ++treeCounter.current
@@ -157,7 +157,7 @@ export function useTreeAndGit({
 
   const loadGit = useCallback((dir: string) => {
     const key = pathKey(dir)
-    if (!dir || gitPending.current.has(key)) return
+    if (!isFsPath(dir) || gitPending.current.has(key)) return
     const seq = (gitSeq.current.get(key) ?? 0) + 1
     gitSeq.current.set(key, seq)
     gitPending.current.add(key)
@@ -195,7 +195,7 @@ export function useTreeAndGit({
     const missing: string[] = []
     for (const pane of Object.values(ws.panes)) {
       const tab = ws.tabs[pane.activeTabId]
-      if (tab?.path && !(pathKey(tab.path) in gitByDir)) missing.push(tab.path)
+      if (tab?.path && isFsPath(tab.path) && !(pathKey(tab.path) in gitByDir)) missing.push(tab.path)
     }
     if (!missing.length) return
     const timer = window.setTimeout(() => {

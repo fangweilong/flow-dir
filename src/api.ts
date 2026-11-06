@@ -1,7 +1,7 @@
 import { Channel, invoke } from '@tauri-apps/api/core'
 import type { ApiError, AppInfo, Clip, CompareCount, CompareHashEvent, CompareHashPair, CompareLevel, DirBatch, Drive, DupProgress, ElevatedReport, HashProgress, MenuOutcome, OpKind, OpProgress, Place, ReleaseEntry, UpdateStatus } from './types'
 import type { GitStatus, LaunchRequest, PreviewInfo, SearchBatch } from './types'
-import type { Settings } from './persist'
+import type { Settings, WebdavConnection } from './persist'
 
 export function listDir(
   path: string,
@@ -60,6 +60,14 @@ export const layoutLoad = () => invoke<unknown>('layout_load')
 export const layoutPreserve = () => invoke<string>('layout_preserve')
 
 export const settingsLoad = () => invoke<Settings>('settings_load')
+/** Probes a WebDAV server with PROPFIND (Depth 0); a blank password uses the stored one. */
+export const webdavTest = (connection: WebdavConnection, password?: string) =>
+  invoke<void>('webdav_test', { connection, password })
+/** Stores the password in Windows Credential Manager; an empty string removes it. */
+export const webdavSetPassword = (id: string, username: string, password: string) =>
+  invoke<void>('webdav_set_password', { id, username, password })
+/** True when Windows Credential Manager holds a password for the connection. */
+export const webdavHasPassword = (id: string) => invoke<boolean>('webdav_has_password', { id })
 export const configWarnings = () => invoke<string[]>('config_warnings')
 /** Returns integration warning codes so the caller can toast a hotkey conflict. */
 export const settingsSave = (settings: Settings) => invoke<string[]>('settings_save', { settings })

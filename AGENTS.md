@@ -19,6 +19,15 @@
 - 匹配只覆盖规则目录本身及其上级目录，子目录不受影响；`protect_confirm` 的确认由前端输入指定文字后通过 `confirmedProtected` 回传，后端重新校验，不能靠前端跳过。
 - 默认块规则使用 `%SystemRoot%` 等环境变量，`Settings::normalize()` 会把它们展开成绝对路径再保存。
 
+## WebDAV
+
+- 虚拟地址统一为 `webdav://<connection-id>/<相对路径>`。`id` 是 `settings.toml` 中 `webdav[].id` 的稳定键，也用于凭据管理器；显示名随时可改，禁止把显示名写进标签页、历史或布局。前端注册表（`src/paths.ts#setWebdavConnections`）只负责面包屑与标签标题。
+- 密码只存 Windows 凭据管理器（`src-tauri/src/credentials.rs`，target `FlowDir/WebDAV/<id>`）。密码不得出现在 `settings.toml`、日志或任何 IPC 响应里；`webdav_set_password` 不依赖设置缓存，新增连接可先写凭据再等防抖保存。
+- 协议实现集中在 `src-tauri/src/webdav.rs`（WinHTTP + `quick-xml`，不新增网络/加密依赖）。TLS 忽略仅按连接生效，不得改成全局开关。
+- 任何涉及 `webdav://` 源或目标的复制/移动/删除/重命名/新建都必须走 `ops::validate`，再由 `ops::run` 的 `involves_webdav` 路由到 `webdav_ops::run`；不要绕过保护、进度与取消另开通道。远端没有回收站，前端删除必须强制 `permanent: true`，且不记录可恢复的撤销项。
+- 内部剪贴板：`clipboard.rs` 只把本地子集写入 `CF_HDROP`，完整选择留在进程内并以剪贴板序列号失效；不要假设系统剪贴板能表达 `webdav://`。
+- 搜索、目录大小、去重、压缩/解压、哈希、终端、属性页只支持本地路径，菜单必须隐藏；`list_dir`、`tree_dirs`、`path_is_dir`、`paths_exist`、`unique_paths`、`open_path`、`preview_*` 已按路径分流，新增命令时保持同样的判断。
+
 ## 前端架构与模块划分规范
 
 - **禁止在 `App.tsx` 堆积业务与弹窗**：`App.tsx` 仅作为顶层纯编排层（工具栏骨架、窗格容器挂载与全局快捷键分发）。单个组件或 Hook 文件代码行数原则上不超过 800 行，严禁将多模块逻辑重新塞回单一文件。

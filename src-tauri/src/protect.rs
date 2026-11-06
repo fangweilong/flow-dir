@@ -137,7 +137,11 @@ pub fn key(raw: &str) -> Option<String> {
 
     let mut out = prefix;
     for part in parts {
-        out.push('\\');
+        // A UNC prefix already ends with a separator; adding another would produce
+        // `\\\server\share`, which no longer looks like a share root.
+        if !out.ends_with('\\') {
+            out.push('\\');
+        }
         out.push_str(part);
     }
     Some(out.to_ascii_lowercase())

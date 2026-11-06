@@ -12,7 +12,7 @@ import type { ListData } from '../types'
 import type { Translate } from '../i18n'
 import { errorKey } from '../i18n'
 import type { Workspace } from '../workspace'
-import { baseName, entryPath, hasArchiveAncestor, isArchiveMember, isInsideArchive, joinPath } from '../paths'
+import { baseName, entryPath, hasArchiveAncestor, isArchiveMember, isInsideArchive, isWebdavPath, joinPath } from '../paths'
 
 const errorCode = (err: unknown): string =>
   err && typeof err === 'object' && 'code' in err && typeof err.code === 'string'
@@ -114,13 +114,21 @@ export function useFileActionHandlers({
     // new folder. Freeze the absolute paths here instead.
     const paths = pathsFor(paneId, names)
     if (paths.length !== names.length) return
-    setDeleteConfirm({ paneId, names, paths, permanent })
+    // WebDAV has no recycle bin: the backend deletes permanently, so the dialog must say
+    // so and the undo stack must not offer a restore that cannot work.
+    setDeleteConfirm({
+      paneId,
+      names,
+      paths,
+      permanent: permanent || paths.some(isWebdavPath),
+    })
   }, [pathsFor, setDeleteConfirm])
 
 
   const openProperties = useCallback(
     (paneId: string, names: string[]) => {
-      for (const p of pathsFor(paneId, names)) {
+      // Shell property pages only understand filesystem paths.
+      for (const p of pathsFor(paneId, names).filter((path) => !isWebdavPath(path))) {
         void shellProperties(p).catch((e: unknown) => showToast(t('op.failed', { code: t(errorKey(errorCode(e))) })))
       }
     },

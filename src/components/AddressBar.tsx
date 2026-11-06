@@ -5,7 +5,7 @@ import type { ShortcutId } from '../shortcuts'
 import type { Translate } from '../i18n'
 import type { MenuPoint } from '../PaneView'
 import { formatBinding } from '../shortcuts'
-import { pathKey, resolveAddress } from '../paths'
+import { isWebdavPath, pathKey, resolveAddress, webdavConnectionName, webdavParts } from '../paths'
 import { executeAddressCommand, expandPath, openTerminal, pathIsDir } from '../api'
 
 export const driveRoot = (path: string | undefined): string => {
@@ -133,7 +133,10 @@ export const AddressBar = forwardRef<AddressBarHandle, AddressBarProps>(function
       return
     }
     const seq = ++addressSeq.current
-    void expandPath(raw)
+    // `expandPath` is a filesystem helper: it would treat `%` sequences in a WebDAV
+    // address as environment variables and mangle them.
+    const expanding = isWebdavPath(raw) ? Promise.resolve(raw) : expandPath(raw)
+    void expanding
       .then(async (expanded) => {
         if (seq !== addressSeq.current) return
         const next = resolveAddress(tab.path, expanded)
@@ -148,6 +151,13 @@ export const AddressBar = forwardRef<AddressBarHandle, AddressBarProps>(function
           endAddressEdit()
           focusList()
           onNavigate(tab.id, next)
+          return
+        }
+        // A remote address is not a command line; reporting it invalid is the only
+        // meaningful outcome when the server cannot list it.
+        if (isWebdavPath(next)) {
+          setAddressBad(true)
+          onPathInvalid(raw)
           return
         }
         // `expandPath` strips the surrounding quotes, but the executor splits a command
@@ -232,7 +242,13 @@ export const AddressBar = forwardRef<AddressBarHandle, AddressBarProps>(function
         className="ml-1 flex shrink-0 items-center gap-0.5 rounded border border-line bg-surface-2 px-1.5 leading-none text-fg hover:bg-surface-3"
       >
         <span className="font-medium">
-          {location ? location.name : root ? t('sidebar.thisPc') : driveRoot(tab?.path)}
+          {location
+            ? location.name
+            : root
+              ? t('sidebar.thisPc')
+              : tab?.path && isWebdavPath(tab.path)
+                ? webdavConnectionName(webdavParts(tab.path).id)
+                : driveRoot(tab?.path)}
         </span>
         <svg viewBox="0 0 16 16" className="h-[1em] w-[1em] text-muted-2" fill="none" stroke="currentColor" strokeWidth="1.6">
           <path d="m4 6.5 4 4 4-4" strokeLinecap="round" strokeLinejoin="round" />
@@ -321,19 +337,21 @@ export const AddressBar = forwardRef<AddressBarHandle, AddressBarProps>(function
                   <path d="M6 3.5v-.7a1 1 0 0 1 1-1h4.3a1 1 0 0 1 1 1v7.4a1 1 0 0 1-1 1H9.5" />
                 </svg>
               </button>
-              <button
-                type="button"
-                data-open-terminal
-                onClick={() => tab?.path && void openTerminal(tab.path).catch(() => undefined)}
-                title={t('menu.openTerminal')}
-                aria-label={t('menu.openTerminal')}
-                className="grid h-full w-[1.67em] shrink-0 place-items-center border-l border-line text-muted-2 hover:bg-surface-3 hover:text-fg"
-              >
-                <svg viewBox="0 0 16 16" className="h-[1em] w-[1em]" fill="none" stroke="currentColor" strokeWidth="1.4">
-                  <path d="m4 5 3.5 3L4 11" strokeLinecap="round" strokeLinejoin="round" />
-                  <path d="M8.5 11h3.5" strokeLinecap="round" />
-                </svg>
-              </button>
+              {!isWebdavPath(tab.path) && (
+                <button
+                  type="button"
+                  data-open-terminal
+                  onClick={() => tab?.path && void openTerminal(tab.path).catch(() => undefined)}
+                  title={t('menu.openTerminal')}
+                  aria-label={t('menu.openTerminal')}
+                  className="grid h-full w-[1.67em] shrink-0 place-items-center border-l border-line text-muted-2 hover:bg-surface-3 hover:text-fg"
+                >
+                  <svg viewBox="0 0 16 16" className="h-[1em] w-[1em]" fill="none" stroke="currentColor" strokeWidth="1.4">
+                    <path d="m4 5 3.5 3L4 11" strokeLinecap="round" strokeLinejoin="round" />
+                    <path d="M8.5 11h3.5" strokeLinecap="round" />
+                  </svg>
+                </button>
+              )}
             </>
           )}
         </div>

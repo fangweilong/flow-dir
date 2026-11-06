@@ -117,22 +117,22 @@ impl FailureLog {
 
 /// What the operation thread reports back after `PerformOperations` returns.
 #[derive(Debug)]
-struct Outcome {
-    aborted: bool,
-    error: Option<ApiError>,
+pub(crate) struct Outcome {
+    pub(crate) aborted: bool,
+    pub(crate) error: Option<ApiError>,
     /// Detailed entries, capped at {@link MAX_REPORTED_FAILURES}.
-    failed: Vec<OpFailure>,
+    pub(crate) failed: Vec<OpFailure>,
     /// Every failure, including the ones cut from `failed`.
-    failed_total: u32,
+    pub(crate) failed_total: u32,
     /// Source indices the shell completed, in completion order. Only an aborted batch
     /// exposes them: the UI records an undo for what landed, which it cannot derive from
     /// `failed` because that list is capped.
-    succeeded: Vec<u32>,
+    pub(crate) succeeded: Vec<u32>,
     /// Source indices that failed, uncapped (4 bytes each; the 200-entry cap exists for
     /// the user-facing message, not for this bookkeeping).
-    failed_indices: Vec<u32>,
+    pub(crate) failed_indices: Vec<u32>,
     /// Any failure was `ACCESS_DENIED`, even past the capped report list.
-    denied: bool,
+    pub(crate) denied: bool,
 }
 
 #[derive(Clone, Default)]
@@ -341,14 +341,51 @@ fn validate(
                     "batch rename needs one new name per source",
                 ));
             }
-            Some(_) => {}
-            None if request.new_name.is_none() => {
-                return Err(ApiError::new("BAD_ARGS", "rename needs newName"));
+            Some(names) => {
+                for name in names {
+                    validate_entry_name(name)?;
+                }
             }
-            None => {}
+            None => {
+                let name = request
+                    .new_name
+                    .as_deref()
+                    .ok_or_else(|| ApiError::new("BAD_ARGS", "rename needs newName"))?;
+                validate_entry_name(name)?;
+            }
         }
     }
+    if kind == Kind::NewDir {
+        if let Some(name) = request.new_name.as_deref() {
+            validate_entry_name(name)?;
+        }
+    }
+    if matches!(kind, Kind::Copy | Kind::Move | Kind::NewDir) && request.target_dir.is_none() {
+        return Err(ApiError::new("BAD_ARGS", "operation needs targetDir"));
+    }
     Ok(())
+}
+
+/// Rename targets and new folder names are single segments, never paths. Rejecting the
+/// separators here covers both the shell path and the WebDAV `MOVE` destination.
+fn validate_entry_name(name: &str) -> Result<(), ApiError> {
+    let invalid = name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains(['/', '\\', '\0'])
+        || name.chars().any(char::is_control);
+    if invalid {
+        return Err(ApiError::new("INVALID_NAME", name.to_string()));
+    }
+    Ok(())
+}
+
+fn involves_webdav(request: &Request) -> bool {
+    request.sources.iter().any(|path| crate::webdav::is_webdav(path))
+        || request
+            .target_dir
+            .as_deref()
+            .is_some_and(crate::webdav::is_webdav)
 }
 
 /// Runs an operation to completion on the calling thread. This is the body of the
@@ -379,9 +416,22 @@ pub fn run_headless(
     if let Err(err) = validate(&request, kind, &protection) {
         return report(Some(err));
     }
+    if involves_webdav(&request) {
+        return report(Some(ApiError::new(
+            "BAD_ARGS",
+            "WebDAV operations must run in the GUI process",
+        )));
+    }
     let outcome = run_guarded(&request.kind, || {
         let sink = Channel::new(|_| Ok(()));
-        run(&request, kind, None, cancel, sink)
+        run(
+            &request,
+            kind,
+            None,
+            cancel,
+            sink,
+            &crate::settings::Settings::default(),
+        )
     });
     // The failure list is capped, so a truncated report needs the index list to tell which
     // items actually landed when the caller records an undo entry.
@@ -407,6 +457,7 @@ pub fn start(
     protection: &protect::Protection,
     hwnd: Option<isize>,
     progress: Channel<OpProgress>,
+    settings: Arc<crate::settings::Settings>,
 ) -> Result<(), ApiError> {
     let kind = Kind::parse(&request.kind)
         .ok_or_else(|| ApiError::new("BAD_KIND", format!("unknown operation {}", request.kind)))?;
@@ -424,7 +475,14 @@ pub fn start(
         .spawn(move || {
             let total = request.sources.len() as u32;
             let outcome = run_guarded(&request.kind, || {
-                run(&request, kind, hwnd, token, progress.clone())
+                run(
+                    &request,
+                    kind,
+                    hwnd,
+                    token,
+                    progress.clone(),
+                    &settings,
+                )
             });
             match (&outcome.error, outcome.aborted, outcome.failed_total) {
                 (Some(err), _, _) => log::error!(
@@ -502,7 +560,8 @@ fn outcome_denied(outcome: &Outcome) -> bool {
 
 /// Runs the operation body and turns a panic into a normal failure: `finish` still runs,
 /// so the job cannot stay in the map (and in the taskbar progress) forever.
-fn run_guarded<F: FnOnce() -> Outcome>(kind: &str, work: F) -> Outcome {    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
+fn run_guarded<F: FnOnce() -> Outcome>(kind: &str, work: F) -> Outcome {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
         Ok(outcome) => outcome,
         Err(payload) => {
             let detail = payload
@@ -530,7 +589,13 @@ fn run(
     hwnd: Option<isize>,
     cancel: Arc<AtomicBool>,
     progress: Channel<OpProgress>,
+    settings: &crate::settings::Settings,
 ) -> Outcome {
+    // Remote paths never reach `IFileOperation`: it cannot address them, and the WebDAV
+    // runner owns the transfer, progress and cancellation for both sides of a mixed batch.
+    if involves_webdav(request) {
+        return crate::webdav_ops::run(request, kind, cancel, progress, settings);
+    }
     unsafe {
         if let Err(e) = CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok() {
             return Outcome {
@@ -1280,6 +1345,7 @@ mod tests {
             &protect::Protection::default(),
             None,
             channel,
+            Arc::new(crate::settings::Settings::default()),
         )
         .unwrap_err();
         assert_eq!(error.code, "BAD_ARGS");
@@ -1329,6 +1395,7 @@ mod tests {
             None,
             Arc::new(AtomicBool::new(false)),
             Channel::new(|_| Ok(())),
+            &crate::settings::Settings::default(),
         );
         assert!(outcome.error.is_none(), "{outcome:?}");
         assert_eq!(outcome.failed_total, 0);
@@ -1378,6 +1445,7 @@ mod tests {
             &protect::Protection::default(),
             None,
             channel,
+            Arc::new(crate::settings::Settings::default()),
         )
         .unwrap();
         let done = rx
