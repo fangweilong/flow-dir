@@ -238,9 +238,24 @@ export const EMPTY_LIST: ListData = emptyList()
 
 export type ArchiveEntry = { name: string; size: number; isDir?: boolean; mtime?: number }
 export type MetaRow = { label: string; value: string }
+/** Styled span inside a Word paragraph; flags mirror `w:b`/`w:i`. */
+export type DocRun = { text: string; bold: boolean; italic: boolean }
+/** One Word block in reading order. Only `table` blocks use `rows`. */
+export type DocBlock = {
+  kind: 'heading' | 'paragraph' | 'list' | 'table'
+  level?: number | null
+  text: string
+  runs: DocRun[]
+  rows: string[][]
+  header: boolean
+}
+export type OfficeDoc = { blocks: DocBlock[]; truncated: boolean }
+/** One worksheet; cells are already formatted (dates, percentages). */
+export type SheetPreview = { name: string; rows: string[][]; truncated: boolean }
+
 export type PreviewInfo = {
   /** `cloud` marks a placeholder whose bytes are still in the cloud; nothing was read. */
-  kind: 'image' | 'pdf' | 'video' | 'audio' | 'html' | 'text' | 'archive' | 'binary' | 'folder' | 'unsupported' | 'cloud' | 'svg' | 'font' | 'csv' | 'markdown' | 'json'
+  kind: 'image' | 'pdf' | 'video' | 'audio' | 'html' | 'text' | 'archive' | 'binary' | 'folder' | 'unsupported' | 'cloud' | 'svg' | 'font' | 'csv' | 'markdown' | 'json' | 'docx' | 'xlsx'
   url?: string | null
   text?: string | null
   hex?: string | null
@@ -248,6 +263,10 @@ export type PreviewInfo = {
   entries?: ArchiveEntry[] | null
   meta?: MetaRow[] | null
   reason?: string | null
+  /** Parsed Word blocks; present for `docx`. */
+  doc?: OfficeDoc | null
+  /** Parsed worksheets; present for `xlsx`. */
+  sheets?: SheetPreview[] | null
   /** Caption of the configured external preview program for this extension. */
   external?: string | null
   size: number

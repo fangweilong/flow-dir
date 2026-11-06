@@ -59,6 +59,21 @@ export function usePreviewController({
     [updateSettings],
   )
   const [previewWidth, setPreviewWidth] = useState(settings.previewWidth)
+  /** Fullscreen preview layer. Kept here so global shortcuts can respect it. */
+  const [previewExpanded, setPreviewExpanded] = useState(false)
+  const targetPath = activeTab?.path ?? ''
+  // Selecting another file or navigating belongs to the panel, not the layer:
+  // staying fullscreen would hide the list the user just started browsing.
+  useEffect(() => {
+    setPreviewExpanded(false)
+  }, [previewName, targetPath, selectionKey])
+  useEffect(() => {
+    if (!previewOpen) setPreviewExpanded(false)
+  }, [previewOpen])
+  const togglePreviewExpanded = useCallback(
+    () => setPreviewExpanded((prev) => !prev),
+    [],
+  )
   const [preview, setPreview] = useState<{
     info: PreviewInfo | null
     loading: boolean
@@ -178,6 +193,8 @@ export function usePreviewController({
     setPreviewOpen,
     previewWidth,
     setPreviewWidth,
+    previewExpanded,
+    togglePreviewExpanded,
     startPreviewResize,
     downloadPreview,
     openExternalPreview,

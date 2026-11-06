@@ -42,7 +42,7 @@ export type MenuPoint = {
   shiftKey: boolean
 }
 
-const pointOf = (ev: { clientX: number; clientY: number; screenX: number; screenY: number; shiftKey: boolean }): MenuPoint => ({
+export const pointOf = (ev: { clientX: number; clientY: number; screenX: number; screenY: number; shiftKey: boolean }): MenuPoint => ({
   clientX: ev.clientX,
   clientY: ev.clientY,
   screenX: ev.screenX,

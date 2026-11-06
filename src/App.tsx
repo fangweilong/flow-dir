@@ -20,29 +20,23 @@ import { usePaneContextMenus } from './hooks/usePaneContextMenus'
 import { useGlobalShortcuts } from './hooks/useGlobalShortcuts'
 import { useLaunchAndTray } from './hooks/useLaunchAndTray'
 import { useWindowLifecycle } from './hooks/useWindowLifecycle'
+import { useNavigationActions } from './hooks/useNavigationActions'
+import { usePrivilegeStatus } from './hooks/usePrivilegeStatus'
+import { useSidebarDrives } from './hooks/useSidebarDrives'
 import { TitleBar } from './components/TitleBar'
 import { GUTTER, ResizeHandle } from './components/SplitView'
 import { SidebarPanel } from './components/SidebarPanel'
 import { PaneNodeRenderer } from './components/PaneNodeRenderer'
+import { pointOf } from './PaneView'
 import { DragOverlay } from './components/DragOverlay'
-import { refreshIconCache } from './icons'
 import { paneIds } from './workspace'
-import {
-  isElevated,
-  openPath,
-  openWith,
-  opCancel,
-  quitApp,
-  restartPrivilege,
-  titlebarMenu,
-  uacEnabled,
-} from './api'
+import { opCancel, quitApp, titlebarMenu } from './api'
 import type { Drive, Lang, ListData, Place } from './types'
-import { errorKey, makeT, setUiLanguage } from './i18n'
+import { makeT, setUiLanguage } from './i18n'
 import type { Translate } from './i18n'
 import { DEFAULT_SETTINGS } from './persist'
 import type { Settings } from './persist'
-import { isDir, isFsPath, isInsideArchive, isShellPath, isWebdavPath, joinPath, setWebdavConnections, WEBDAV_SCHEME } from './paths'
+import { isDir, joinPath, setWebdavConnections } from './paths'
 import { formatBinding, resolveShortcuts } from './shortcuts'
 
 // Non-first-paint surfaces stay out of the main chunk: preview, search and the operation
@@ -52,19 +46,6 @@ const SearchOverlay = lazy(() =>
   import('./SearchOverlay').then((m) => ({ default: m.SearchOverlay })),
 )
 const OpsPanel = lazy(() => import('./OpsPanel').then((m) => ({ default: m.OpsPanel })))
-
-const errorCode = (err: unknown): string =>
-  err && typeof err === 'object' && 'code' in err && typeof err.code === 'string'
-    ? err.code
-    : String(err)
-
-const pointOf = (ev: React.MouseEvent) => ({
-  clientX: ev.clientX,
-  clientY: ev.clientY,
-  screenX: ev.screenX,
-  screenY: ev.screenY,
-  shiftKey: Boolean(ev.shiftKey),
-})
 
 const SIDEBAR_MIN = 140
 const PREVIEW_MIN = 220
@@ -104,6 +85,7 @@ export default function App() {
     if (toastTimer.current) window.clearTimeout(toastTimer.current)
     toastTimer.current = window.setTimeout(() => setToast(null), ms)
   }, [])
+  const closeSettings = useCallback(() => setSettingsOpen(false), [])
 
   // The layout hook runs before settings are loaded, so it gets a stable translator that
   // reads the current language when it is actually called.
@@ -236,24 +218,7 @@ export default function App() {
   cancelDirRef.current = (tabId) => void cancelDir(tabId).catch(() => undefined)
   setDriveListRef.current = scanner.setDriveList
 
-  // The sidebar lists one expandable row per server; the drive overview keeps only real
-  // drives because capacity, eject, and shell properties do not apply to a virtual root.
-  const sidebarDrives = useMemo<Drive[]>(
-    () => [
-      ...driveList,
-      ...settings.webdav.map((conn) => ({
-        root: `${WEBDAV_SCHEME}${conn.id}/`,
-        kind: 'webdav',
-        name: conn.name,
-        label: '',
-        fs: 'WebDAV',
-        total: 0,
-        free: 0,
-        available: true,
-      })),
-    ],
-    [driveList, settings.webdav],
-  )
+  const sidebarDrives = useSidebarDrives(driveList, settings.webdav)
 
   // Keep tabs rows in memory & evict inactive
   useEffect(() => {
@@ -294,26 +259,7 @@ export default function App() {
     }))
   }, [listData, pendingSelect, pendingSelectTick, update])
 
-  // The integrity level is fixed for the process lifetime; switching relaunches the app.
-  const [elevated, setElevated] = useState(false)
-  const [uacOn, setUacOn] = useState(true)
-  useEffect(() => {
-    void isElevated().then(setElevated).catch(() => undefined)
-    void uacEnabled().then(setUacOn).catch(() => undefined)
-  }, [])
-  const switchPrivilege = useCallback(
-    (wanted: boolean) => {
-      void restartPrivilege(wanted).catch((e: unknown) => {
-        const code = errorCode(e)
-        showToast(
-          code === 'ELEVATION_CANCELED'
-            ? t('priv.canceled')
-            : t('priv.failed', { code: t(errorKey(code)) }),
-        )
-      })
-    },
-    [showToast, t],
-  )
+  const { elevated, uacOn, switchPrivilege } = usePrivilegeStatus(showToast, t)
 
   // Hook: file operations
   const {
@@ -443,6 +389,8 @@ export default function App() {
     previewOpen,
     setPreviewOpen,
     previewWidth,
+    previewExpanded,
+    togglePreviewExpanded,
     startPreviewResize,
     downloadPreview,
     openExternalPreview,
@@ -452,35 +400,13 @@ export default function App() {
   setPreviewWidthRef.current = previewCtrl.setPreviewWidth
   setSidebarWidthRef.current = quickPlacesHook.setSidebarWidth
 
-  const openTarget = useCallback(
-    (targetPath: string) => {
-      openPath(targetPath)
-        .then(() => {
-          if (isInsideArchive(targetPath)) refreshIconCache()
-        })
-        .catch((err: unknown) => {
-          const code = errorCode(err)
-          if (code === 'NO_ASSOCIATION') {
-            // A remote file has no local path; the backend's error detail carries the
-            // cached copy it downloaded, which is what "Open with" must hand to the shell.
-            const detail =
-              isWebdavPath(targetPath) &&
-              err &&
-              typeof err === 'object' &&
-              'detail' in err &&
-              typeof err.detail === 'string'
-                ? err.detail
-                : ''
-            void openWith(detail || targetPath).catch((e: unknown) => {
-              showToast(t('op.failed', { code: t(errorKey(errorCode(e))) }))
-            })
-            return
-          }
-          showToast(t('op.failed', { code: t(errorKey(code)) }))
-        })
-    },
-    [showToast, t],
-  )
+  const { openTarget, openInApp, openTreePath } = useNavigationActions({
+    wsRef,
+    navigate,
+    showToast,
+    t,
+    beforeOpen: closeSettings,
+  })
 
   // Hook: context menus
   const {
@@ -554,6 +480,7 @@ export default function App() {
       passwordPrompt ||
       extractTarget ||
       compressTarget ||
+      previewExpanded ||
       quitBusy,
   )
   const cyclePane = useCallback(() => {
@@ -565,7 +492,6 @@ export default function App() {
     const nextId = ids[(currentIndex + 1) % ids.length]
     if (nextId) focusPane(nextId)
   }, [focusPane, wsRef])
-
 
   useGlobalShortcuts({
     keys,
@@ -588,36 +514,6 @@ export default function App() {
     cyclePane,
     refreshActive: manualRefresh,
   })
-  const openInApp = useCallback(
-    (path: string) => {
-      setSettingsOpen(false)
-      const current = wsRef.current
-      if (!current) return
-      const pane = current.panes[current.activePaneId] ?? Object.values(current.panes)[0]
-      const tab = pane ? current.tabs[pane.activeTabId] : undefined
-      if (!tab) return
-      navigate(tab.id, path)
-    },
-    [navigate, wsRef],
-  )
-
-  const openTreePath = useCallback(
-    (path: string) => {
-      const current = wsRef.current
-      if (!current) return
-      const pane = current.panes[current.activePaneId]
-      const tab = pane ? current.tabs[pane.activeTabId] : undefined
-      if (!tab) return
-      // Shell locations and WebDAV servers are listed by the backend too; anything else is
-      // handed to the shell.
-      if (!isFsPath(path) && !isShellPath(path) && !isWebdavPath(path)) {
-        openTarget(path)
-        return
-      }
-      navigate(tab.id, path)
-    },
-    [navigate, openTarget, wsRef],
-  )
 
   // Mouse side buttons
   useEffect(() => {
@@ -782,6 +678,8 @@ export default function App() {
                     : `calc(50% - ${GUTTER}px)`
                 }
                 externalKey={formatBinding(keys.externalPreview)}
+                expanded={previewExpanded}
+                onToggleExpanded={togglePreviewExpanded}
                 onClose={() => setPreviewOpen(false)}
                 onOpenExternal={openExternalPreview}
                 onDownload={downloadPreview}

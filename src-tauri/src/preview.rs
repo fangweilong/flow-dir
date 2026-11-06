@@ -32,12 +32,17 @@ use windows::Win32::System::Com::{
 
 use crate::archive::{self, ArchiveEntry};
 use crate::error::ApiError;
+use crate::office;
 use crate::settings::{ExternalPreview, Settings};
 
 /// Icon and thumbnail payloads are small and cheap to regenerate; a generous cache
 /// only inflates the resident set of a file manager that is meant to stay small.
 const MAX_CACHE_BYTES: usize = 12 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 50;
+/// CSV/TSV is tabular data, so the generic text budget is usually too small to reach
+/// even the first page of rows. The frontend paginates the table, so a larger read
+/// costs memory once but does not inflate the DOM.
+const CSV_PREVIEW_BYTES: usize = 2 * 1024 * 1024;
 
 /// Cloud-provider attributes. A file carrying any of them is a placeholder whose bytes
 /// live only in the cloud; touching it would download it, which the preview must not do
@@ -68,7 +73,7 @@ impl Default for Limits {
         Self {
             max_bytes: 64 * 1024 * 1024,
             max_dimension: 4096,
-            text_bytes: 8 * 1024,
+            text_bytes: 256 * 1024,
         }
     }
 }
@@ -193,6 +198,10 @@ pub struct PreviewInfo {
     pub entries: Option<Vec<ArchiveEntry>>,
     pub meta: Option<Vec<MetaRow>>,
     pub reason: Option<String>,
+    /// Parsed Word blocks for `docx` previews.
+    pub doc: Option<office::OfficeDoc>,
+    /// Parsed worksheets for `xlsx` previews.
+    pub sheets: Option<Vec<office::SheetPreview>>,
     /// Caption of the configured external preview program, when one handles this extension.
     pub external: Option<String>,
     pub size: u64,
@@ -530,6 +539,28 @@ pub fn info(
     };
 
     let width = limits.width(width);
+    // OOXML containers are parsed here rather than sniffed: their extension is
+    // authoritative and the zip payload would otherwise be reported as binary.
+    // A malformed container falls through to the generic path so a renamed or
+    // truncated file still honours the external-preview rule instead of erroring.
+    // Legacy `.doc`/`.xls` stay unsupported (no Office dependency).
+    match ext.as_str() {
+        "docx" | "docm" | "dotx" | "dotm" => {
+            if let Ok(doc) = office::docx(&path) {
+                info.kind = "docx".to_string();
+                info.doc = Some(doc);
+                return Ok(info);
+            }
+        }
+        "xlsx" | "xlsm" | "xltx" | "xltm" => {
+            if let Ok(sheets) = office::xlsx(&path) {
+                info.kind = "xlsx".to_string();
+                info.sheets = Some(sheets);
+                return Ok(info);
+            }
+        }
+        _ => {}
+    }
     if ext == "svg" {
         let encoded =
             percent_encoding::utf8_percent_encode(&path, percent_encoding::NON_ALPHANUMERIC);
@@ -619,7 +650,7 @@ pub fn info(
             info.text = Some(decode_text(&bytes));
         }
         "csv" | "tsv" => {
-            let bytes = read_prefix(&path, limits.text_bytes)?;
+            let bytes = read_prefix(&path, limits.text_bytes.max(CSV_PREVIEW_BYTES))?;
             info.kind = "csv".to_string();
             info.text = Some(decode_text(&bytes));
         }

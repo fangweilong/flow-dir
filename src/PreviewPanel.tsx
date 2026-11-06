@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { makeT } from './i18n'
 import type { Translate } from './i18n'
+import { previewInfo } from './api'
 import { formatSize, formatTime } from './paths'
 import type { ApiError, Lang, PreviewInfo } from './types'
 import { SvgPreview } from './components/preview/SvgPreview'
@@ -10,6 +11,9 @@ import { MarkdownPreview } from './components/preview/MarkdownPreview'
 import { JsonPreview } from './components/preview/JsonPreview'
 import { HexPreview } from './components/preview/HexPreview'
 import { CodePreview } from './components/preview/CodePreview'
+import { ImagePreview } from './components/preview/ImagePreview'
+import { DocxPreview } from './components/preview/DocxPreview'
+import { XlsxPreview } from './components/preview/XlsxPreview'
 
 type Props = {
   info: PreviewInfo | null
@@ -24,6 +28,9 @@ type Props = {
   maxWidth: string
   /** Bound key for the external previewer, shown on the button. */
   externalKey: string
+  /** Fullscreen layer instead of the side panel. */
+  expanded: boolean
+  onToggleExpanded: () => void
   onClose: () => void
   onOpenExternal: (path: string) => void
   /** Reads the cloud file, which downloads it; only ever called from an explicit click. */
@@ -59,6 +66,8 @@ export function PreviewPanel({
   width,
   maxWidth,
   externalKey,
+  expanded,
+  onToggleExpanded,
   onClose,
   onOpenExternal,
   onDownload,
@@ -67,18 +76,76 @@ export function PreviewPanel({
   const [htmlViewMode, setHtmlViewMode] = useState<'preview' | 'source'>('preview')
   const [binaryMode, setBinaryMode] = useState<'meta' | 'hex'>('meta')
   const [textViewMode, setTextViewMode] = useState<'text' | 'hex'>('text')
-  const [imageFit, setImageFit] = useState(true)
+  // Raster previews are decoded at the panel width. The fullscreen layer asks the
+  // backend for a second, window-sized decode so zooming does not start from a blurry
+  // bitmap; text and Office previews need no second request.
+  const [hiResUrl, setHiResUrl] = useState<string | null>(null)
+
+  useEffect(() => {
+    setHiResUrl(null)
+    const raster = info?.kind === 'image' || info?.kind === 'pdf' || info?.kind === 'video'
+    if (!expanded || !raster || !path) return
+    let cancelled = false
+    const width = Math.min(
+      4096,
+      Math.round(Math.max(window.innerWidth, window.innerHeight) * Math.min(window.devicePixelRatio || 1, 2)),
+    )
+    const dark = document.documentElement.classList.contains('dark')
+    previewInfo(path, width, dark ? '0f172a' : 'ffffff')
+      .then((next) => {
+        if (!cancelled && next.url) setHiResUrl(next.url)
+      })
+      // The panel-sized URL stays usable, so a failed upscale is not worth surfacing.
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [expanded, path, info?.kind, info?.mtime, info?.size])
+
+  useEffect(() => {
+    if (!expanded) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      event.stopPropagation()
+      onToggleExpanded()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [expanded, onToggleExpanded])
+
+  const url = hiResUrl ?? info?.url ?? ''
 
   return (
     <aside
-      style={{ width, maxWidth }}
-      className="flex shrink-0 flex-col overflow-x-hidden border-l border-line bg-surface"
+      style={expanded ? undefined : { width, maxWidth }}
+      className={
+        expanded
+          ? 'fixed inset-0 z-40 flex flex-col overflow-hidden bg-surface'
+          : 'flex shrink-0 flex-col overflow-x-hidden border-l border-line bg-surface'
+      }
     >
       <header className="flex h-7 shrink-0 items-center gap-2 border-b border-line px-2">
         <span className="text-[0.625rem] font-semibold tracking-wider text-muted-2">{t('preview.title')}</span>
         <span className="min-w-0 flex-1 truncate text-[0.71875rem] font-medium text-fg-strong" title={name}>
           {name}
         </span>
+        <button
+          type="button"
+          onClick={onToggleExpanded}
+          title={expanded ? t('preview.restore') : t('preview.expand')}
+          className="grid h-5 w-5 place-items-center rounded text-muted-2 hover:bg-surface-3 hover:text-fg"
+        >
+          {expanded ? (
+            <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
+              <path d="M6 2v4H2M10 14v-4h4" />
+            </svg>
+          ) : (
+            <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
+              <path d="M2 6V2h4M14 10v4h-4" />
+            </svg>
+          )}
+        </button>
         <button
           type="button"
           onClick={onClose}
@@ -89,7 +156,7 @@ export function PreviewPanel({
         </button>
       </header>
 
-      <div className="relative min-h-0 flex-1 overflow-auto p-2">
+      <div className={`relative min-h-0 flex-1 overflow-auto ${expanded ? 'p-3' : 'p-2'}`}>
         {loading && (
           <div className="grid h-full place-items-center text-[0.71875rem] text-muted-2">{t('preview.loading')}</div>
         )}
@@ -111,35 +178,20 @@ export function PreviewPanel({
 
         {!loading && !error && info && (
           <>
-            {info.kind === 'image' && info.url && (
-              <div className="flex h-full flex-col">
-                <div className="flex shrink-0 items-center justify-between pb-1 text-[0.625rem]">
-                  <span className="font-mono text-muted-2">
-                    {info.dimensions ? `${info.dimensions} px` : ''}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setImageFit((prev) => !prev)}
-                    className="rounded bg-surface-2 px-1.5 py-0.5 text-muted hover:bg-surface-3 hover:text-fg"
-                  >
-                    {imageFit ? '1:1' : 'Fit'}
-                  </button>
-                </div>
-                <div className="min-h-0 flex-1 overflow-auto grid place-items-center">
-                  <img
-                    src={info.url}
-                    alt={name}
-                    className={`rounded border border-line shadow-sm ${
-                      imageFit ? 'max-h-full max-w-full object-contain' : 'max-w-none'
-                    }`}
-                  />
-                </div>
-              </div>
+            {info.kind === 'image' && url && (
+              <ImagePreview
+                url={url}
+                name={name}
+                dimensions={info.dimensions}
+                expanded={expanded}
+                onExpand={onToggleExpanded}
+                t={t}
+              />
             )}
-            {(info.kind === 'pdf' || info.kind === 'video') && info.url && (
+            {(info.kind === 'pdf' || info.kind === 'video') && url && (
               <div className="grid h-full place-items-center">
                 <img
-                  src={info.url}
+                  src={url}
                   alt={name}
                   className="max-h-full max-w-full rounded border border-line object-contain shadow-sm"
                 />
@@ -215,6 +267,10 @@ export function PreviewPanel({
             {info.kind === 'json' && (
               <JsonPreview text={info.text} t={t} />
             )}
+
+            {info.kind === 'docx' && <DocxPreview doc={info.doc} t={t} />}
+
+            {info.kind === 'xlsx' && <XlsxPreview sheets={info.sheets} t={t} />}
 
             {info.kind === 'folder' && (
               <div className="grid h-full place-items-center px-4 text-center">

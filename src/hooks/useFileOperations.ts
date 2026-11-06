@@ -1,33 +1,23 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import type { MutableRefObject } from 'react'
 import type { OpKind, OpProgress } from '../types'
 import type { Settings } from '../persist'
 import { errorKey } from '../i18n'
 import type { Translate } from '../i18n'
 import type { SyncAction } from '../ComparePanel'
-import {
-  archiveCompress,
-  archiveExtract,
-  notifyOp,
-  opRetryElevated,
-  opStart,
-  pathIsDir,
-  pathsExist,
-  restoreRecycle,
-  taskbarProgress,
-  uniquePaths,
-  COMPRESS_EXTENSIONS,
-  type CompressFormat,
-} from '../api'
-import { baseName, joinPath, parentPath } from '../paths'
+import { notifyOp, opRetryElevated, opStart, pathsExist, restoreRecycle } from '../api'
+import { errorCode } from '../errorCode'
+import { joinPath, parentPath } from '../paths'
 import { protectionError, protectWord } from '../protection'
 import type { ProtectPromptState } from '../protection'
 import { undoEntryFor, UNDO_LIMIT } from '../undo'
 import type { OpRequestShape, UndoEntry, UndoPayload } from '../undo'
-export const errorCode = (err: unknown): string =>
-  err && typeof err === 'object' && 'code' in err && typeof err.code === 'string'
-    ? err.code
-    : String(err)
+import { landedIndices } from '../undoLanded'
+import { useArchiveJobs } from './useArchiveJobs'
+import { useTaskbarProgress } from './useTaskbarProgress'
+
+// Re-exported for ModalContainer, which reports operation failures with the same mapping.
+export { errorCode } from '../errorCode'
 
 function uid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
@@ -69,29 +59,15 @@ export function useFileOperations({
   const [historyEpoch, setHistoryEpoch] = useState(0)
   const [protectPrompt, setProtectPrompt] = useState<ProtectPromptState | null>(null)
 
-  const [passwordPrompt, setPasswordPrompt] = useState<{
-    archive: string
-    dest: string
-    wrong: boolean
-  } | null>(null)
-  const [extractTarget, setExtractTarget] = useState<{ archive: string; initial: string } | null>(
-    null,
-  )
-  const [compressTarget, setCompressTarget] = useState<{
-    paths: string[]
-    dir: string
-    format: CompressFormat
-    name: string
-  } | null>(null)
-
   const undoStack = useRef<UndoEntry[]>([])
   const redoStack = useRef<UndoEntry[]>([])
   const undoCounter = useRef(0)
   const lastIrreversible = useRef(false)
   const opRequests = useRef<Record<string, OpRequestShape & { opId: string; record?: boolean }>>({})
-  const taskbarWant = useRef<{ state: string; done: number; total: number } | null>(null)
-  const taskbarTimer = useRef<number | null>(null)
-  const taskbarSentAt = useRef(0)
+
+  const archiveJobs = useArchiveJobs({ setOps, refreshPanes, showToast, t })
+  useTaskbarProgress(ops)
+
   const undoLimit = useCallback(
     () => settingsRef.current.undoLimit ?? UNDO_LIMIT,
     [settingsRef],
@@ -245,31 +221,7 @@ export function useFileOperations({
               const failed = progress.failedCount
               const ok = Math.max(0, progress.total - failed)
               announce(t('op.partial', { ok, failed }))
-              // The backend caps the failure list; past that point the index list is the
-              // only way to know which items landed (and must not be recorded as undoable).
-              const succeeded = progress.succeeded
-              const failedIndices = progress.failedIndices
-              let keep = succeeded ?? []
-              if (!keep.length) {
-                if (failedIndices?.length) {
-                  const failedSet = new Set(failedIndices)
-                  keep = sources.map((_, index) => index).filter((index) => !failedSet.has(index))
-                } else if (
-                  progress.failed.length === progress.failedCount &&
-                  // A batch-level failure carries an empty path; treating it as a path
-                  // match would mark every source as landed and record a phantom undo.
-                  progress.failed.every((failure) => failure.path)
-                ) {
-                  // The list is complete, so the paths identify the landed items. When it is
-                  // capped, deriving from it would record items that never landed.
-                  const failedSet = new Set(
-                    progress.failed.map((failure) => failure.path.toLowerCase()),
-                  )
-                  keep = sources
-                    .map((_, index) => index)
-                    .filter((index) => !failedSet.has(sources[index].toLowerCase()))
-                }
-              }
+              const keep = landedIndices(sources, progress)
               const landed = new Set(keep)
               recordEntry(
                 undoEntryFor(kind, sources, {
@@ -354,28 +306,13 @@ export function useFileOperations({
       opRetryElevated(retry)
         .then((report) => {
           refreshPanes()
-          const failed = new Set(report.failed.map((failure) => failure.path.toLowerCase()))
-          const succeeded = report.succeeded ?? []
-          const reportedIndices = report.failedIndices ?? []
-          let keep = succeeded
-          if (!keep.length && !report.aborted) {
-            if (reportedIndices.length) {
-              const failedSet = new Set(reportedIndices)
-              keep = retry.sources
-                .map((_, index) => index)
-                .filter((index) => !failedSet.has(index))
-            } else if (
-              !report.aborted &&
-              report.failedTotal === report.failed.length &&
-              // A batch-level failure is reported with an empty path; a path match would
-              // otherwise leave every source marked as landed.
-              report.failed.every((failure) => failure.path)
-            ) {
-              keep = retry.sources
-                .map((_, index) => index)
-                .filter((index) => !failed.has(retry.sources[index].toLowerCase()))
-            }
-          }
+          const keep = landedIndices(retry.sources, {
+            succeeded: report.succeeded ?? [],
+            failedIndices: report.failedIndices ?? [],
+            failed: report.failed,
+            failedCount: report.failedTotal,
+            aborted: report.aborted,
+          })
           const completed = keep.map((index) => retry.sources[index])
           // The elevated run does not go through `runOp`, so its history entry has to be
           // recorded here or Ctrl+Z would skip over it.
@@ -500,163 +437,6 @@ export function useFileOperations({
         .finally(() => setElevating(null))
     },
     [elevating, ops, pushUndo, refreshPanes, showToast, t],
-  )
-
-  const extractArchive = useCallback(
-    (archive: string, dest: string, password?: string) => {
-      const opId = `extract-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-      setOps((prev) => ({
-        ...prev,
-        [opId]: {
-          opId,
-          phase: 'extract',
-          current: 0,
-          total: 0,
-          name: null,
-          work: 0,
-          workTotal: 0,
-          failedCount: 0,
-          failed: [],
-          done: false,
-          aborted: false,
-          error: null,
-        },
-      }))
-      const drop = (delay: number) =>
-        window.setTimeout(() => {
-          setOps((prev) => {
-            const next = { ...prev }
-            delete next[opId]
-            return next
-          })
-        }, delay)
-      archiveExtract(opId, archive, dest, password ?? null, (progress) => {
-        setOps((prev) => (prev[opId] ? { ...prev, [opId]: progress } : prev))
-        if (!progress.done) return
-        if (progress.error) {
-          const code = progress.error.code
-          if (code === 'PASSWORD_REQUIRED' || code === 'WRONG_PASSWORD') {
-            setPasswordPrompt({ archive, dest, wrong: code === 'WRONG_PASSWORD' })
-            drop(3000)
-            return
-          }
-          showToast(t('op.failed', { code: t(errorKey(code)) }))
-          drop(5000)
-          return
-        }
-        if (progress.aborted) {
-          showToast(t('op.canceled'))
-          drop(2500)
-          return
-        }
-        refreshPanes()
-        if (progress.failedCount > 0) {
-          showToast(
-            t('op.partial', {
-              ok: Math.max(0, progress.total - progress.failedCount),
-              failed: progress.failedCount,
-            }),
-            8000,
-          )
-          drop(30000)
-          return
-        }
-        showToast(t('op.done'))
-        drop(800)
-      }).catch((e: unknown) => {
-        showToast(t('op.failed', { code: t(errorKey(errorCode(e))) }))
-        drop(4000)
-      })
-    },
-    [refreshPanes, showToast, t],
-  )
-
-  const runCompress = useCallback(
-    (paths: string[], dest: string, format: CompressFormat, level: number, password: string | null) => {
-      const opId = `compress-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-      setOps((prev) => ({
-        ...prev,
-        [opId]: {
-          opId,
-          phase: 'compress',
-          current: 0,
-          total: 0,
-          name: null,
-          work: 0,
-          workTotal: 0,
-          failedCount: 0,
-          failed: [],
-          done: false,
-          aborted: false,
-          error: null,
-        },
-      }))
-      const drop = (delay: number) =>
-        window.setTimeout(() => {
-          setOps((prev) => {
-            const next = { ...prev }
-            delete next[opId]
-            return next
-          })
-        }, delay)
-      archiveCompress(opId, paths, dest, format, level, password, (progress) => {
-        setOps((prev) => (prev[opId] ? { ...prev, [opId]: progress } : prev))
-        if (!progress.done) return
-        if (progress.error) {
-          showToast(t('op.failed', { code: t(errorKey(progress.error.code)) }))
-          drop(5000)
-          return
-        }
-        if (progress.aborted) {
-          showToast(t('op.canceled'))
-          drop(2500)
-          return
-        }
-        refreshPanes()
-        if (progress.failedCount > 0) {
-          // Unreadable entries are skipped and still produce an archive; reporting plain
-          // "done" would hide that files are missing from it.
-          showToast(
-            t('op.partial', {
-              ok: Math.max(0, progress.total - progress.failedCount),
-              failed: progress.failedCount,
-            }),
-          )
-          drop(15000)
-          return
-        }
-        showToast(t('op.done'))
-        drop(800)
-      }).catch((e: unknown) => {
-        showToast(t('op.failed', { code: t(errorKey(errorCode(e))) }))
-        drop(4000)
-      })
-    },
-    [refreshPanes, showToast, t],
-  )
-
-  const requestCompress = useCallback(
-    (paths: string[], dir: string, format: CompressFormat) => {
-      const extension = COMPRESS_EXTENSIONS[format]
-      void (async () => {
-        let base = baseName(dir) || 'archive'
-        if (paths.length === 1) {
-          const full = baseName(paths[0])
-          // Files compress to `report.zip`, not `report.docx.zip`; a folder keeps its full
-          // name because dots are legitimate there.
-          const dot = full.lastIndexOf('.')
-          base =
-            dot > 0 && dot < full.length - 1 && !(await pathIsDir(paths[0]))
-              ? full.slice(0, dot)
-              : full
-        }
-        const [dest] = await uniquePaths([joinPath(dir, `${base}${extension}`)])
-        setCompressTarget({ paths, dir, format, name: baseName(dest) })
-      })().catch((e: unknown) =>
-        showToast(t('op.failed', { code: t(errorKey(errorCode(e))) })),
-      )
-    },
-    [showToast, t],
   )
 
   const runStep = useCallback(
@@ -886,45 +666,12 @@ export function useFileOperations({
     [applyUndo, undoLimit],
   )
 
-  useEffect(() => {
-    const active = Object.values(ops).filter((op) => !op.done)
-    const state = !active.length
-      ? 'none'
-      : active.some((op) => op.failedCount > 0 || op.error)
-        ? 'error'
-        : active.some((op) => op.aborted)
-          ? 'paused'
-          : 'normal'
-    let done = 0
-    let total = 0
-    for (const op of active) {
-      const each = Math.max(op.total, 1)
-      done += Math.min(op.current, each)
-      total += each
-    }
-    taskbarWant.current = { state, done, total }
-    const flush = () => {
-      taskbarTimer.current = null
-      const want = taskbarWant.current
-      if (!want) return
-      taskbarSentAt.current = Date.now()
-      void taskbarProgress(want.state, want.done, want.total).catch(() => undefined)
-    }
-    if (taskbarTimer.current) return
-    const wait = 160 - (Date.now() - taskbarSentAt.current)
-    if (wait <= 0) flush()
-    else taskbarTimer.current = window.setTimeout(flush, wait)
-  }, [ops])
-
   return {
     ops,
     setOps,
     elevating,
     runOp,
     retryElevated,
-    extractArchive,
-    runCompress,
-    requestCompress,
     runSyncActions,
     undoLast,
     redoLast,
@@ -934,11 +681,6 @@ export function useFileOperations({
     historyEpoch,
     protectPrompt,
     setProtectPrompt,
-    passwordPrompt,
-    setPasswordPrompt,
-    extractTarget,
-    setExtractTarget,
-    compressTarget,
-    setCompressTarget,
+    ...archiveJobs,
   }
 }

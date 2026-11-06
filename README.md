@@ -55,10 +55,13 @@ Tauri 2 + Rust 后端，React 19 前端。
 | 视频 | 首帧 |
 | 文本 | BOM / UTF-8 / GBK 回退；未知扩展名按内容嗅探 |
 | 压缩包 | ZIP 目录 |
+| Word（`.docx`/`.docm`） | 标题、段落、粗斜体、列表与表格，只读 |
+| Excel（`.xlsx`/`.xlsm`） | 多工作表，共享字符串、日期与百分比格式化，只读 |
 | 可执行文件 | EXE/DLL 版本信息 |
 
-- 超过 64 MB 不生成预览。
-- Word/Excel 等内置不支持的类型，可在设置里按扩展名绑定外部预览程序；选中文件按 `F3`（可改）直接调用。
+- 超过 64 MB 不生成预览；文本默认读取前 256 KB，可在设置中调到 4 MB。CSV/TSV 至少读取 2 MB，表格每页 500 行；Excel 每表最多解析 2000 行/80 列，每页 200 行，均按需加载。
+- 预览可放大为应用内全屏层；图片支持滚轮缩放、拖动平移、适应窗口与 1:1，`Esc` 还原。
+- 旧版 `.doc`/`.xls`、PowerPoint 等仍不支持内置预览，可在设置里按扩展名绑定外部预览程序；选中文件按 `F3`（可改）直接调用。
 
 ### 文件操作
 
@@ -164,6 +167,7 @@ Tauri 2 + Rust 后端，React 19 前端。
 | `npm run dev:app` | 开发版（Vite + Tauri），独立 identifier 与数据目录，可与正式版同时运行 |
 | `npm run tauri dev` | 老旧方式：沿用正式版 identifier，会与正式版抢占单实例锁 |
 | `npm run tauri build` | 产物：`src-tauri/target/release/flowdir.exe` + NSIS 安装包 |
+| `npm test` | 前端单测（Vitest，纯逻辑，Node 环境） |
 | `cd src-tauri && cargo test` | Rust 单测 |
 
 开发版由 `src-tauri/tauri.dev.conf.json` 覆盖 identifier 为 `dev.flowdir.app.dev`。单实例锁、数据目录、窗口标题/托盘提示全部由该值派生：
@@ -219,6 +223,7 @@ screenshots/      README 与文档截图
 - 系统通知在单文件免安装形态下可能被 Windows 的 AUMID 规则拦下，此时仍会闪烁任务栏并在界面内提示。
 - Everything 为可选依赖，未安装或未运行时使用内置扫描。
 - WebDAV 文件在预览或「打开」时下载到本地缓存；外部程序对缓存副本的修改不会回传到服务器，需要重新上传。
+- Word/Excel 预览只读取正文，不展开页眉页脚、批注、图片与复杂样式；Word 最多 800 个块，Excel 每表最多 2000 行/80 列。
 
 ## 第三方图标资源
 

@@ -18,6 +18,7 @@ mod icons;
 mod layout;
 mod logging;
 mod naming;
+mod office;
 mod ops;
 mod pathkey;
 mod preview;

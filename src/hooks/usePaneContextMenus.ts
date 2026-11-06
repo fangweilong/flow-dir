@@ -3,25 +3,24 @@ import type { MutableRefObject } from 'react'
 import type { MenuItem } from '../ContextMenu'
 import type { MenuPoint } from '../PaneView'
 import type { Drive, Entry, Lang, ListData } from '../types'
-import { filterMatches } from '../types'
 import { samePath } from '../workspace'
 import type { Workspace } from '../workspace'
 import type { ShortcutId } from '../shortcuts'
 import type { Translate } from '../i18n'
 import { driveKindLabel } from '../i18n'
 import { menuHint } from '../shortcuts'
-import { baseName, entryPath, isArchiveName, isDir, isFsPath, isInsideArchive, isShellPath, isWebdavPath, joinPath } from '../paths'
+import { entryPath, isFsPath, isInsideArchive, isWebdavPath, joinPath } from '../paths'
 import {
-  clipboardCopy,
   COMPRESS_FORMATS,
   driveEject,
   explorerOpen,
-  openTerminal,
   shellMenuBackgroundShow,
   shellMenuShow,
   shellProperties,
 } from '../api'
 import type { CompressFormat } from '../api'
+import { buildBlankMenu } from '../menus/blankMenu'
+import { buildRowMenu } from '../menus/rowMenu'
 
 export type QuickPlaceEntry = { key: string; label: string; path: string; custom: boolean }
 
@@ -154,162 +153,32 @@ export function usePaneContextMenus({
   }, [listData, pendingNew, startRename, update, wsRef])
 
   const rowFallback = useCallback(
-    (paneId: string, entry: Entry, paths: string[]): MenuItem[] => {
-      const dir = isDir(entry.attrs)
-      const pane = wsRef.current?.panes[paneId]
-      const tabPath = pane ? wsRef.current?.tabs[pane.activeTabId]?.path : undefined
-      const inArchive = Boolean(tabPath && isInsideArchive(tabPath))
-      // Remote archives cannot be extracted in-process, and the shell menu does not run
-      // for a WebDAV folder at all, so the fallback menu is the only menu they get.
-      const remote = Boolean(tabPath && isWebdavPath(tabPath))
-      const isArchive = !remote && !dir && paths.length === 1 && tabPath && !inArchive && isArchiveName(entry.name)
-      const archivePath = isArchive ? entryPath(tabPath!, entry) : null
-      const archiveMenu: MenuItem[] = archivePath
-        ? [
-            { kind: 'sep' },
-            {
-              kind: 'item',
-              label: t('menu.extractHere'),
-              onSelect: () => extractArchive(archivePath, tabPath!),
-            },
-            {
-              kind: 'item',
-              label: t('menu.extractTo'),
-              onSelect: () => setExtractTarget({ archive: archivePath, initial: tabPath! }),
-            },
-          ]
-        : []
-      const compressMenu: MenuItem[] =
-        tabPath !== undefined && !remote
-          ? [
-              {
-                kind: 'item',
-                label: t('menu.compressTo'),
-                onSelect: () => requestCompress(paths, tabPath, 'zip'),
-              },
-            ]
-          : []
-      return [
+    (paneId: string, entry: Entry, paths: string[]) =>
+      buildRowMenu(
         {
-          kind: 'item',
-          label: t('menu.open'),
-          hint: menuHint(keys.open),
-          onSelect: () => {
-            const current = wsRef.current
-            const pane = current?.panes[paneId]
-            const tab = pane ? current?.tabs[pane.activeTabId] : undefined
-            if (!tab) return
-            const target = entryPath(tab.path, entry)
-            if (dir || isArchive) navigate(tab.id, target)
-            else openTarget(target)
-          },
+          wsRef,
+          t,
+          keys,
+          navigate,
+          openTabAt,
+          openTarget,
+          showToast,
+          copyPaths,
+          startRename,
+          startRenameMany,
+          deleteEntries,
+          pasteInto,
+          extractArchive,
+          setExtractTarget,
+          requestCompress,
+          setFileTools,
+          isPinnedPlace,
+          togglePinPlace,
         },
-        ...(dir || isArchive
-          ? [
-              {
-                kind: 'item' as const,
-                label: t('menu.openInNewTab'),
-                onSelect: () => {
-                  if (tabPath) {
-                    const target = entryPath(tabPath, entry)
-                    if (openTabAt) openTabAt(paneId, target)
-                    else if (pane) navigate(pane.activeTabId, target)
-                  }
-                },
-              },
-            ]
-          : []),
-        {
-          kind: 'item',
-          label: t('menu.copy'),
-          hint: menuHint(keys.copy),
-          onSelect: () => {
-            clipboardCopy(paths, false)
-              .then(() => showToast(t('toast.copied', { count: paths.length })))
-              .catch(() => showToast(t('toast.copyFailed')))
-          },
-        },
-        ...(!inArchive
-          ? [
-              {
-                kind: 'item' as const,
-                label: t('menu.cut'),
-                hint: menuHint(keys.cut),
-                onSelect: () => {
-                  clipboardCopy(paths, true)
-                    .then(() => showToast(t('toast.cut', { count: paths.length })))
-                    .catch(() => showToast(t('toast.copyFailed')))
-                },
-              },
-              { kind: 'item' as const, label: t('menu.paste'), hint: menuHint(keys.paste), onSelect: () => pasteInto(paneId) },
-              { kind: 'sep' as const },
-              {
-                kind: 'item' as const,
-                label: paths.length > 1 ? t('menu.batchRename') : t('menu.rename'),
-                hint: menuHint(keys.rename),
-                onSelect: () =>
-                  paths.length > 1
-                    ? startRenameMany(paneId, paths.map(baseName))
-                    : startRename(paneId, entry.name),
-              },
-              {
-                kind: 'item' as const,
-                label: t('menu.delete'),
-                hint: menuHint(keys.delete),
-                danger: true,
-                onSelect: () => deleteEntries(paneId, [entry.name], false),
-              },
-              ...(remote
-                ? []
-                : [
-                    {
-                      kind: 'item' as const,
-                      label: t('menu.deletePermanent'),
-                      hint: menuHint(`shift+${keys.delete}`),
-                      danger: true,
-                      onSelect: () => deleteEntries(paneId, [entry.name], true),
-                    },
-                  ]),
-              ...archiveMenu,
-              ...compressMenu,
-              ...(dir && paths.length === 1
-                ? [
-                    { kind: 'sep' as const },
-                    {
-                      kind: 'item' as const,
-                      label: isPinnedPlace(paths[0]) ? t('sidebar.unpinPlace') : t('sidebar.pinPlace'),
-                      onSelect: () => togglePinPlace(paths[0]),
-                    },
-                    ...(remote
-                      ? []
-                      : [
-                          {
-                            kind: 'item' as const,
-                            label: t('menu.openTerminal'),
-                            onSelect: () =>
-                              void openTerminal(paths[0]).catch((e: unknown) =>
-                                showToast(t('op.failed', { code: errorCode(e) })),
-                              ),
-                          },
-                        ]),
-                  ]
-                : []),
-            ]
-          : []),
-        ...(remote
-          ? []
-          : [
-              { kind: 'sep' as const },
-              {
-                kind: 'item' as const,
-                label: t('menu.hash'),
-                onSelect: () => setFileTools({ mode: 'hash', paths }),
-              },
-            ]),
-        { kind: 'sep' },
-        { kind: 'item', label: t('menu.copyPath'), onSelect: () => copyPaths(paths) },
-      ]
-    },
+        paneId,
+        entry,
+        paths,
+      ),
     [
       copyPaths,
       deleteEntries,
@@ -319,6 +188,7 @@ export function usePaneContextMenus({
       navigate,
       openTabAt,
       openTarget,
+      pasteInto,
       requestCompress,
       setExtractTarget,
       setFileTools,
@@ -397,103 +267,36 @@ export function usePaneContextMenus({
 
   const blankFallbackMenu = useCallback(
     (paneId: string, point: MenuPoint) => {
-      const current = wsRef.current
-      if (!current) return
-      const pane = current.panes[paneId]
-      const tab = pane ? current.tabs[pane.activeTabId] : undefined
-      if (!tab) return
-      const inArchive = Boolean(tab.path && isInsideArchive(tab.path))
-      // Shell locations expose only the shell's own commands; local file operations and
-      // scans have no filesystem path to run against.
-      const inShell = Boolean(tab.path && isShellPath(tab.path))
-      // WebDAV still supports new folder/paste/refresh, but terminal, Explorer, folder
-      // size, duplicate scan and compare all need a local filesystem path.
-      const remote = Boolean(tab.path && isWebdavPath(tab.path))
-      const items: MenuItem[] = tab.path
-        ? [
-            ...(!inArchive && !inShell
-              ? [
-                  { kind: 'item' as const, label: t('menu.newFolder'), onSelect: () => createFolder(paneId) },
-                  { kind: 'item' as const, label: t('menu.paste'), hint: menuHint(keys.paste), onSelect: () => pasteInto(paneId) },
-                  { kind: 'sep' as const },
-                ]
-              : []),
-            { kind: 'item', label: t('menu.refresh'), hint: menuHint(keys.refresh), onSelect: () => manualRefresh() },
-            {
-              kind: 'item',
-              label: t('menu.selectAll'),
-              hint: menuHint(keys.selectAll),
-              onSelect: () => {
-                update(tab.id, (d) => {
-                  // Select what the user can see: the pane invariant is that filtered-out
-                  // rows never enter the selection (copy/drag read it directly).
-                  const all = d.entries
-                    .filter((entry) => filterMatches(entry.name, d.filter))
-                    .map((entry) => entry.name)
-                  return { ...d, selected: new Set(all), anchor: all[0] ?? '' }
-                })
-              },
-            },
-            { kind: 'sep' },
-            ...(!inArchive && !inShell && !remote
-              ? [
-                  {
-                    kind: 'item' as const,
-                    label: t('menu.openTerminal'),
-                    onSelect: () =>
-                      void openTerminal(tab.path).catch((e: unknown) =>
-                        showToast(t('op.failed', { code: errorCode(e) })),
-                      ),
-                  },
-                  {
-                    kind: 'item' as const,
-                    label: t('menu.openInExplorer'),
-                    onSelect: () =>
-                      void explorerOpen(tab.path).catch((e: unknown) =>
-                        showToast(t('op.failed', { code: errorCode(e) })),
-                      ),
-                  },
-                ]
-              : []),
-            {
-              kind: 'item',
-              label: pane.hidden ? t('list.hideHidden') : t('list.showHidden'),
-              onSelect: () => toggleHidden(paneId),
-            },
-            ...(!inShell && !remote
-              ? [
-                  {
-                    kind: 'item' as const,
-                    label: t('menu.folderSize'),
-                    onSelect: () => startFolderSize(tab.id, tab.path),
-                  },
-                  {
-                    kind: 'item' as const,
-                    label: t('menu.findDuplicates'),
-                    onSelect: () => setFileTools({ mode: 'dup', root: tab.path }),
-                  },
-                  {
-                    kind: 'item' as const,
-                    label: t('compare.entry'),
-                    onSelect: () => setCompareOpen(true),
-                  },
-                ]
-              : []),
-          ]
-        : [{ kind: 'item', label: t('menu.refresh'), hint: menuHint(keys.refresh), onSelect: () => manualRefresh() }]
-
-      setMenu({ x: point.clientX, y: point.clientY, items })
+      const items = buildBlankMenu(
+        {
+          wsRef,
+          t,
+          keys,
+          update,
+          manualRefresh,
+          toggleHidden,
+          createFolder,
+          pasteInto,
+          startFolderSize,
+          setFileTools,
+          setCompareOpen,
+          showToast,
+        },
+        paneId,
+        point,
+      )
+      if (items) setMenu({ x: point.clientX, y: point.clientY, items })
     },
     [
       createFolder,
       keys,
-      listData,
       manualRefresh,
       pasteInto,
       setCompareOpen,
       setFileTools,
       setMenu,
       showToast,
+      startFolderSize,
       t,
       toggleHidden,
       update,

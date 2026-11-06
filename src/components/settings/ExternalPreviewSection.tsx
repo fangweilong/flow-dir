@@ -176,7 +176,7 @@ export function ExternalPreviewSection({ settings, keys, onChange, t, visible }:
           </div>
           <NumberField
             min={1}
-            max={1024}
+            max={4096}
             value={settings.previewTextKb}
             onChange={(value) => onChange({ ...settings, previewTextKb: value })}
             data-preview-text-kb

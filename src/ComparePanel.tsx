@@ -16,46 +16,14 @@ import type {
   CompareStatus,
   Lang,
 } from './types'
+import { STATUS_ORDER, buildCompareOptions, csvCell, decideAction } from './compare/plan'
+import type { SyncAction, SyncPlan } from './compare/plan'
+import { statusClass, statusLabel, statusMark } from './compare/status'
 
-/** One confirmed step of the preview; the app executes these through the normal op pipeline. */
-export type SyncAction =
-  | { kind: 'copy'; source: string; targetDir: string }
-  | { kind: 'delete'; paths: string[] }
+// Kept as the panel's public types so existing imports do not reach into the module.
+export type { SyncAction, SyncPlan } from './compare/plan'
 
 type Session = { left: string; right: string; options: CompareOptions }
-export type SyncPlan = {
-  actions: SyncAction[]
-  conflicts: number
-  mismatches: number
-}
-
-const STATUS_ORDER: CompareStatus[] = ['left', 'right', 'different', 'same']
-
-/** Inputs are megabytes/days; the backend wants bytes/milliseconds. */
-const parseMb = (value: string) => {
-  const parsed = Number(value)
-  return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed * 1024 * 1024) : 0
-}
-
-const splitList = (value: string) =>
-  value
-    .split(/[\s,;]+/)
-    .map((item) => item.trim())
-    .filter(Boolean)
-
-const parentRel = (rel: string) => {
-  const cut = rel.lastIndexOf('\\')
-  return cut < 0 ? '' : rel.slice(0, cut)
-}
-
-// Excel evaluates a quoted cell that starts with `=`, `+`, `-` or `@` as a formula, so a
-// file name like `=cmd|'/c calc'!A1` would run when the exported CSV is opened. The
-// leading apostrophe keeps such values literal.
-const csvCell = (value: string | number) => {
-  const text = String(value)
-  const safe = /^[=+\-@\t\r]/.test(text) ? `'${text}` : text
-  return `"${safe.replace(/"/g, '""')}"`
-}
 
 type Props = {
   lang: Lang
@@ -135,19 +103,19 @@ export function ComparePanel({
   const levelRelRef = useRef('')
   levelRelRef.current = levelRel
 
-  const options: CompareOptions = useMemo(() => {
-    const daysValue = Number(days)
-    return {
-      includeHidden: includeHiddenOn,
-      extensions: splitList(exts).map((ext) => ext.replace(/^\./, '').toLowerCase()),
-      minSize: parseMb(minMb),
-      maxSize: parseMb(maxMb),
-      afterMs: Number.isFinite(daysValue) && daysValue > 0 ? Date.now() - daysValue * 86_400_000 : 0,
-      beforeMs: 0,
-      exclude: splitList(exclude),
-      toleranceMs: Math.max(0, Math.round((Number(toleranceSec) || 0) * 1000)),
-    }
-  }, [includeHiddenOn, exts, minMb, maxMb, days, exclude, toleranceSec])
+  const options: CompareOptions = useMemo(
+    () =>
+      buildCompareOptions({
+        includeHidden: includeHiddenOn,
+        extensions: exts,
+        minMb,
+        maxMb,
+        days,
+        exclude,
+        toleranceSec,
+      }),
+    [includeHiddenOn, exts, minMb, maxMb, days, exclude, toleranceSec],
+  )
 
   const cancelCounts = useCallback(() => {
     if (countsJob.current) {
@@ -416,56 +384,18 @@ export function ComparePanel({
     return result
   }, [entries])
 
-  const decide = (entry: CompareEntry): SyncAction | 'conflict' | 'mismatch' | null => {
-    if (!session) return null
-    const leftPath = joinPath(session.left, entry.rel)
-    const rightPath = joinPath(session.right, entry.rel)
-    const targetLeft = joinPath(session.left, parentRel(entry.rel))
-    const targetRight = joinPath(session.right, parentRel(entry.rel))
-    if (entry.left?.isDir || entry.right?.isDir) {
-      if (entry.left && entry.right) {
-        return entry.left.isDir !== entry.right.isDir ? 'mismatch' : null
-      }
-      if (entry.left && !entry.right) {
-        if (strategy === 'r2l') return deleteExtras ? { kind: 'delete', paths: [leftPath] } : null
-        return { kind: 'copy', source: leftPath, targetDir: targetRight }
-      }
-      if (entry.right && !entry.left) {
-        if (strategy === 'l2r') return deleteExtras ? { kind: 'delete', paths: [rightPath] } : null
-        return { kind: 'copy', source: rightPath, targetDir: targetLeft }
-      }
-      return 'mismatch'
-    }
-    if (entry.left && entry.right) {
-      if (entry.status === 'same') return null
-      // Verification failed on one side: the copy would overwrite a file we could not
-      // read, so keep the pair out of the plan.
-      if (hashResultsRef.current[entry.rel]?.error) return null
-      // A side the filters hide is only shown because the other side matched; copying
-      // from it would propagate a file the user scoped out.
-      const leftUsable = entry.leftCompared !== false
-      const rightUsable = entry.rightCompared !== false
-      if (strategy === 'l2r') {
-        return leftUsable ? { kind: 'copy', source: leftPath, targetDir: targetRight } : null
-      }
-      if (strategy === 'r2l') {
-        return rightUsable ? { kind: 'copy', source: rightPath, targetDir: targetLeft } : null
-      }
-      const tolerance = session.options.toleranceMs
-      const diff = entry.left.mtime - entry.right.mtime
-      if (Math.abs(diff) <= tolerance) return 'conflict'
-      if (diff > 0) {
-        return leftUsable ? { kind: 'copy', source: leftPath, targetDir: targetRight } : null
-      }
-      return rightUsable ? { kind: 'copy', source: rightPath, targetDir: targetLeft } : null
-    }
-    if (entry.left) {
-      if (strategy === 'r2l') return deleteExtras ? { kind: 'delete', paths: [leftPath] } : null
-      return { kind: 'copy', source: leftPath, targetDir: targetRight }
-    }
-    if (strategy === 'l2r') return deleteExtras ? { kind: 'delete', paths: [rightPath] } : null
-    return { kind: 'copy', source: rightPath, targetDir: targetLeft }
-  }
+  const decide = (entry: CompareEntry) =>
+    session
+      ? decideAction({
+          entry,
+          leftRoot: session.left,
+          rightRoot: session.right,
+          strategy,
+          deleteExtras,
+          hashError: Boolean(hashResultsRef.current[entry.rel]?.error),
+          toleranceMs: session.options.toleranceMs,
+        })
+      : null
 
   const openPreview = () => {
     const actions: SyncAction[] = []
@@ -550,35 +480,6 @@ export function ComparePanel({
       setExporting(false)
     }
   }
-
-  const statusLabel = (status: CompareStatus) => {
-    switch (status) {
-      case 'left':
-        return t('compare.status.left')
-      case 'right':
-        return t('compare.status.right')
-      case 'different':
-        return t('compare.status.different')
-      default:
-        return t('compare.status.same')
-    }
-  }
-  const statusClass = (status: CompareStatus) => {
-    switch (status) {
-      case 'left':
-        return 'text-rose-600 dark:text-rose-400'
-      case 'right':
-        return 'text-emerald-600 dark:text-emerald-400'
-      case 'different':
-        return 'text-warning-strong dark:text-warning-soft'
-      default:
-        return 'text-muted-2'
-    }
-  }
-
-  /** git-diff markers: `+` only on the right, `-` only on the left, `~` modified, `=` same. */
-  const statusMark = (status: CompareStatus) =>
-    status === 'right' ? '+' : status === 'left' ? '-' : status === 'different' ? '~' : '='
 
   const browse = async (side: 'left' | 'right') => {
     try {
@@ -796,7 +697,7 @@ export function ComparePanel({
                     : 'border-transparent text-muted-2'
                 }`}
               >
-                {statusLabel(status)} {statusCounts[status]}
+                {statusLabel(status, t)} {statusCounts[status]}
               </button>
             ))}
           </div>
@@ -822,7 +723,7 @@ export function ComparePanel({
               iconScale={iconScale}
               iconPx={iconPx}
               colorRules={colorRules}
-              statusLabel={statusLabel}
+              statusLabel={(status) => statusLabel(status, t)}
               statusClass={statusClass}
               statusMark={statusMark}
               fmtTime={fmtTime}

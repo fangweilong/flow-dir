@@ -23,6 +23,14 @@ pub fn load_failed() -> bool {
     LOAD_FAILED.load(Ordering::Relaxed)
 }
 
+/// Schema version written to `settings.toml`. Files without the key are version 0 and get
+/// the one-time migrations below; `normalize` then stamps the current version.
+const SETTINGS_VERSION: u32 = 1;
+/// The 8 KB text-preview default shipped before version 1. It was too small to show more
+/// than a few CSV/code lines, so that exact legacy value is treated as "unset" once.
+const LEGACY_PREVIEW_TEXT_KB: u32 = 8;
+const DEFAULT_PREVIEW_TEXT_KB: u32 = 256;
+
 /// User-added quick-access entry.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase", default)]
@@ -149,6 +157,8 @@ where
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
+    /// `settings.toml` schema version; absent files deserialize as 0.
+    pub settings_version: u32,
     pub language: String,
     pub theme: String,
     /// Preview panel visibility on startup.
@@ -247,7 +257,7 @@ pub struct Settings {
     /// Largest width/height a rendered image or PDF page may use (256–16384).
     #[serde(default, deserialize_with = "deserialize_lenient_u32")]
     pub preview_max_dimension: u32,
-    /// How much of a text file is shown, in KB (1–1024).
+    /// How much of a text file is shown, in KB (1–4096).
     #[serde(default, deserialize_with = "deserialize_lenient_u32")]
     pub preview_text_kb: u32,
     /// Reopened-tab stack depth (1–50); `Ctrl+Shift+T` walks it.
@@ -515,6 +525,7 @@ fn default_protect_confirm() -> Vec<String> {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            settings_version: SETTINGS_VERSION,
             language: default_language(),
             theme: default_theme(),
             preview_open: true,
@@ -555,7 +566,7 @@ impl Default for Settings {
             undo_limit: 10,
             preview_max_file_mb: 64,
             preview_max_dimension: 4096,
-            preview_text_kb: 8,
+            preview_text_kb: DEFAULT_PREVIEW_TEXT_KB,
             closed_tab_limit: 20,
             restore_tabs_on_start: true,
             new_tab_on_middle_click: true,
@@ -650,7 +661,8 @@ impl Settings {
         // upper bound keeps one accidental keystroke from reserving gigabytes.
         self.preview_max_file_mb = self.preview_max_file_mb.clamp(1, 4096);
         self.preview_max_dimension = self.preview_max_dimension.clamp(256, 16384);
-        self.preview_text_kb = self.preview_text_kb.clamp(1, 1024);
+        self.preview_text_kb = self.preview_text_kb.clamp(1, 4096);
+        self.settings_version = SETTINGS_VERSION;
         self.closed_tab_limit = self.closed_tab_limit.clamp(1, 50);
         self.dup_concurrency = self.dup_concurrency.min(16);
         self.dup_max_mb_per_sec = self.dup_max_mb_per_sec.min(4096);
@@ -754,6 +766,9 @@ const FILE: &str = "settings.toml";
 const TEMPLATE: &str = r#"# FlowDir 设置 / settings
 # 改完立即生效，只有 gpu_accel 需要重启。 / Applies immediately; only gpu_accel needs a restart.
 
+# 配置结构版本，请勿手动修改 / settings schema version, do not edit
+settings_version = 1
+
 # 界面语言 / UI language: "zh-CN" | "en"
 language = "zh-CN"
 
@@ -855,11 +870,11 @@ shortcuts = []
 # 撤销/重做历史深度（1–100）/ undo and redo history depth, 1–100
 undo_limit = 10
 
-# 预览上限：最大文件（MB，1–4096）、最大渲染边长（像素，256–16384）、文本预览长度（KB，1–1024）
+# 预览上限：最大文件（MB，1–4096）、最大渲染边长（像素，256–16384）、文本预览长度（KB，1–4096）
 # preview caps: largest file in MB, largest rendered edge in px, text preview size in KB
 preview_max_file_mb = 64
 preview_max_dimension = 4096
-preview_text_kb = 8
+preview_text_kb = 256
 
 # 可恢复的已关闭标签数量（1–50）/ closed tabs remembered for Ctrl+Shift+T, 1–50
 closed_tab_limit = 20
@@ -930,6 +945,7 @@ autostart_minimized = true
 #[derive(Deserialize)]
 #[serde(default)]
 struct FileSettings {
+    settings_version: u32,
     language: String,
     theme: String,
     preview_open: bool,
@@ -995,6 +1011,8 @@ impl Default for FileSettings {
     fn default() -> Self {
         let base = Settings::default();
         Self {
+            // 0 = the file predates the schema marker; `From<FileSettings>` migrates it.
+            settings_version: 0,
             language: base.language,
             theme: base.theme,
             preview_open: base.preview_open,
@@ -1057,7 +1075,17 @@ impl Default for FileSettings {
 
 impl From<FileSettings> for Settings {
     fn from(file: FileSettings) -> Self {
+        // Version 0 files predate the schema marker. Only the old 8 KB default is
+        // migrated, so a deliberately chosen value (including a different small one)
+        // survives; `normalize` stamps the current version afterwards.
+        let preview_text_kb =
+            if file.settings_version < SETTINGS_VERSION && file.preview_text_kb == LEGACY_PREVIEW_TEXT_KB {
+                DEFAULT_PREVIEW_TEXT_KB
+            } else {
+                file.preview_text_kb
+            };
         Self {
+            settings_version: file.settings_version,
             language: file.language,
             theme: file.theme,
             preview_open: file.preview_open,
@@ -1098,7 +1126,7 @@ impl From<FileSettings> for Settings {
             undo_limit: file.undo_limit,
             preview_max_file_mb: file.preview_max_file_mb,
             preview_max_dimension: file.preview_max_dimension,
-            preview_text_kb: file.preview_text_kb,
+            preview_text_kb,
             closed_tab_limit: file.closed_tab_limit,
             restore_tabs_on_start: file.restore_tabs_on_start,
             new_tab_on_middle_click: file.new_tab_on_middle_click,
@@ -1237,6 +1265,11 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), A
         }
     };
 
+    set_value(
+        &mut doc,
+        "settings_version",
+        Value::from(settings.settings_version as i64),
+    );
     set_value(&mut doc, "language", Value::from(settings.language.as_str()));
     set_value(&mut doc, "theme", Value::from(settings.theme.as_str()));
     set_value(&mut doc, "preview_open", Value::from(settings.preview_open));
@@ -1745,5 +1778,32 @@ webdav = [{ id = "nas", name = "NAS", url = "https://nas.example/dav", username 
         let json = r#"{"reclaimMemory": true}"#;
         let parsed_json: Settings = serde_json::from_str(json).unwrap();
         assert!(parsed_json.reclaim_memory);
+    }
+
+    #[test]
+    fn legacy_text_preview_budget_is_migrated_once() {
+        // Files written before the schema marker: the old 8 KB default becomes 256 KB.
+        let old: FileSettings = toml_edit::de::from_str(
+            "language = \"zh-CN\"\npreview_text_kb = 8\n",
+        )
+        .unwrap();
+        let migrated = Settings::from(old).normalize();
+        assert_eq!(migrated.preview_text_kb, DEFAULT_PREVIEW_TEXT_KB);
+        assert_eq!(migrated.settings_version, SETTINGS_VERSION);
+
+        // A versioned file keeps a deliberate 8 KB choice.
+        let current: FileSettings = toml_edit::de::from_str(
+            "settings_version = 1\nlanguage = \"zh-CN\"\npreview_text_kb = 8\n",
+        )
+        .unwrap();
+        let kept = Settings::from(current).normalize();
+        assert_eq!(kept.preview_text_kb, 8);
+
+        // A different small value from a version-0 file is left alone too.
+        let other: FileSettings = toml_edit::de::from_str(
+            "language = \"zh-CN\"\npreview_text_kb = 16\n",
+        )
+        .unwrap();
+        assert_eq!(Settings::from(other).normalize().preview_text_kb, 16);
     }
 }

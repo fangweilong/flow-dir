@@ -45,4 +45,4 @@
 - **体积与警告红线**：
   - 生产构建产物（`npm run build`）中**严禁出现单个 Chunk 超过 500 kB** 的 Rollup 告警；
   - 首屏核心主 Chunk（`index-*.js`）体积严格限制在 **300 kB 以下**；
-  - 每次前端代码修改必须通过 `npx tsc --noEmit`（0 错误）与 `npm run build`（0 大体积告警）双重验收。
+  - 每次前端代码修改必须通过 `npx tsc --noEmit`（0 错误）、`npm test`（全绿）与 `npm run build`（0 大体积告警）三重验收。

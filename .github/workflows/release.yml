@@ -72,6 +72,9 @@ jobs:
         run: npx tsc --noEmit
 
       - if: steps.version.outputs.release == 'true'
+        run: npm test
+
+      - if: steps.version.outputs.release == 'true'
         name: Build (portable + NSIS)
         env:
           FLOWDIR_UPDATE_REPO: ${{ github.repository }}
