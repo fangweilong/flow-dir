@@ -1495,6 +1495,26 @@ mod tests {
     }
 
     #[test]
+    fn compares_hrefs_after_decoding() {
+        // `Endpoint::object` percent-encodes the request target, while servers may answer
+        // with raw UTF-8 or a differently escaped href. The self-filter has to compare
+        // decoded paths, otherwise the listed folder shows up as one of its own children.
+        assert_eq!(
+            normalize_url_path("/dav/a%20b"),
+            normalize_url_path("/dav/a b")
+        );
+        assert_eq!(
+            normalize_url_path("https://nas/dav/%E4%B8%AD%E6%96%87/"),
+            "/dav/中文"
+        );
+        assert_eq!(normalize_url_path("/dav/a%2Fb"), "/dav/a/b");
+        assert_eq!(
+            normalize_url_path("/webdav/"),
+            normalize_url_path("/webdav")
+        );
+    }
+
+    #[test]
     fn parses_propfind_multistatus() {
         let xml = br#"<?xml version="1.0"?>
 <d:multistatus xmlns:d="DAV:">

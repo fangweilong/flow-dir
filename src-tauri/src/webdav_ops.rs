@@ -280,7 +280,26 @@ fn rename_sources(
                 let target = rel_join(rel_parent(&dav.path), name);
                 // MOVE with Overwrite: F rejects an existing target with 412 instead of
                 // silently replacing it, matching the local rename prompt.
-                client.move_to(&dav.path, &target, request.overwrite)?;
+                match client.move_to(&dav.path, &target, request.overwrite) {
+                    Ok(()) => {}
+                    // A rename on a server without MOVE degrades to copy-then-delete.
+                    Err(err) if err.code == "BAD_VERB" => {
+                        if !request.overwrite && client.stat(&target)?.is_some() {
+                            return Err(ApiError::new("EXISTS", client.url_for(&target)));
+                        }
+                        copy_between_recursive(
+                            &client,
+                            &dav.path,
+                            &client,
+                            &target,
+                            request.overwrite,
+                            runner,
+                            cancel,
+                        )?;
+                        client.delete(&dav.path)?;
+                    }
+                    Err(err) => return Err(err),
+                }
             } else {
                 let parent = Path::new(source)
                     .parent()
@@ -442,10 +461,26 @@ fn transfer_same_connection(
         }
     }
     runner.label(base_name(src));
-    match kind {
-        Kind::Copy => client.copy_to(src, dest, overwrite)?,
-        Kind::Move => client.move_to(src, dest, overwrite)?,
+    let result = match kind {
+        Kind::Copy => client.copy_to(src, dest, overwrite),
+        Kind::Move => client.move_to(src, dest, overwrite),
         _ => return Err(ApiError::new("BAD_ARGS", "unsupported transfer")),
+    };
+    match result {
+        Ok(()) => {}
+        // RFC 4918 requires COPY/MOVE, but lightweight NAS stacks and proxy front-ends
+        // sometimes answer 405/501 for them. Falling back to a byte round trip keeps the
+        // transfer working; the recursion reports per-file progress and cancellation.
+        Err(err) if err.code == "BAD_VERB" => {
+            copy_between_recursive(client, src, client, dest, overwrite, runner, cancel)?;
+            if kind == Kind::Move {
+                // Same order as every other move path: delete the source only after the
+                // destination holds every byte.
+                client.delete(src)?;
+            }
+            return Ok(());
+        }
+        Err(err) => return Err(err),
     }
     runner.add_work(stat.size);
     Ok(())
