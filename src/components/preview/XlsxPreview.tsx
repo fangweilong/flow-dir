@@ -16,6 +16,11 @@ export function XlsxPreview({ sheets, t }: { sheets: SheetPreview[] | null | und
   const [visible, setVisible] = useState(SHEET_PAGE_SIZE)
   const active = sheets && sheets.length > 0 ? Math.min(requested, sheets.length - 1) : 0
   useEffect(() => {
+    // A different workbook must open on its first sheet, not on the index left over from
+    // the previous one (which may not even exist in the new file).
+    setRequested(0)
+  }, [sheets])
+  useEffect(() => {
     setVisible(SHEET_PAGE_SIZE)
   }, [active, sheets])
   if (!sheets || sheets.length === 0) {

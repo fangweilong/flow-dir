@@ -481,7 +481,9 @@ export default function App() {
       extractTarget ||
       compressTarget ||
       previewExpanded ||
-      quitBusy,
+      quitBusy ||
+      protectPrompt ||
+      historyOpen,
   )
   const cyclePane = useCallback(() => {
     const current = wsRef.current
@@ -665,6 +667,9 @@ export default function App() {
             <ResizeHandle onPointerDown={startPreviewResize} />
             <Suspense fallback={null}>
               <PreviewPanel
+                // A new file must start at the top with its own view state; without a
+                // key the previous file's scroll offset and mode survived the switch.
+                key={previewName ? `${activeTab?.path ?? ''}/${previewName}` : 'preview-empty'}
                 info={preview.info}
                 loading={preview.loading}
                 error={preview.error}

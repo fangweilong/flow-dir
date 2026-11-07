@@ -159,8 +159,7 @@ pub fn list(
     let dav = parse(path).ok_or_else(|| ApiError::new("WEBDAV_CONN", path.to_string()))?;
     let conn = find(settings, &dav.connection)?;
     let client = DavClient::new(conn, None)?;
-    let entries = client.list(&dav.path, cancel)?;
-    let truncated = entries.len() >= MAX_ENTRIES;
+    let (entries, truncated) = client.list_detailed(&dav.path, cancel)?;
     Ok(ScanOutcome { entries, truncated })
 }
 
@@ -905,6 +904,17 @@ impl DavClient {
 
     /// `PROPFIND` depth 1 without the request target itself.
     pub(crate) fn list(&self, rel: &str, cancel: &AtomicBool) -> Result<Vec<Entry>, ApiError> {
+        self.list_detailed(rel, cancel).map(|(entries, _)| entries)
+    }
+
+    /// Like [`Self::list`], but reports whether `MAX_ENTRIES` cut the result. A caller
+    /// that deletes the source after moving its children must not treat a cut listing as
+    /// complete.
+    pub(crate) fn list_detailed(
+        &self,
+        rel: &str,
+        cancel: &AtomicBool,
+    ) -> Result<(Vec<Entry>, bool), ApiError> {
         let body = r#"<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/><d:getcontentlength/><d:getlastmodified/><d:etag/></d:prop></d:propfind>"#;
         let response = self.request(
             "PROPFIND",
@@ -930,6 +940,7 @@ impl DavClient {
             return Err(ApiError::new("NOT_FOUND", self.rel_url(rel)));
         }
         let mut entries = Vec::new();
+        let mut truncated = false;
         for row in rows {
             if row.missing || normalize_url_path(&row.href_path) == self_path {
                 continue;
@@ -941,14 +952,17 @@ impl DavClient {
             if name.is_empty() {
                 continue;
             }
+            // Check before pushing: a folder with exactly MAX_ENTRIES children is
+            // complete, and only an additional row proves the listing was cut.
+            if entries.len() >= MAX_ENTRIES {
+                truncated = true;
+                break;
+            }
             let attrs = if row.is_dir { ATTR_DIRECTORY } else { 0 };
             let id = fnv_u64(&format!("{}:{}:{}", row.href_path, row.size, row.mtime));
             entries.push(Entry::new(name, row.size, row.mtime, attrs, id));
-            if entries.len() >= MAX_ENTRIES {
-                break;
-            }
         }
-        Ok(entries)
+        Ok((entries, truncated))
     }
 
     /// `PROPFIND` depth 0. A 404 is a normal answer here ("does not exist"), not an error.

@@ -40,6 +40,16 @@ pub struct OpFailure {
     pub detail: String,
 }
 
+/// Where a source actually landed, as reported by the shell. A conflict resolved with
+/// "keep both" creates `name (1).ext`; the undo entry must target that file, not the
+/// requested name (which may be a pre-existing file the operation did not create).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct LandedItem {
+    pub index: u32,
+    pub path: String,
+}
+
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct OpProgress {
@@ -62,6 +72,9 @@ pub struct OpProgress {
     /// retry uses them to replay exactly the denied subset.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_indices: Vec<u32>,
+    /// Actual destination of each completed source; see [`LandedItem`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub landed: Vec<LandedItem>,
     pub done: bool,
     pub aborted: bool,
     pub error: Option<ApiError>,
@@ -131,6 +144,8 @@ pub(crate) struct Outcome {
     /// Source indices that failed, uncapped (4 bytes each; the 200-entry cap exists for
     /// the user-facing message, not for this bookkeeping).
     pub(crate) failed_indices: Vec<u32>,
+    /// Actual destination paths reported by the shell, used to build undo entries.
+    pub(crate) landed: Vec<LandedItem>,
     /// Any failure was `ACCESS_DENIED`, even past the capped report list.
     pub(crate) denied: bool,
 }
@@ -293,6 +308,13 @@ pub struct ElevatedReport {
     /// Indices of failed sources, uncapped; see [`OpProgress::failed_indices`].
     #[serde(default)]
     pub failed_indices: Vec<u32>,
+    /// Actual destination paths reported by the shell; see [`LandedItem`].
+    #[serde(default)]
+    pub landed: Vec<LandedItem>,
+    /// The `landed` list was capped to fit the pipe, so items in `succeeded` may have no
+    /// entry. Their requested name is not safe to use for undo.
+    #[serde(default)]
+    pub landed_truncated: bool,
     pub error: Option<ApiError>,
 }
 
@@ -402,6 +424,8 @@ pub fn run_headless(
         failed_total: 0,
         succeeded: Vec::new(),
         failed_indices: Vec::new(),
+        landed: Vec::new(),
+        landed_truncated: false,
         error,
     };
     let kind = match Kind::parse(&request.kind) {
@@ -436,6 +460,7 @@ pub fn run_headless(
     // The failure list is capped, so a truncated report needs the index list to tell which
     // items actually landed when the caller records an undo entry.
     let truncated = outcome.failed_total as usize > outcome.failed.len();
+    let (landed, landed_truncated) = cap_landed(outcome.landed);
     ElevatedReport {
         aborted: outcome.aborted,
         failed: outcome.failed,
@@ -446,8 +471,31 @@ pub fn run_headless(
             Vec::new()
         },
         failed_indices: outcome.failed_indices,
+        landed,
+        landed_truncated,
         error: outcome.error,
     }
+}
+
+/// The elevated report travels over a 16 MiB named pipe. Full destination paths for a
+/// huge batch would exceed it and turn a completed operation into a failed retry, so keep
+/// a bounded head; undo falls back to the requested name for the rest.
+const MAX_ELEVATED_LANDED_BYTES: usize = 4 * 1024 * 1024;
+
+/// Returns the kept items and whether any were dropped.
+fn cap_landed(items: Vec<LandedItem>) -> (Vec<LandedItem>, bool) {
+    let mut out = Vec::new();
+    let mut total = 0usize;
+    for item in items {
+        // Rough per-entry JSON overhead: index, quotes, comma.
+        let cost = item.path.len() + 16;
+        if total.saturating_add(cost) > MAX_ELEVATED_LANDED_BYTES {
+            return (out, true);
+        }
+        total += cost;
+        out.push(item);
+    }
+    (out, false)
 }
 
 /// Starts an operation on a fresh STA thread and returns immediately.
@@ -532,6 +580,7 @@ pub fn start(
                 succeeded,
                 // Uncapped: the elevated retry replays exactly this subset.
                 failed_indices: outcome.failed_indices,
+                landed: outcome.landed,
                 done: true,
                 aborted: outcome.aborted,
                 error: outcome.error,
@@ -577,6 +626,7 @@ fn run_guarded<F: FnOnce() -> Outcome>(kind: &str, work: F) -> Outcome {
                 failed_total: 0,
                 succeeded: Vec::new(),
                 failed_indices: Vec::new(),
+                landed: Vec::new(),
                 denied: false,
             }
         }
@@ -605,6 +655,7 @@ fn run(
                 failed_total: 0,
                 succeeded: Vec::new(),
                 failed_indices: Vec::new(),
+                landed: Vec::new(),
                 denied: false,
             };
         }
@@ -674,6 +725,7 @@ fn perform(
     let failures = Arc::new(FailureLog::default());
     let succeeded: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
     let failed_indices: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+    let landed: Arc<Mutex<Vec<LandedItem>>> = Arc::new(Mutex::new(Vec::new()));
     let source_index: Arc<HashMap<String, u32>> = Arc::new(
         request
             .sources
@@ -696,6 +748,7 @@ fn perform(
         failures: failures.clone(),
         succeeded: succeeded.clone(),
         failed_indices: failed_indices.clone(),
+        landed: landed.clone(),
         source_index,
         canonical_index: Arc::new(OnceLock::new()),
         cancel,
@@ -710,6 +763,7 @@ fn perform(
             failed_total: failures.count(),
             succeeded: succeeded.lock().unwrap().clone(),
             failed_indices: failed_indices.lock().unwrap().clone(),
+            landed: landed.lock().unwrap().clone(),
             denied: failures.denied(),
         };
         let operation: IFileOperation = match CoCreateInstance(&FileOperation, None, CLSCTX_ALL) {
@@ -779,6 +833,7 @@ fn perform(
         };
         let completed: Vec<u32> = succeeded.lock().unwrap().clone();
         let reported_failed: Vec<u32> = failed_indices.lock().unwrap().clone();
+        let landed_items = landed.lock().unwrap().clone();
         Outcome {
             aborted,
             error,
@@ -786,6 +841,7 @@ fn perform(
             failed_total,
             succeeded: completed,
             failed_indices: reported_failed,
+            landed: landed_items,
             denied: failures.denied(),
         }
     }
@@ -921,6 +977,8 @@ struct Sink {
     succeeded: Arc<Mutex<Vec<u32>>>,
     /// Source indices of failed items, uncapped; see [`Outcome::failed_indices`].
     failed_indices: Arc<Mutex<Vec<u32>>>,
+    /// Actual destination of each completed item, reported by the `Post*` callbacks.
+    landed: Arc<Mutex<Vec<LandedItem>>>,
     /// Lowercased source path → index, so a Post callback can map its item back.
     source_index: Arc<HashMap<String, u32>>,
     /// Canonical source key → index, built on the first lookup miss. The shell reports
@@ -964,6 +1022,7 @@ impl Sink {
             failed: Vec::new(),
             succeeded: Vec::new(),
             failed_indices: Vec::new(),
+            landed: Vec::new(),
             done: false,
             aborted: false,
             error: None,
@@ -1017,6 +1076,24 @@ impl Sink {
         }
         self.check_cancel()
     }
+
+    /// Records the item's real destination. `Post*Item` receives the created item, which
+    /// differs from the requested name when the user resolves a conflict with "keep
+    /// both" (`name (1).ext`); undoing the requested name would target a different file.
+    fn post_item_new(&self, hr: HRESULT, new: Option<&IShellItem>) -> WinResult<()> {
+        if hr.is_ok() {
+            if let Some(path) = new.and_then(item_path) {
+                let index = {
+                    let source = self.current_path.lock().unwrap();
+                    self.source_of(&source)
+                };
+                if let Some(index) = index {
+                    self.landed.lock().unwrap().push(LandedItem { index, path });
+                }
+            }
+        }
+        self.post_item(hr)
+    }
 }
 
 impl IFileOperationProgressSink_Impl for Sink_Impl {
@@ -1048,9 +1125,9 @@ impl IFileOperationProgressSink_Impl for Sink_Impl {
         _item: windows::core::Ref<'_, IShellItem>,
         _name: &PCWSTR,
         hr: HRESULT,
-        _new: windows::core::Ref<'_, IShellItem>,
+        new: windows::core::Ref<'_, IShellItem>,
     ) -> WinResult<()> {
-        self.post_item(hr)
+        self.post_item_new(hr, new.as_ref())
     }
 
     fn PreMoveItem(
@@ -1070,9 +1147,9 @@ impl IFileOperationProgressSink_Impl for Sink_Impl {
         _dir: windows::core::Ref<'_, IShellItem>,
         _name: &PCWSTR,
         hr: HRESULT,
-        _new: windows::core::Ref<'_, IShellItem>,
+        new: windows::core::Ref<'_, IShellItem>,
     ) -> WinResult<()> {
-        self.post_item(hr)
+        self.post_item_new(hr, new.as_ref())
     }
 
     fn PreCopyItem(
@@ -1092,9 +1169,9 @@ impl IFileOperationProgressSink_Impl for Sink_Impl {
         _dir: windows::core::Ref<'_, IShellItem>,
         _name: &PCWSTR,
         hr: HRESULT,
-        _new: windows::core::Ref<'_, IShellItem>,
+        new: windows::core::Ref<'_, IShellItem>,
     ) -> WinResult<()> {
-        self.post_item(hr)
+        self.post_item_new(hr, new.as_ref())
     }
 
     fn PreDeleteItem(
@@ -1331,7 +1408,9 @@ mod tests {
         let request = Request {
             op_id: "bad-batch".into(),
             kind: "rename".into(),
-            sources: vec!["a".into(), "b".into()],
+            // Absolute paths: relative spellings are now refused by the protection
+            // pass before the name-count check.
+            sources: vec![r"C:\a".into(), r"C:\b".into()],
             target_dir: None,
             new_name: None,
             new_names: Some(vec!["one".into()]),

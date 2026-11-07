@@ -885,6 +885,9 @@ async fn archive_extract_items(
                         &inner,
                         &target_folder,
                         true,
+                        // Explicit extraction is the user's chosen destination; only the
+                        // preview-cache browse path applies a budget.
+                        None,
                     ) {
                         Ok(written) => written,
                         Err(err) => {

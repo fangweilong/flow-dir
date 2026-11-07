@@ -11,18 +11,49 @@
 //! to a remote server, so this runner never records an elevated retry.
 
 use std::collections::HashMap;
+use std::os::windows::ffi::OsStrExt;
+use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tauri::ipc::Channel;
+use windows::core::PCWSTR;
+use windows::Win32::Storage::FileSystem::{
+    MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+};
 
 use crate::error::ApiError;
 use crate::ops::{Kind, OpFailure, OpProgress, Outcome, Request};
 use crate::settings::Settings;
 use crate::webdav::{self, DavClient};
+
+/// `FILE_ATTRIBUTE_REPARSE_POINT`: junctions and symlinks are skipped during recursive
+/// local walks. Following them can leave the selected tree (OneDrive placeholders) or
+/// loop forever (a junction pointing at its own ancestor).
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+
+fn is_reparse(meta: &std::fs::Metadata) -> bool {
+    meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+/// True for a directory reached through a junction/symlink. Recursive local walks skip
+/// these so a link that points at an ancestor cannot make them loop, and so they do not
+/// pull files from outside the selected tree. A file link is not skipped: `fs::copy`
+/// follows it and copies the target's contents, matching how the file is opened.
+fn skips_reparse_dir(path: &Path, meta: &std::fs::Metadata) -> bool {
+    if meta.is_dir() {
+        return is_reparse(meta);
+    }
+    if meta.file_type().is_symlink() {
+        return std::fs::metadata(path)
+            .map(|target| target.is_dir())
+            .unwrap_or(true);
+    }
+    false
+}
 
 const MAX_REPORTED_FAILURES: usize = 200;
 const PROGRESS_INTERVAL_MS: u128 = 120;
@@ -147,6 +178,7 @@ impl<'a> Runner<'a> {
             failed: Vec::new(),
             succeeded: Vec::new(),
             failed_indices: Vec::new(),
+            landed: Vec::new(),
             done: false,
             aborted: false,
             error: None,
@@ -161,6 +193,9 @@ impl<'a> Runner<'a> {
             failed_total: self.failed_total,
             succeeded: self.succeeded,
             failed_indices: self.failed_indices,
+            // WebDAV destinations are deterministic (`targetDir` + source name); the UI's
+            // fallback records the same paths.
+            landed: Vec::new(),
             denied: false,
         }
     }
@@ -220,8 +255,14 @@ fn new_dir(request: &Request, runner: &mut Runner) -> Result<(), ApiError> {
         .new_name
         .as_deref()
         .ok_or_else(|| ApiError::new("BAD_ARGS", "newdir needs newName"))?;
+    let remote = webdav::is_webdav(dir);
+    let name = if remote {
+        safe_remote_name(name)?
+    } else {
+        safe_local_name(name)?
+    };
     runner.label(name);
-    if webdav::is_webdav(dir) {
+    if remote {
         let dav = webdav::parse(dir).ok_or_else(|| ApiError::new("WEBDAV_CONN", dir.to_string()))?;
         let client = runner.client(&dav.connection)?;
         client.mkdir(&rel_join(&dav.path, name))?;
@@ -248,7 +289,13 @@ fn delete_sources(
             let dav = webdav::parse(source)
                 .ok_or_else(|| ApiError::new("WEBDAV_CONN", source.clone()))?;
             let client = runner.client(&dav.connection)?;
-            client.delete(&dav.path)
+            if dav.path.trim_matches('/').is_empty() {
+                // The connection root is the WebDAV equivalent of a volume root; it is
+                // never a delete target even though `protect` skips virtual addresses.
+                Err(ApiError::new("PROTECTED", source.clone()))
+            } else {
+                client.delete(&dav.path)
+            }
         } else {
             delete_local(Path::new(source))
         };
@@ -273,6 +320,11 @@ fn rename_sources(
         let name = names.get(index as usize).copied().unwrap_or("");
         runner.label(name);
         let result = (|| -> Result<(), ApiError> {
+            let name = if webdav::is_webdav(source) {
+                safe_remote_name(name)?
+            } else {
+                safe_local_name(name)?
+            };
             if webdav::is_webdav(source) {
                 let dav = webdav::parse(source)
                     .ok_or_else(|| ApiError::new("WEBDAV_CONN", source.clone()))?;
@@ -351,7 +403,13 @@ fn transfer_sources(
     for (index, source) in request.sources.iter().enumerate() {
         check_cancel(cancel)?;
         let index = index as u32;
-        let name = base_name(source);
+        // The top-level name is joined to the destination too; a remote displayname such
+        // as `C:evil` would otherwise replace the local base path.
+        let name = if target_remote {
+            safe_remote_name(base_name(source))?
+        } else {
+            safe_local_name(base_name(source))?
+        };
         runner.label(name);
         let result = (|| -> Result<(), ApiError> {
             if target_remote {
@@ -362,6 +420,7 @@ fn transfer_sources(
                 if webdav::is_webdav(source) {
                     let src = webdav::parse(source)
                         .ok_or_else(|| ApiError::new("WEBDAV_CONN", source.to_string()))?;
+                    guard_remote_root(&src.path, kind, source)?;
                     let src_client = runner.client(&src.connection)?;
                     if src.connection.eq_ignore_ascii_case(&dav.connection) {
                         guard_into_self_remote(&src.path, &dest_rel)?;
@@ -407,6 +466,7 @@ fn transfer_sources(
             if webdav::is_webdav(source) {
                 let src = webdav::parse(source)
                     .ok_or_else(|| ApiError::new("WEBDAV_CONN", source.to_string()))?;
+                guard_remote_root(&src.path, kind, source)?;
                 let src_client = runner.client(&src.connection)?;
                 transfer_remote_to_local(
                     &src_client,
@@ -451,13 +511,26 @@ fn transfer_same_connection(
     let stat = client
         .stat(src)?
         .ok_or_else(|| ApiError::new("NOT_FOUND", client.url_for(src)))?;
-    if !overwrite {
-        if let Some(existing) = client.stat(dest)? {
-            // A folder merged into an existing folder keeps Explorer's semantics; a file
-            // collision is a failure the UI can report instead of an unannounced replace.
-            if !(stat.is_dir && existing.is_dir) {
+    if let Some(existing) = client.stat(dest)? {
+        if stat.is_dir {
+            if existing.is_dir {
+                // COPY/MOVE with `Overwrite: F` cannot express a merge (the server answers
+                // 412), and `Overwrite: T` on a collection tells it to DELETE the whole
+                // destination first. Walk the source and merge child by child instead.
+                // Check the whole tree first: a conflict halfway through a Move leaves
+                // the source partially emptied and the item unrecoverable by undo.
+                ensure_merge_clear(client, src, dest, overwrite, cancel)?;
+                return merge_same_connection(client, src, dest, kind, overwrite, runner, cancel);
+            }
+            if !overwrite {
                 return Err(ApiError::new("EXISTS", client.url_for(dest)));
             }
+            // A folder replacing a file is safe to express as a replace.
+            client.delete(dest)?;
+        } else if existing.is_dir || !overwrite {
+            // Replacing a whole collection with one file is never what "overwrite" means
+            // in a file manager; report the conflict instead of nuking the folder.
+            return Err(ApiError::new("EXISTS", client.url_for(dest)));
         }
     }
     runner.label(base_name(src));
@@ -486,6 +559,78 @@ fn transfer_same_connection(
     Ok(())
 }
 
+/// Walks the source tree and rejects a merge that would hit a name conflict, mirroring the
+/// per-child rules in [`transfer_same_connection`]. This runs before any child moves, so a
+/// failed merge cannot leave the source partially emptied.
+fn ensure_merge_clear(
+    client: &DavClient,
+    src: &str,
+    dest: &str,
+    overwrite: bool,
+    cancel: &AtomicBool,
+) -> Result<(), ApiError> {
+    check_cancel(cancel)?;
+    let (entries, truncated) = client.list_detailed(src, cancel)?;
+    if truncated {
+        return Err(ApiError::new("TOO_MANY_ENTRIES", client.url_for(src)));
+    }
+    for entry in entries {
+        check_cancel(cancel)?;
+        let name = safe_remote_name(&entry.name)?;
+        let child_src = rel_join(src, name);
+        let child_dest = rel_join(dest, name);
+        let Some(existing) = client.stat(&child_dest)? else {
+            continue;
+        };
+        if entry.is_dir() && existing.is_dir {
+            ensure_merge_clear(client, &child_src, &child_dest, overwrite, cancel)?;
+        } else if !(entry.is_dir() && !existing.is_dir && overwrite) {
+            // Only "folder replacing a file with overwrite" is allowed to proceed.
+            return Err(ApiError::new("EXISTS", client.url_for(&child_dest)));
+        }
+    }
+    Ok(())
+}
+
+/// Merges `src` into an existing `dest` collection one child at a time. A move removes the
+/// (now empty) source folder after every child landed.
+fn merge_same_connection(
+    client: &DavClient,
+    src: &str,
+    dest: &str,
+    kind: Kind,
+    overwrite: bool,
+    runner: &mut Runner,
+    cancel: &AtomicBool,
+) -> Result<(), ApiError> {
+    check_cancel(cancel)?;
+    let (entries, truncated) = client.list_detailed(src, cancel)?;
+    if truncated {
+        // The listing cap hides children; moving them would leave files behind and
+        // deleting the source afterwards would lose them.
+        return Err(ApiError::new("TOO_MANY_ENTRIES", client.url_for(src)));
+    }
+    for entry in entries {
+        check_cancel(cancel)?;
+        let name = safe_remote_name(&entry.name)?;
+        transfer_same_connection(
+            client,
+            &rel_join(src, name),
+            &rel_join(dest, name),
+            kind,
+            overwrite,
+            runner,
+            cancel,
+        )?;
+    }
+    if kind == Kind::Move {
+        // Every child moved out, so this is an empty collection; deleting it avoids a
+        // second server-side recursive MOVE that would repeat the overwrite semantics.
+        client.delete(src)?;
+    }
+    Ok(())
+}
+
 fn transfer_local_to_local(
     src: &Path,
     dest: &Path,
@@ -500,7 +645,7 @@ fn transfer_local_to_local(
     }
     match kind {
         Kind::Copy => {
-            let bytes = copy_local_tree(src, dest, overwrite)?;
+            let bytes = copy_local_tree(src, dest, overwrite, true)?;
             runner.add_work(bytes);
         }
         Kind::Move => {
@@ -530,7 +675,15 @@ fn transfer_local_to_remote(
             }
         }
     }
-    let bytes = upload_tree(client, src, dest_rel, overwrite, cancel, runner)?;
+    let bytes = upload_tree(
+        client,
+        src,
+        dest_rel,
+        overwrite,
+        kind == Kind::Copy,
+        cancel,
+        runner,
+    )?;
     runner.add_work(bytes);
     if kind == Kind::Move {
         // Delete only after every byte landed; the reverse order could lose the source if
@@ -592,9 +745,16 @@ fn copy_between_recursive(
         .ok_or_else(|| ApiError::new("NOT_FOUND", src.url_for(src_rel)))?;
     if stat.is_dir {
         ensure_remote_dir(dst, dst_rel)?;
-        for entry in src.list(src_rel, cancel)? {
-            let child_src = rel_join(src_rel, &entry.name);
-            let child_dst = rel_join(dst_rel, &entry.name);
+        let (entries, truncated) = src.list_detailed(src_rel, cancel)?;
+        if truncated {
+            // A Move deletes the source after this returns; a cut listing would lose the
+            // children it never showed.
+            return Err(ApiError::new("TOO_MANY_ENTRIES", src.url_for(src_rel)));
+        }
+        for entry in entries {
+            let name = safe_remote_name(&entry.name)?;
+            let child_src = rel_join(src_rel, name);
+            let child_dst = rel_join(dst_rel, name);
             copy_between_recursive(src, &child_src, dst, &child_dst, overwrite, runner, cancel)?;
         }
         return Ok(());
@@ -620,11 +780,21 @@ fn upload_tree(
     local: &Path,
     rel: &str,
     overwrite: bool,
+    skip_links: bool,
     cancel: &AtomicBool,
     runner: &mut Runner,
 ) -> Result<u64, ApiError> {
     check_cancel(cancel)?;
-    let meta = std::fs::metadata(local).map_err(|e| ApiError::from_io(&local.to_string_lossy(), &e))?;
+    let meta = std::fs::symlink_metadata(local)
+        .map_err(|e| ApiError::from_io(&local.to_string_lossy(), &e))?;
+    if skips_reparse_dir(local, &meta) {
+        // Following it can embed unrelated files or recurse forever. A Move must fail so
+        // the caller keeps the source link; a Copy may omit it like the archive writer.
+        if skip_links {
+            return Ok(0);
+        }
+        return Err(ApiError::new("SYMLINK_DIR", local.to_string_lossy().into_owned()));
+    }
     if meta.is_dir() {
         ensure_remote_dir(client, rel)?;
         let mut bytes = 0u64;
@@ -637,7 +807,15 @@ fn upload_tree(
             check_cancel(cancel)?;
             let name = entry.file_name().to_string_lossy().into_owned();
             let child = entry.path();
-            bytes += upload_tree(client, &child, &rel_join(rel, &name), overwrite, cancel, runner)?;
+            bytes += upload_tree(
+                client,
+                &child,
+                &rel_join(rel, &name),
+                overwrite,
+                skip_links,
+                cancel,
+                runner,
+            )?;
         }
         Ok(bytes)
     } else {
@@ -652,7 +830,9 @@ fn upload_tree(
             .unwrap_or_default();
         runner.label(&name);
         client.upload_file(rel, local, cancel)?;
-        Ok(meta.len())
+        // A file symlink reports its own (usually zero) length; the uploaded body is the
+        // target's, so report that.
+        Ok(std::fs::metadata(local).map(|m| m.len()).unwrap_or(meta.len()))
     }
 }
 
@@ -672,12 +852,18 @@ fn download_tree(
         std::fs::create_dir_all(local)
             .map_err(|e| ApiError::from_io(&local.to_string_lossy(), &e))?;
         let mut bytes = 0u64;
-        for entry in client.list(rel, cancel)? {
+        let (entries, truncated) = client.list_detailed(rel, cancel)?;
+        if truncated {
+            // Same rule as the cross-connection copy: a Move deletes the remote source.
+            return Err(ApiError::new("TOO_MANY_ENTRIES", client.url_for(rel)));
+        }
+        for entry in entries {
             check_cancel(cancel)?;
-            let child = local.join(&entry.name);
+            let name = safe_local_name(&entry.name)?;
+            let child = local.join(name);
             bytes += download_tree(
                 client,
-                &rel_join(rel, &entry.name),
+                &rel_join(rel, name),
                 &child,
                 overwrite,
                 cancel,
@@ -700,8 +886,50 @@ fn download_tree(
             std::fs::create_dir_all(parent)
                 .map_err(|e| ApiError::from_io(&parent.to_string_lossy(), &e))?;
         }
-        let written = client.get_to_file(rel, local, cancel)?;
-        Ok(written)
+        // Stream into a sibling first: a canceled or dropped transfer must never truncate
+        // an existing local file. The rename only happens after the body is complete.
+        let temp = sibling_temp(local);
+        let result = client.get_to_file(rel, &temp, cancel);
+        match result {
+            Ok(written) => {
+                if let Err(err) = replace_file(&temp, local) {
+                    let _ = std::fs::remove_file(&temp);
+                    return Err(ApiError::from_io(&local.to_string_lossy(), &err));
+                }
+                Ok(written)
+            }
+            Err(err) => {
+                let _ = std::fs::remove_file(&temp);
+                Err(err)
+            }
+        }
+    }
+}
+
+fn sibling_temp(target: &Path) -> PathBuf {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let name = target
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "download".to_string());
+    target.with_file_name(format!(
+        ".{name}.{}.{}.part",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+/// `std::fs::rename` refuses to replace an existing file on Windows.
+fn replace_file(temp: &Path, target: &Path) -> std::io::Result<()> {
+    let from: Vec<u16> = temp.as_os_str().encode_wide().chain([0]).collect();
+    let to: Vec<u16> = target.as_os_str().encode_wide().chain([0]).collect();
+    unsafe {
+        MoveFileExW(
+            PCWSTR(from.as_ptr()),
+            PCWSTR(to.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+        .map_err(|_| std::io::Error::last_os_error())
     }
 }
 
@@ -724,8 +952,21 @@ fn delete_local(path: &Path) -> Result<(), ApiError> {
     result.map_err(|e| ApiError::from_io(&path.to_string_lossy(), &e))
 }
 
-fn copy_local_tree(src: &Path, dest: &Path, overwrite: bool) -> Result<u64, ApiError> {
-    let meta = std::fs::metadata(src).map_err(|e| ApiError::from_io(&src.to_string_lossy(), &e))?;
+fn copy_local_tree(
+    src: &Path,
+    dest: &Path,
+    overwrite: bool,
+    skip_links: bool,
+) -> Result<u64, ApiError> {
+    let meta =
+        std::fs::symlink_metadata(src).map_err(|e| ApiError::from_io(&src.to_string_lossy(), &e))?;
+    if skips_reparse_dir(src, &meta) {
+        // See `upload_tree`: a Move must not delete a source that was never copied.
+        if skip_links {
+            return Ok(0);
+        }
+        return Err(ApiError::new("SYMLINK_DIR", src.to_string_lossy().into_owned()));
+    }
     if meta.is_dir() {
         if dest.exists() && !dest.is_dir() {
             return Err(ApiError::new("EXISTS", dest.to_string_lossy().into_owned()));
@@ -737,7 +978,12 @@ fn copy_local_tree(src: &Path, dest: &Path, overwrite: bool) -> Result<u64, ApiE
             .map_err(|e| ApiError::from_io(&src.to_string_lossy(), &e))?
         {
             let entry = entry.map_err(|e| ApiError::from_io(&src.to_string_lossy(), &e))?;
-            bytes += copy_local_tree(&entry.path(), &dest.join(entry.file_name()), overwrite)?;
+            bytes += copy_local_tree(
+                &entry.path(),
+                &dest.join(entry.file_name()),
+                overwrite,
+                skip_links,
+            )?;
         }
         Ok(bytes)
     } else {
@@ -765,12 +1011,23 @@ fn move_local_tree(src: &Path, dest: &Path, overwrite: bool) -> Result<u64, ApiE
         Ok(()) => Ok(bytes),
         Err(_) => {
             // Different volume: copy first, then remove the source. A failed copy leaves
-            // the source intact, which is the only safe order.
-            let copied = copy_local_tree(src, dest, true)?;
+            // the source intact, which is the only safe order. The conflict policy stays
+            // the caller's: this fallback must not silently replace a target the user did
+            // not agree to overwrite.
+            let copied = copy_local_tree(src, dest, overwrite, false)?;
             delete_local(src)?;
             Ok(copied)
         }
     }
+}
+
+/// Moving the connection root would delete the whole collection once its children land.
+/// `protect` skips virtual addresses, so the runner checks this itself.
+fn guard_remote_root(dav_path: &str, kind: Kind, source: &str) -> Result<(), ApiError> {
+    if kind == Kind::Move && dav_path.trim_matches('/').is_empty() {
+        return Err(ApiError::new("PROTECTED", source.to_string()));
+    }
+    Ok(())
 }
 
 fn guard_into_self_remote(src: &str, dest: &str) -> Result<(), ApiError> {
@@ -784,8 +1041,14 @@ fn guard_into_self_remote(src: &str, dest: &str) -> Result<(), ApiError> {
 }
 
 fn is_within_local(child: &Path, parent: &Path) -> bool {
-    let child = child.to_string_lossy().to_lowercase();
-    let parent = parent.to_string_lossy().to_lowercase().replace('/', "\\");
+    // Reuse the protection guard's key: it resolves `..`, trailing separators, trailing
+    // dots/spaces and 8.3 aliases, so `C:\a\..\b` cannot pose as a sibling of `C:\a`.
+    let (Some(child), Some(parent)) = (
+        crate::protect::key(&child.to_string_lossy()),
+        crate::protect::key(&parent.to_string_lossy()),
+    ) else {
+        return false;
+    };
     child == parent || child.starts_with(&format!("{parent}\\"))
 }
 
@@ -794,6 +1057,34 @@ fn check_cancel(cancel: &AtomicBool) -> Result<(), ApiError> {
         return Err(ApiError::new("CANCELED", "operation canceled"));
     }
     Ok(())
+}
+
+/// A remote name is usable only as one path component. Remote servers supply it via
+/// `displayname`/href, and rename/new-folder names come from the UI; a separator, `..` or
+/// a NUL would escape the destination when joined. `:` is legal on a WebDAV server, so it
+/// is only rejected where the name becomes a local file name.
+fn safe_remote_name(name: &str) -> Result<&str, ApiError> {
+    if name.trim_end_matches([' ', '.']).is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains(['/', '\\'])
+        || name.contains('\0')
+    {
+        return Err(ApiError::new("UNSAFE_PATH", name.to_string()));
+    }
+    Ok(name)
+}
+
+/// A name that becomes a local file name also rejects `:`. Win32 reads `C:evil` as a
+/// drive-relative path, and joining it replaces the base instead of appending.
+fn safe_local_name(name: &str) -> Result<&str, ApiError> {
+    safe_remote_name(name)?;
+    // Win32 strips trailing dots/spaces, so `a.` and `a ` would silently collide with an
+    // existing `a`; `:` would become an alternate data stream or drive-relative path.
+    if name.ends_with([' ', '.']) || name.contains(':') {
+        return Err(ApiError::new("UNSAFE_PATH", name.to_string()));
+    }
+    Ok(name)
 }
 
 fn rel_join(base: &str, name: &str) -> String {
@@ -829,4 +1120,25 @@ fn temp_path() -> PathBuf {
         std::process::id(),
         SEQ.fetch_add(1, Ordering::Relaxed)
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn child_names_cannot_escape_their_destination() {
+        for name in ["..", ".", "a/b", "a\\b", "", "   ", "...", "a\0b"] {
+            assert!(safe_remote_name(name).is_err(), "{name:?}");
+            assert!(safe_local_name(name).is_err(), "{name:?}");
+        }
+        // `:` is legal on a WebDAV server but becomes a drive-relative path locally.
+        assert!(safe_remote_name("report:2024.txt").is_ok());
+        assert!(safe_local_name("report:2024.txt").is_err());
+        // Win32 strips trailing dots/spaces, so they would collide with the plain name.
+        for name in ["a.", "a ", "a. "] {
+            assert!(safe_remote_name(name).is_ok(), "{name:?}");
+            assert!(safe_local_name(name).is_err(), "{name:?}");
+        }
+    }
 }

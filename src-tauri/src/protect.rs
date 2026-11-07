@@ -12,6 +12,9 @@
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
+use windows::core::PCWSTR;
+use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLongPathNameW};
+use windows::Win32::System::WindowsProgramming::{DRIVE_FIXED, DRIVE_RAMDISK, DRIVE_REMOVABLE};
 
 use crate::error::ApiError;
 use crate::fs::expand_path;
@@ -47,7 +50,18 @@ pub fn check(
     let mut pending = Vec::new();
 
     for source in sources {
-        let Some(source_key) = key(source) else { continue };
+        // Virtual addresses are not filesystem paths: `webdav://` and shell namespace
+        // folders are validated by their own runners (`webdav_ops` rejects unsafe child
+        // names), and no local protection rule can describe them.
+        if crate::webdav::is_webdav(source) || crate::shellfs::is_shell_path(source) {
+            continue;
+        }
+        // Fail closed: a spelling that does not resolve to a filesystem location cannot be
+        // proven safe, and silently skipping it was a bypass (relative paths, `...`).
+        let Some(source_key) = key(source) else {
+            refused.push(source.clone());
+            continue;
+        };
         if is_volume_root(&source_key) || block.iter().any(|rule| covers(&source_key, rule)) {
             refused.push(source.clone());
         } else if confirm.iter().any(|rule| covers(&source_key, rule))
@@ -117,6 +131,11 @@ pub fn key(raw: &str) -> Option<String> {
         if bytes.len() < 2 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' {
             return None;
         }
+        // `C:foo` is drive-relative: Win32 resolves it against the drive's current
+        // directory, which this lexical key cannot know. Refuse to guess.
+        if bytes.len() > 2 && bytes[2] != b'\\' {
+            return None;
+        }
         (text[..2].to_string(), &text[2..])
     };
 
@@ -127,7 +146,17 @@ pub fn key(raw: &str) -> Option<String> {
             ".." => {
                 parts.pop();
             }
-            other => parts.push(other),
+            other => {
+                // Win32 strips trailing dots and spaces from each component before it
+                // reaches the filesystem, so `C:\Windows.` and `C:\Windows ` name the
+                // protected folder. Comparing the raw spelling would miss the block.
+                let trimmed = other.trim_end_matches([' ', '.']);
+                if trimmed.is_empty() {
+                    // `...` / `   ` cannot name a file; refuse to guess at one.
+                    return None;
+                }
+                parts.push(trimmed);
+            }
         }
     }
     // `\\server` without a share is not a usable filesystem root.
@@ -144,7 +173,49 @@ pub fn key(raw: &str) -> Option<String> {
         }
         out.push_str(part);
     }
+    // Expand 8.3 aliases (`PROGRA~1`) before lowercasing; otherwise a short spelling
+    // reaches the same folder while bypassing the rule.
+    let out = resolve_short_name(&out).unwrap_or(out);
     Some(out.to_ascii_lowercase())
+}
+
+/// `GetLongPathNameW` touches the filesystem, so it is only probed for local media. The
+/// caller is a synchronous command on the UI thread; a dead UNC share or mapped network
+/// drive would block it for the SMB timeout.
+fn probe_is_local(path: &str) -> bool {
+    if path.starts_with(r"\\") {
+        return false;
+    }
+    let bytes = path.as_bytes();
+    if bytes.len() < 2 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' {
+        return false;
+    }
+    let root = [bytes[0] as u16, b':' as u16, b'\\' as u16, 0];
+    let kind = unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) };
+    matches!(kind, DRIVE_FIXED | DRIVE_REMOVABLE | DRIVE_RAMDISK)
+}
+
+/// `GetLongPathNameW` for paths that may contain an 8.3 component. The probe is skipped
+/// unless the path contains `~`, because it touches the filesystem and a dead network
+/// share or unresponsive device must not stall ordinary validation.
+fn resolve_short_name(path: &str) -> Option<String> {
+    if !path.contains('~') || !probe_is_local(path) {
+        return None;
+    }
+    let wide: Vec<u16> = path.encode_utf16().chain([0]).collect();
+    let mut buf = vec![0u16; 512];
+    loop {
+        let len = unsafe { GetLongPathNameW(PCWSTR(wide.as_ptr()), Some(&mut buf)) };
+        if len == 0 {
+            return None;
+        }
+        let needed = len as usize;
+        if needed < buf.len() {
+            return Some(String::from_utf16_lossy(&buf[..needed]));
+        }
+        // The first call reports the required size (without the terminator).
+        buf = vec![0u16; needed + 1];
+    }
 }
 
 fn rule_key(raw: &str) -> Option<String> {
@@ -199,6 +270,35 @@ mod tests {
         assert_eq!(key("C:"), Some("c:".to_string()));
         assert_eq!(key("relative\\path"), None);
         assert_eq!(key(""), None);
+        // Drive-relative spellings resolve against a per-drive CWD; refuse them.
+        assert_eq!(key(r"C:AppData"), None);
+        assert_eq!(key(r"C:"), Some("c:".to_string()));
+        // Win32 strips trailing dots/spaces per component before touching the disk.
+        assert_eq!(key(r"C:\Windows. "), key(r"C:\Windows"));
+        assert_eq!(key(r"C:\Windows...\System32 "), key(r"C:\Windows\System32"));
+        // A component that is only dots/spaces names nothing; refuse to guess.
+        assert_eq!(key(r"C:\..."), None);
+    }
+
+    #[test]
+    fn a_path_that_cannot_be_normalised_is_refused() {
+        let rules = Protection::default();
+        let error = check(&sources(&[r"relative\path"]), &rules, &[]).unwrap_err();
+        assert_eq!(error.code, "PROTECTED");
+        let error = check(&sources(&[r"C:\..."]), &rules, &[]).unwrap_err();
+        assert_eq!(error.code, "PROTECTED");
+    }
+
+    #[test]
+    fn virtual_addresses_are_not_local_protection_targets() {
+        let rules = protection(&[r"C:\Windows"], &[]);
+        // WebDAV and shell namespace paths have their own runners; the local guard must
+        // not turn every remote delete into PROTECTED.
+        assert!(check(&sources(&["webdav://nas/Photos"]), &rules, &[]).is_ok());
+        assert!(check(&sources(&["shell:RecycleBinFolder"]), &rules, &[]).is_ok());
+        assert!(check(&sources(&["::20D04FE0-3AEA-1069-A2D8-08002B30309D"]), &rules, &[]).is_ok());
+        // A relative path is still refused.
+        assert!(check(&sources(&["..\\Windows"]), &rules, &[]).is_err());
     }
 
     #[test]

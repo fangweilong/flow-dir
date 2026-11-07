@@ -80,8 +80,9 @@ export function buildRowMenu(
         },
       ]
     : []
+  // Archive members are read-only virtual paths: compression needs real local files.
   const compressMenu: MenuItem[] =
-    tabPath !== undefined && !remote
+    tabPath !== undefined && !remote && !inArchive
       ? [
           {
             kind: 'item',
@@ -163,7 +164,9 @@ export function buildRowMenu(
             label: t('menu.delete'),
             hint: menuHint(keys.delete),
             danger: true,
-            onSelect: () => options.deleteEntries(paneId, [entry.name], false),
+            // Delete follows the selection, like copy/rename in this menu. The row that
+            // was right-clicked is only one of possibly several selected files.
+            onSelect: () => options.deleteEntries(paneId, paths.map(baseName), false),
           },
           ...(remote
             ? []
@@ -173,7 +176,7 @@ export function buildRowMenu(
                   label: t('menu.deletePermanent'),
                   hint: menuHint(`shift+${keys.delete}`),
                   danger: true,
-                  onSelect: () => options.deleteEntries(paneId, [entry.name], true),
+                  onSelect: () => options.deleteEntries(paneId, paths.map(baseName), true),
                 },
               ]),
           ...archiveMenu,
@@ -204,7 +207,7 @@ export function buildRowMenu(
             : []),
         ]
       : []),
-    ...(remote
+    ...(remote || inArchive
       ? []
       : [
           { kind: 'sep' as const },

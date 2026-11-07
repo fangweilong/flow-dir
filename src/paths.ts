@@ -1,5 +1,17 @@
-/** Case-insensitive identity for a Windows path, used as a cache/render key. */
-export const pathKey = (path: string) => path.toLowerCase()
+/**
+ * Identity key for a path. Windows paths are case-folded; WebDAV addresses keep their
+ * case because the server may be case-sensitive (`Photos` and `photos` can coexist).
+ * Trailing slashes are dropped so a root address matches its non-slash spelling.
+ */
+export const pathKey = (path: string) => {
+  if (
+    path.length >= WEBDAV_SCHEME.length &&
+    path.slice(0, WEBDAV_SCHEME.length).toLowerCase() === WEBDAV_SCHEME
+  ) {
+    return `${WEBDAV_SCHEME}${path.slice(WEBDAV_SCHEME.length).replace(/\/+$/, '')}`
+  }
+  return path.toLowerCase()
+}
 
 /** Virtual address scheme for WebDAV servers, e.g. `webdav://nas/photos`. */
 export const WEBDAV_SCHEME = 'webdav://'

@@ -337,7 +337,13 @@ pub fn extract_cached(
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).map_err(|e| ApiError::from_io(&tmp.to_string_lossy(), &e))?;
         if let Err(err) =
-            backends::extract_dir(&archive_path.to_string_lossy(), &inner_norm, &tmp, false)
+            backends::extract_dir(
+                &archive_path.to_string_lossy(),
+                &inner_norm,
+                &tmp,
+                false,
+                Some(backends::MAX_MATERIALIZE_BYTES),
+            )
         {
             let _ = std::fs::remove_dir_all(&tmp);
             return Err(err);
@@ -444,6 +450,7 @@ fn run(
                 failed: Vec::new(),
                 succeeded: Vec::new(),
                 failed_indices: Vec::new(),
+                landed: Vec::new(),
                 done: true,
                 aborted: false,
                 error: Some(err),
@@ -496,6 +503,7 @@ fn run(
         failed: sink.failures().to_vec(),
         succeeded: Vec::new(),
         failed_indices: Vec::new(),
+        landed: Vec::new(),
         done: true,
         aborted,
         error,

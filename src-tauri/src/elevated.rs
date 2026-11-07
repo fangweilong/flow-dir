@@ -43,8 +43,10 @@ use crate::ops;
 use crate::protect;
 use crate::settings;
 
-/// Long copies must not be cut off, but the GUI command thread cannot wait forever either.
-const WAIT_TIMEOUT_MS: u32 = 10 * 60 * 1000;
+/// A single `IFileOperation` item cannot report progress through the pipe, so the only
+/// practical bound is wall-clock. Ten minutes killed legitimate large copies; an hour
+/// still recovers from a wedged helper without terminating real work.
+const WAIT_TIMEOUT_MS: u32 = 60 * 60 * 1000;
 /// `HRESULT_FROM_WIN32(ERROR_CANCELLED)`: the user dismissed the UAC prompt.
 const ELEVATION_CANCELLED: u32 = 0x8007_04C7;
 const MAX_MESSAGE: u32 = 16 * 1024 * 1024;

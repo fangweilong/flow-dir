@@ -13,11 +13,14 @@ export default defineConfig({
       output: {
         manualChunks(id) {
           if (id.includes('node_modules')) {
-            if (id.includes('react') || id.includes('react-dom')) {
-              return 'vendor-react'
-            }
+            // Check the virtualizer before the generic `react` match: its path contains
+            // "react", which otherwise swallowed it into vendor-react and made this branch
+            // unreachable.
             if (id.includes('@tanstack/react-virtual')) {
               return 'vendor-virtual'
+            }
+            if (id.includes('react') || id.includes('react-dom')) {
+              return 'vendor-react'
             }
             if (id.includes('@tauri-apps')) {
               return 'vendor-tauri'

@@ -50,10 +50,15 @@ export function undoEntryFor(
     newNames?: string[]
     permanent?: boolean
     skip?: string[]
+    /** Source path (lowercased) → actual destination reported by the shell. */
+    landed?: ReadonlyMap<string, string>
   },
 ): UndoPayload | null {
   if (!sources.length) return null
   const skip = new Set((options?.skip ?? []).map((path) => path.toLowerCase()))
+  // The shell may have resolved a name conflict with "keep both"; undo/redo must use the
+  // file it actually created, not the requested name that already belonged to someone else.
+  const landing = (path: string) => options?.landed?.get(path.toLowerCase())
   const kept = sources
     .map((path, index) => ({ path, index }))
     .filter((item) => !skip.has(item.path.toLowerCase()))
@@ -63,27 +68,46 @@ export function undoEntryFor(
     if (options?.newNames && options.newNames.length === sources.length) {
       return {
         kind: 'rename',
-        items: kept.map(({ path, index }) => ({
-          path,
-          oldName: baseName(path),
-          newName: options.newNames![index],
-        })),
+        items: kept.map(({ path, index }) => {
+          const actual = landing(path)
+          return {
+            path,
+            oldName: baseName(path),
+            newName: actual ? baseName(actual) : options.newNames![index],
+          }
+        }),
       }
     }
     if (options?.newName && paths.length === 1) {
+      const actual = landing(paths[0])
       return {
         kind: 'rename',
-        items: [{ path: paths[0], oldName: baseName(paths[0]), newName: options.newName }],
+        items: [
+          {
+            path: paths[0],
+            oldName: baseName(paths[0]),
+            newName: actual ? baseName(actual) : options.newName,
+          },
+        ],
       }
     }
   }
   if (kind === 'move' && options?.targetDir) {
     const target = options.targetDir
-    return { kind: 'move', items: paths.map((from) => ({ from, to: joinPath(target, baseName(from)) })) }
+    return {
+      kind: 'move',
+      items: paths.map((from) => ({
+        from,
+        to: landing(from) ?? joinPath(target, baseName(from)),
+      })),
+    }
   }
   if (kind === 'copy' && options?.targetDir) {
     const target = options.targetDir
-    return { kind: 'copy', created: paths.map((from) => joinPath(target, baseName(from))) }
+    return {
+      kind: 'copy',
+      created: paths.map((from) => landing(from) ?? joinPath(target, baseName(from))),
+    }
   }
   if (kind === 'delete' && !options?.permanent) {
     return { kind: 'delete', paths }

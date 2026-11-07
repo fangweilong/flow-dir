@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from 'react'
 import type { MutableRefObject } from 'react'
-import type { OpKind, OpProgress } from '../types'
+import type { LandedItem, OpKind, OpProgress } from '../types'
 import type { Settings } from '../persist'
 import { errorKey } from '../i18n'
 import type { Translate } from '../i18n'
@@ -21,6 +21,17 @@ export { errorCode } from '../errorCode'
 
 function uid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+}
+
+// The shell reports the item it actually created; a "keep both" conflict lands as
+// `name (1).ext`, so undo must target that path rather than the requested name.
+function landedMap(items: LandedItem[] | undefined, list: readonly string[]) {
+  const map = new Map<string, string>()
+  for (const item of items ?? []) {
+    const source = list[item.index]
+    if (source) map.set(source.toLowerCase(), item.path)
+  }
+  return map
 }
 
 export type RunOpOptions = {
@@ -57,7 +68,21 @@ export function useFileOperations({
   const [ops, setOps] = useState<Record<string, OpProgress>>({})
   const [elevating, setElevating] = useState<string | null>(null)
   const [historyEpoch, setHistoryEpoch] = useState(0)
-  const [protectPrompt, setProtectPrompt] = useState<ProtectPromptState | null>(null)
+  // Prompts are queued: two protected operations can fail in the same tick (a pane move
+  // and a drop from Explorer), and a single state slot would replace the first prompt's
+  // confirm/cancel callback, leaving that operation's promise unresolved forever.
+  const [protectPrompt, setCurrentProtectPrompt] = useState<ProtectPromptState | null>(null)
+  const protectQueue = useRef<ProtectPromptState[]>([])
+  const setProtectPrompt = useCallback((prompt: ProtectPromptState | null) => {
+    const queue = protectQueue.current
+    if (prompt) {
+      queue.push(prompt)
+      if (queue.length === 1) setCurrentProtectPrompt(prompt)
+      return
+    }
+    queue.shift()
+    setCurrentProtectPrompt(queue[0] ?? null)
+  }, [])
 
   const undoStack = useRef<UndoEntry[]>([])
   const redoStack = useRef<UndoEntry[]>([])
@@ -205,6 +230,7 @@ export function useFileOperations({
                   undoEntryFor(kind, sources, {
                     ...options,
                     skip: sources.filter((_, index) => !landed.has(index)),
+                    landed: landedMap(progress.landed, sources),
                   }),
                   options?.dirsAfter ?? [],
                   narrow(done),
@@ -227,6 +253,7 @@ export function useFileOperations({
                 undoEntryFor(kind, sources, {
                   ...options,
                   skip: sources.filter((_, index) => !landed.has(index)),
+                  landed: landedMap(progress.landed, sources),
                 }),
                 options?.dirsAfter ?? [],
                 narrow(keep),
@@ -237,7 +264,13 @@ export function useFileOperations({
               drop(denied ? 600_000 : 15000)
               return
             }
-            recordEntry(undoEntryFor(kind, sources, options), options?.dirsAfter ?? [])
+            recordEntry(
+              undoEntryFor(kind, sources, {
+                ...options,
+                landed: landedMap(progress.landed, sources),
+              }),
+              options?.dirsAfter ?? [],
+            )
             options?.after?.()
             refreshPanes()
             remind(t('op.done'))
@@ -313,7 +346,14 @@ export function useFileOperations({
             failedCount: report.failedTotal,
             aborted: report.aborted,
           })
-          const completed = keep.map((index) => retry.sources[index])
+          const landings = landedMap(report.landed, retry.sources)
+          // A capped landing report cannot say which path a tail item got. Recording the
+          // requested name would make undo delete a pre-existing file on a "keep both"
+          // conflict, so those items are left out of the history entry.
+          const recordable = report.landedTruncated
+            ? keep.filter((index) => landings.has(retry.sources[index].toLowerCase()))
+            : keep
+          const completed = recordable.map((index) => retry.sources[index])
           // The elevated run does not go through `runOp`, so its history entry has to be
           // recorded here or Ctrl+Z would skip over it.
           // An inverse operation replayed by undo/redo must not add a new history entry.
@@ -324,13 +364,14 @@ export function useFileOperations({
                 ...completed.map((source) => parentPath(source)),
               ]),
             )
-            const landed = new Set(keep)
+            const recorded = new Set(recordable)
             const entry = undoEntryFor(retry.kind, retry.sources, {
               targetDir: retry.targetDir,
               newName: retry.newName,
               newNames: retry.newNames,
               permanent: retry.permanent,
-              skip: retry.sources.filter((_, index) => !landed.has(index)),
+              skip: retry.sources.filter((_, index) => !recorded.has(index)),
+              landed: landings,
             })
             if (entry) {
               pushUndo(
@@ -339,7 +380,7 @@ export function useFileOperations({
                   ...retry,
                   sources: completed,
                   newNames: retry.newNames
-                    ? keep.map((index) => retry.newNames![index])
+                    ? recordable.map((index) => retry.newNames![index])
                     : undefined,
                 },
                 dirs,
@@ -465,11 +506,18 @@ export function useFileOperations({
       const steps: (() => void)[] = []
       for (const [targetDir, sources] of copies) {
         steps.push(() =>
-          runOp('copy', sources, { targetDir, overwrite: true, onDone: runNext }),
+          runOp('copy', sources, {
+            targetDir,
+            overwrite: true,
+            // A failed copy must stop the plan before the delete step: removing the
+            // "extra" files after an incomplete copy leaves the destination worse than
+            // either half of the sync alone.
+            onDone: (ok) => (ok ? runNext() : resolve()),
+          }),
         )
       }
       if (deletes.length) {
-        steps.push(() => runOp('delete', deletes, { onDone: runNext }))
+        steps.push(() => runOp('delete', deletes, { onDone: () => resolve() }))
       }
       let index = 0
       function runNext() {

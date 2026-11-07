@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Seek};
 
-use quick_xml::events::{BytesStart, Event};
+use quick_xml::events::{BytesRef, BytesStart, Event};
 use quick_xml::Reader;
 use serde::Serialize;
 
@@ -37,6 +37,13 @@ const MAX_SHEETS: usize = 12;
 const MAX_ROWS_PER_SHEET: usize = 2_000;
 const MAX_COLS_PER_SHEET: usize = 80;
 const MAX_CELLS_PER_SHEET: usize = 40_000;
+/// Shared strings are referenced by index from cells, so one 8 MiB string
+/// would be cloned into every referencing cell. Cap the text itself instead.
+const MAX_SHARED_STRING_BYTES: usize = 4_096;
+const MAX_CELL_BYTES: usize = 4_096;
+/// Total rendered text budget per sheet; `MAX_CELLS_PER_SHEET` alone still
+/// allows 40k long strings to be cloned into the IPC payload.
+const MAX_SHEET_BYTES: usize = 1_000_000;
 
 /// A formatted span inside a Word paragraph.
 #[derive(Serialize, Clone, Debug, Default, PartialEq)]
@@ -75,7 +82,7 @@ pub struct OfficeDoc {
 pub struct SheetPreview {
     pub name: String,
     pub rows: Vec<Vec<String>>,
-    /// The sheet continued past the row/column/cell cap.
+    /// The sheet, or a later sheet of the workbook, was cut off by a cap.
     pub truncated: bool,
 }
 
@@ -85,9 +92,12 @@ pub fn docx(path: &str) -> Result<OfficeDoc, ApiError> {
     let file = std::fs::File::open(path).map_err(|e| ApiError::from_io(path, &e))?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|e| ApiError::new("PREVIEW", format!("docx: {e}")))?;
-    let xml = read_entry(&mut archive, "word/document.xml", MAX_XML_BYTES)
+    let (xml, cut) = read_entry_capped(&mut archive, "word/document.xml", MAX_XML_BYTES)
         .ok_or_else(|| ApiError::new("PREVIEW", "docx: missing word/document.xml"))?;
-    Ok(parse_docx(&xml))
+    let style_levels = read_entry(&mut archive, "word/styles.xml", MAX_XML_BYTES)
+        .map(|xml| parse_heading_styles(&xml))
+        .unwrap_or_default();
+    Ok(parse_docx(&xml, style_levels, cut))
 }
 
 /// Reads every sheet (up to the sheet cap) into preview tables.
@@ -98,20 +108,70 @@ pub fn xlsx(path: &str) -> Result<Vec<SheetPreview>, ApiError> {
     parse_xlsx(&mut archive)
 }
 
-fn read_entry<R: Read + Seek>(archive: &mut zip::ZipArchive<R>, name: &str, max: u64) -> Option<Vec<u8>> {
-    let entry = archive.by_name(name).ok()?;
-    let mut bytes = Vec::new();
-    entry.take(max).read_to_end(&mut bytes).ok()?;
-    Some(bytes)
+fn read_entry<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    name: &str,
+    max: u64,
+) -> Option<Vec<u8>> {
+    read_entry_capped(archive, name, max).map(|(bytes, _)| bytes)
 }
 
+/// Reads up to `max` decompressed bytes and reports whether the part was
+/// longer. The truncation flag matters: a cut at a tag boundary parses cleanly
+/// but the document is still incomplete.
+fn read_entry_capped<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    name: &str,
+    max: u64,
+) -> Option<(Vec<u8>, bool)> {
+    let entry = archive.by_name(name).ok()?;
+    let truncated = entry.size() > max;
+    let mut bytes = Vec::new();
+    entry.take(max).read_to_end(&mut bytes).ok()?;
+    Some((bytes, truncated))
+}
+
+/// Reads an attribute by local name, ignoring the namespace prefix. Prefixes
+/// are chosen by the producer, so `w:val` in one file may be `wx:val` in
+/// another while meaning the same thing.
 fn attr(element: &BytesStart<'_>, name: &str) -> Option<String> {
-    element
-        .try_get_attribute(name)
-        .ok()
-        .flatten()
-        .and_then(|value| value.normalized_value(quick_xml::XmlVersion::Implicit1_0).ok())
-        .map(|value| value.into_owned())
+    let local = name.rsplit(':').next().unwrap_or(name);
+    element.attributes().flatten().find_map(|value| {
+        if value.key.local_name().as_ref() != local {
+            return None;
+        }
+        value
+            .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+            .ok()
+            .map(|value| value.into_owned())
+    })
+}
+
+/// Resolves a `&...;` reference encountered inside text content.
+fn reference_text(reference: &BytesRef<'_>) -> Option<String> {
+    match reference.resolve_char_ref() {
+        Ok(Some(ch)) => Some(ch.to_string()),
+        Ok(None) => quick_xml::escape::resolve_predefined_entity(reference.as_ref())
+            .map(str::to_string),
+        Err(_) => None,
+    }
+}
+
+/// Appends at most `max` bytes of `text`; returns true when the input was
+/// clipped. Capping by bytes bounds memory without breaking UTF-8.
+fn push_limited(target: &mut String, text: &str, max: usize) -> bool {
+    let room = max.saturating_sub(target.len());
+    if text.len() <= room {
+        target.push_str(text);
+        false
+    } else {
+        let mut cut = room;
+        while cut > 0 && !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        target.push_str(&text[..cut]);
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +197,12 @@ struct DocBuilder {
     outline_level: Option<u8>,
     list_level: Option<u8>,
     chars: usize,
+    /// Style ids come from the producer's locale; `styles.xml` maps them to the
+    /// built-in English style names.
+    style_levels: HashMap<String, u8>,
+    /// DrawingML (`<w:drawing>`) carries `<a:p>`/`<a:t>` that are not document
+    /// paragraphs; letting them through duplicates or corrupts body text.
+    drawing_depth: usize,
 }
 
 impl DocBuilder {
@@ -183,7 +249,7 @@ impl DocBuilder {
             return;
         }
         let text = self.para.trim().to_string();
-        let heading = heading_level(&self.style, self.outline_level);
+        let heading = heading_level(&self.style, self.outline_level, &self.style_levels);
         if text.is_empty() {
             self.para.clear();
             self.runs.clear();
@@ -246,11 +312,18 @@ impl DocBuilder {
     }
 }
 
-fn heading_level(style: &str, outline: Option<u8>) -> Option<u8> {
+fn heading_level(
+    style: &str,
+    outline: Option<u8>,
+    style_levels: &HashMap<String, u8>,
+) -> Option<u8> {
     if let Some(level) = outline {
         if level < 9 {
             return Some(level.saturating_add(1).min(6));
         }
+    }
+    if let Some(level) = style_levels.get(style) {
+        return Some(*level);
     }
     let lower = style.to_ascii_lowercase();
     if lower == "title" {
@@ -271,10 +344,77 @@ fn heading_level(style: &str, outline: Option<u8>) -> Option<u8> {
         .map(|level| level.clamp(1, 6))
 }
 
-fn parse_docx(xml: &[u8]) -> OfficeDoc {
+/// Maps paragraph style ids to heading levels from `word/styles.xml`.
+///
+/// A localized Word writes ids such as `1` or `Titre1` while keeping the
+/// built-in English style name (`heading 1`), so the name is the stable key.
+fn parse_heading_styles(xml: &[u8]) -> HashMap<String, u8> {
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().trim_text(true);
+    let mut levels = HashMap::new();
+    let mut current: Option<String> = None;
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(element)) => match element.local_name().as_ref() {
+                "style" => current = attr(&element, "styleId"),
+                "name" => record_heading(&mut levels, current.as_deref(), &element),
+                _ => {}
+            },
+            Ok(Event::Empty(element)) => {
+                if element.local_name().as_ref() == "name" {
+                    record_heading(&mut levels, current.as_deref(), &element);
+                }
+            }
+            Ok(Event::End(element)) => {
+                if element.local_name().as_ref() == "style" {
+                    current = None;
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    levels
+}
+
+fn record_heading(levels: &mut HashMap<String, u8>, id: Option<&str>, element: &BytesStart<'_>) {
+    let (Some(id), Some(name)) = (id, attr(element, "val")) else {
+        return;
+    };
+    if let Some(level) = named_heading(&name) {
+        levels.insert(id.to_string(), level);
+    }
+}
+
+fn named_heading(name: &str) -> Option<u8> {
+    let trimmed = name.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower == "title" {
+        return Some(1);
+    }
+    if lower == "subtitle" {
+        return Some(2);
+    }
+    let digits = lower
+        .strip_prefix("heading")
+        .or_else(|| trimmed.strip_prefix("标题"))?;
+    let level: u8 = digits.trim().parse().ok()?;
+    Some(level.clamp(1, 6))
+}
+
+fn parse_docx(xml: &[u8], style_levels: HashMap<String, u8>, truncated: bool) -> OfficeDoc {
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(false);
-    let mut builder = DocBuilder::default();
+    let mut builder = DocBuilder {
+        style_levels,
+        doc: OfficeDoc {
+            truncated,
+            ..OfficeDoc::default()
+        },
+        ..DocBuilder::default()
+    };
     let mut buf = Vec::new();
 
     loop {
@@ -310,40 +450,51 @@ fn parse_docx(xml: &[u8]) -> OfficeDoc {
                     builder.push_text(&text.xml10_content());
                 }
             }
+            Event::GeneralRef(reference) => {
+                if builder.in_text {
+                    if let Some(text) = reference_text(&reference) {
+                        builder.push_text(&text);
+                    }
+                }
+            }
             Event::End(element) => {
                 let name = element.local_name().as_ref().to_string();
-                match name.as_str() {
-                    "p" => builder.finish_paragraph(),
-                    "r" => builder.finish_run(),
-                    "rPr" => builder.in_rpr = false,
-                    "numPr" => builder.in_numpr = false,
-                    "t" => builder.in_text = false,
-                    "tc" if builder.table_depth == 1 => {
-                        let mut cell = builder.cell.trim_end_matches('\n').trim().to_string();
-                        cell.shrink_to_fit();
-                        if builder.row.len() < MAX_TABLE_COLS {
-                            builder.row.push(cell);
-                        } else {
-                            builder.doc.truncated = true;
+                if name == "drawing" {
+                    builder.drawing_depth = builder.drawing_depth.saturating_sub(1);
+                } else if builder.drawing_depth == 0 {
+                    match name.as_str() {
+                        "p" => builder.finish_paragraph(),
+                        "r" => builder.finish_run(),
+                        "rPr" => builder.in_rpr = false,
+                        "numPr" => builder.in_numpr = false,
+                        "t" => builder.in_text = false,
+                        "tc" if builder.table_depth == 1 => {
+                            let mut cell = builder.cell.trim_end_matches('\n').trim().to_string();
+                            cell.shrink_to_fit();
+                            if builder.row.len() < MAX_TABLE_COLS {
+                                builder.row.push(cell);
+                            } else {
+                                builder.doc.truncated = true;
+                            }
+                            builder.cell.clear();
                         }
-                        builder.cell.clear();
-                    }
-                    "tr" if builder.table_depth == 1 => {
-                        if builder.row_header {
-                            builder.table_header = true;
+                        "tr" if builder.table_depth == 1 => {
+                            if builder.row_header {
+                                builder.table_header = true;
+                            }
+                            if builder.table_rows.len() < MAX_TABLE_ROWS {
+                                builder.table_rows.push(std::mem::take(&mut builder.row));
+                            } else {
+                                builder.doc.truncated = true;
+                            }
+                            builder.row_header = false;
                         }
-                        if builder.table_rows.len() < MAX_TABLE_ROWS {
-                            builder.table_rows.push(std::mem::take(&mut builder.row));
-                        } else {
-                            builder.doc.truncated = true;
+                        "tbl" => {
+                            builder.table_depth = builder.table_depth.saturating_sub(1);
+                            builder.finish_table();
                         }
-                        builder.row_header = false;
+                        _ => {}
                     }
-                    "tbl" => {
-                        builder.table_depth = builder.table_depth.saturating_sub(1);
-                        builder.finish_table();
-                    }
-                    _ => {}
                 }
             }
             _ => {}
@@ -354,6 +505,13 @@ fn parse_docx(xml: &[u8]) -> OfficeDoc {
 }
 
 fn doc_start(builder: &mut DocBuilder, name: &str, element: &BytesStart<'_>) {
+    if name == "drawing" {
+        builder.drawing_depth += 1;
+        return;
+    }
+    if builder.drawing_depth > 0 {
+        return;
+    }
     match name {
         "p" => {
             builder.para.clear();
@@ -405,6 +563,9 @@ fn doc_start(builder: &mut DocBuilder, name: &str, element: &BytesStart<'_>) {
 }
 
 fn doc_empty(builder: &mut DocBuilder, name: &str, element: &BytesStart<'_>) {
+    if builder.drawing_depth > 0 {
+        return;
+    }
     match name {
         "pStyle" => {
             if let Some(value) = attr(element, "w:val") {
@@ -456,56 +617,84 @@ enum CellFmt {
 }
 
 fn parse_xlsx<R: Read + Seek>(archive: &mut zip::ZipArchive<R>) -> Result<Vec<SheetPreview>, ApiError> {
-    let workbook = read_entry(archive, "xl/workbook.xml", MAX_XML_BYTES)
+    let workbook_xml = read_entry(archive, "xl/workbook.xml", MAX_XML_BYTES)
         .ok_or_else(|| ApiError::new("PREVIEW", "xlsx: missing xl/workbook.xml"))?;
-    let sheets = parse_workbook(&workbook);
-    if sheets.is_empty() {
+    let workbook = parse_workbook(&workbook_xml);
+    if workbook.sheets.is_empty() {
         return Ok(Vec::new());
     }
+    let more_sheets = workbook.sheets.len() > MAX_SHEETS;
     let rels = read_entry(archive, "xl/_rels/workbook.xml.rels", MAX_XML_BYTES)
         .map(|xml| parse_rels(&xml))
         .unwrap_or_default();
-    let shared = read_entry(archive, "xl/sharedStrings.xml", MAX_XML_BYTES)
-        .map(|xml| parse_shared_strings(&xml))
+    let (shared, shared_cut) = read_entry_capped(archive, "xl/sharedStrings.xml", MAX_XML_BYTES)
+        .map(|(xml, cut)| {
+            let (strings, clipped) = parse_shared_strings(&xml);
+            (strings, cut || clipped)
+        })
         .unwrap_or_default();
     let formats = read_entry(archive, "xl/styles.xml", MAX_XML_BYTES)
         .map(|xml| parse_styles(&xml))
         .unwrap_or_default();
 
     let mut out = Vec::new();
-    for (index, (name, rid)) in sheets.into_iter().take(MAX_SHEETS).enumerate() {
+    for (index, (name, rid)) in workbook.sheets.into_iter().take(MAX_SHEETS).enumerate() {
         let path = rid
             .as_deref()
             .and_then(|rid| rels.get(rid))
             .cloned()
             .unwrap_or_else(|| format!("xl/worksheets/sheet{}.xml", index + 1));
-        let Some(xml) = read_entry(archive, &path, MAX_XML_BYTES) else {
+        let Some((xml, cut)) = read_entry_capped(archive, &path, MAX_XML_BYTES) else {
             continue;
         };
-        let (rows, truncated) = parse_sheet(&xml, &shared, &formats);
+        let (rows, truncated) =
+            parse_sheet(&xml, &shared, &formats, workbook.date1904, cut || shared_cut);
         out.push(SheetPreview {
             name,
             rows,
             truncated,
         });
     }
+    // The tabs stop at MAX_SHEETS; flag the last one so the UI can say the
+    // workbook continues instead of silently pretending this is everything.
+    if more_sheets {
+        if let Some(last) = out.last_mut() {
+            last.truncated = true;
+        }
+    }
     Ok(out)
 }
 
-fn parse_workbook(xml: &[u8]) -> Vec<(String, Option<String>)> {
+#[derive(Default)]
+struct Workbook {
+    sheets: Vec<(String, Option<String>)>,
+    date1904: bool,
+}
+
+fn parse_workbook(xml: &[u8]) -> Workbook {
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(true);
-    let mut sheets = Vec::new();
+    let mut workbook = Workbook::default();
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(element)) | Ok(Event::Empty(element)) => {
-                if element.local_name().as_ref() == "sheet" {
-                    let name = attr(&element, "name").unwrap_or_default();
-                    let rid = attr(&element, "r:id").or_else(|| attr(&element, "id"));
-                    if !name.is_empty() {
-                        sheets.push((name, rid));
+                match element.local_name().as_ref() {
+                    "sheet" => {
+                        let name = attr(&element, "name").unwrap_or_default();
+                        let rid = attr(&element, "r:id").or_else(|| attr(&element, "id"));
+                        if !name.is_empty() {
+                            workbook.sheets.push((name, rid));
+                        }
                     }
+                    "workbookPr" => {
+                        if let Some(value) = attr(&element, "date1904") {
+                            let value = value.trim();
+                            workbook.date1904 =
+                                value == "1" || value.eq_ignore_ascii_case("true");
+                        }
+                    }
+                    _ => {}
                 }
             }
             Ok(Event::Eof) | Err(_) => break,
@@ -513,7 +702,7 @@ fn parse_workbook(xml: &[u8]) -> Vec<(String, Option<String>)> {
         }
         buf.clear();
     }
-    sheets
+    workbook
 }
 
 fn parse_rels(xml: &[u8]) -> HashMap<String, String> {
@@ -561,10 +750,13 @@ fn normalize_target(target: &str) -> String {
     }
 }
 
-fn parse_shared_strings(xml: &[u8]) -> Vec<String> {
+/// Returns the strings plus whether any was clipped at [`MAX_SHARED_STRING_BYTES`], so the
+/// preview can say the sheet is incomplete instead of silently showing a prefix.
+fn parse_shared_strings(xml: &[u8]) -> (Vec<String>, bool) {
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(false);
     let mut strings = Vec::new();
+    let mut clipped = false;
     let mut current: Option<String> = None;
     let mut in_text = false;
     let mut phonetic = false;
@@ -592,7 +784,15 @@ fn parse_shared_strings(xml: &[u8]) -> Vec<String> {
                         let value = quick_xml::escape::unescape(&raw)
                             .map(|value| value.into_owned())
                             .unwrap_or_else(|_| raw.into_owned());
-                        current.push_str(&value);
+                        clipped |= push_limited(current, &value, MAX_SHARED_STRING_BYTES);
+                    }
+                }
+            }
+            Ok(Event::GeneralRef(reference)) => {
+                if in_text && !phonetic {
+                    if let (Some(current), Some(text)) = (current.as_mut(), reference_text(&reference))
+                    {
+                        clipped |= push_limited(current, &text, MAX_SHARED_STRING_BYTES);
                     }
                 }
             }
@@ -607,12 +807,17 @@ fn parse_shared_strings(xml: &[u8]) -> Vec<String> {
                 "t" => in_text = false,
                 _ => {}
             },
-            Ok(Event::Eof) | Err(_) => break,
+            Ok(Event::Eof) => break,
+            Err(_) => {
+                // A cut XML part is a truncated table, not a clean end.
+                clipped = true;
+                break;
+            }
             _ => {}
         }
         buf.clear();
     }
-    strings
+    (strings, clipped)
 }
 
 #[derive(Default)]
@@ -735,6 +940,8 @@ fn parse_sheet(
     xml: &[u8],
     shared: &[String],
     formats: &Formats,
+    date1904: bool,
+    cut: bool,
 ) -> (Vec<Vec<String>>, bool) {
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(false);
@@ -742,7 +949,8 @@ fn parse_sheet(
     let mut row: Vec<String> = Vec::new();
     let mut row_index = 0usize;
     let mut next_col = 0usize;
-    let mut truncated = false;
+    let mut truncated = cut;
+    let mut rendered = 0usize;
     let mut cells = 0usize;
     let mut in_value = false;
     let mut in_inline = false;
@@ -791,7 +999,7 @@ fn parse_sheet(
                             .as_deref()
                             .map(cell_column)
                             .unwrap_or(next_col);
-                        next_col = cell_col + 1;
+                        next_col = cell_col.saturating_add(1);
                         value.clear();
                     }
                     "v" => in_value = true,
@@ -805,13 +1013,14 @@ fn parse_sheet(
                     let index = attr(&element, "r")
                         .and_then(|value| value.parse::<usize>().ok())
                         .unwrap_or(row_index + 1);
-                    while rows.len() + 1 < index && rows.len() < MAX_ROWS_PER_SHEET {
-                        rows.push(Vec::new());
-                    }
-                    if index <= MAX_ROWS_PER_SHEET {
-                        rows.push(Vec::new());
-                    } else {
+                    if index > MAX_ROWS_PER_SHEET || rows.len() >= MAX_ROWS_PER_SHEET {
                         truncated = true;
+                    } else {
+                        while rows.len() + 1 < index {
+                            rows.push(Vec::new());
+                        }
+                        rows.push(Vec::new());
+                        row_index = rows.len();
                     }
                 }
             }
@@ -821,7 +1030,18 @@ fn parse_sheet(
                     let decoded = quick_xml::escape::unescape(&raw)
                         .map(|value| value.into_owned())
                         .unwrap_or_else(|_| raw.into_owned());
-                    value.push_str(&decoded);
+                    if push_limited(&mut value, &decoded, MAX_CELL_BYTES) {
+                        truncated = true;
+                    }
+                }
+            }
+            Event::GeneralRef(reference) => {
+                if in_value || in_text {
+                    if let Some(decoded) = reference_text(&reference) {
+                        if push_limited(&mut value, &decoded, MAX_CELL_BYTES) {
+                            truncated = true;
+                        }
+                    }
                 }
             }
             Event::End(element) => {
@@ -840,15 +1060,22 @@ fn parse_sheet(
                             truncated = true;
                             value.clear();
                         } else {
-                            place_cell(
-                                &mut row,
-                                cell_col,
-                                render_cell(&cell_kind, &value, shared, formats, cell_style),
-                            );
+                            let text =
+                                render_cell(&cell_kind, &value, shared, formats, cell_style, date1904);
+                            if rendered.saturating_add(text.len()) > MAX_SHEET_BYTES {
+                                truncated = true;
+                                break 'read;
+                            }
+                            rendered += text.len();
+                            place_cell(&mut row, cell_col, text);
                         }
                         value.clear();
                     }
                     "row" => {
+                        if rows.len() >= MAX_ROWS_PER_SHEET {
+                            truncated = true;
+                            break 'read;
+                        }
                         trim_row(&mut row);
                         rows.push(std::mem::take(&mut row));
                         row_index = rows.len();
@@ -909,6 +1136,7 @@ fn render_cell(
     shared: &[String],
     formats: &Formats,
     style: usize,
+    date1904: bool,
 ) -> String {
     match kind {
         "s" => raw
@@ -928,18 +1156,18 @@ fn render_cell(
         }
         "e" => raw.to_string(),
         "d" => raw.replace('T', " ").trim_end_matches('Z').to_string(),
-        _ => format_serial(raw, formats.resolve(style)),
+        _ => format_serial(raw, formats.resolve(style), date1904),
     }
 }
 
-fn format_serial(raw: &str, format: CellFmt) -> String {
+fn format_serial(raw: &str, format: CellFmt, date1904: bool) -> String {
     let Ok(number) = raw.trim().parse::<f64>() else {
         return raw.to_string();
     };
     match format {
         CellFmt::General => raw.trim().to_string(),
         CellFmt::Percent => format!("{}%", trim_float(number * 100.0)),
-        CellFmt::Date { time } => excel_date(number, time),
+        CellFmt::Date { time } => excel_date(number, time, date1904),
     }
 }
 
@@ -951,20 +1179,42 @@ fn trim_float(value: f64) -> String {
     text.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
+/// Excel caps dates at 9999-12-31 (serial 2,958,465 in the 1900 system).
+/// Beyond that the day count would overflow the calendar conversion.
+const MAX_EXCEL_SERIAL: f64 = 2_958_465.0;
+
 /// Excel stores dates as days since 1899-12-30 (with the fictitious 1900-02-29
-/// at serial 60). Converting through a Unix day count keeps the arithmetic in
-/// integers; serials below 60 are shifted by one to match real calendar dates.
-fn excel_date(serial: f64, with_time: bool) -> String {
-    if !serial.is_finite() || serial < 0.0 {
-        return trim_float(serial);
+/// at serial 60) or, when the workbook sets `date1904`, since 1904-01-01.
+/// Converting through a Unix day count keeps the arithmetic in integers;
+/// serials below 60 are shifted by one to match real calendar dates.
+fn excel_date(serial: f64, with_time: bool, date1904: bool) -> String {
+    if !serial.is_finite() || serial < 0.0 || serial > MAX_EXCEL_SERIAL {
+        return format!("{serial}");
     }
-    let adjusted = if serial < 60.0 { serial + 1.0 } else { serial };
-    let days = adjusted.floor() as i64 - 25569; // days since 1970-01-01
-    let (year, month, day) = civil_from_days(days);
-    let seconds = (adjusted.fract() * 86400.0).round() as i64;
+    // Serial 1462 in the 1900 system is 1904-01-01.
+    let adjusted = if date1904 {
+        serial + 1462.0
+    } else if serial < 60.0 {
+        serial + 1.0
+    } else {
+        serial
+    };
+    let mut days = adjusted.floor() as i64 - 25569; // days since 1970-01-01
+    let mut seconds = (serial.fract() * 86400.0).round() as i64;
+    if seconds >= 86400 {
+        // Rounding a fraction just below 1.0 lands on the next day.
+        seconds -= 86400;
+        days += 1;
+    }
     let (hour, minute, second) = (seconds / 3600, (seconds % 3600) / 60, seconds % 60);
-    if with_time && seconds > 0 {
-        format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}")
+    let clock = format!("{hour:02}:{minute:02}:{second:02}");
+    // A serial below 1 has no date part; Excel shows a clock for time formats.
+    if with_time && serial < 1.0 {
+        return clock;
+    }
+    let (year, month, day) = civil_from_days(days);
+    if with_time {
+        format!("{year:04}-{month:02}-{day:02} {clock}")
     } else {
         format!("{year:04}-{month:02}-{day:02}")
     }
@@ -1020,7 +1270,7 @@ mod tests {
 
     #[test]
     fn docx_keeps_headings_runs_lists_and_tables() {
-        let doc = parse_docx(DOC.as_bytes());
+        let doc = parse_docx(DOC.as_bytes(), HashMap::new(), false);
         assert!(!doc.truncated);
         assert_eq!(doc.blocks.len(), 5);
 
@@ -1051,7 +1301,7 @@ mod tests {
     #[test]
     fn docx_outline_level_wins_over_style() {
         let xml = br#"<w:document xmlns:w="w"><w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/><w:outlineLvl w:val="2"/></w:pPr><w:r><w:t>X</w:t></w:r></w:p></w:body></w:document>"#;
-        let doc = parse_docx(xml);
+        let doc = parse_docx(xml, HashMap::new(), false);
         assert_eq!(doc.blocks[0].level, Some(3));
     }
 
@@ -1113,9 +1363,19 @@ mod tests {
 
     #[test]
     fn xlsx_handles_shared_string_rich_text_without_phonetics() {
-        let strings = parse_shared_strings(SHARED.as_bytes());
+        let (strings, clipped) = parse_shared_strings(SHARED.as_bytes());
         assert_eq!(strings[3], "Rich Text");
         assert_eq!(strings.len(), 4);
+        assert!(!clipped);
+    }
+
+    #[test]
+    fn a_clipped_shared_string_is_reported() {
+        let long = "x".repeat(MAX_SHARED_STRING_BYTES + 10);
+        let xml = format!("<sst><si><t>{long}</t></si></sst>");
+        let (strings, clipped) = parse_shared_strings(xml.as_bytes());
+        assert!(clipped);
+        assert_eq!(strings[0].len(), MAX_SHARED_STRING_BYTES);
     }
 
     #[test]
@@ -1127,7 +1387,7 @@ mod tests {
             ));
         }
         xml.push_str("</sheetData></worksheet>");
-        let (rows, truncated) = parse_sheet(xml.as_bytes(), &[], &Formats::default());
+        let (rows, truncated) = parse_sheet(xml.as_bytes(), &[], &Formats::default(), false, false);
         assert_eq!(rows.len(), MAX_ROWS_PER_SHEET);
         assert!(truncated);
         assert_eq!(rows[0], vec!["1"]);
@@ -1139,10 +1399,56 @@ mod tests {
         assert_eq!(cell_column("Z9"), 25);
         assert_eq!(cell_column("AA1"), 26);
         assert_eq!(cell_column("AB12"), 27);
-        assert_eq!(excel_date(45678.0, false), "2025-01-21");
-        assert_eq!(excel_date(45678.5, true), "2025-01-21 12:00:00");
-        assert_eq!(excel_date(1.0, false), "1900-01-01");
-        assert_eq!(format_serial("0.125", CellFmt::Percent), "12.5%");
+        assert_eq!(excel_date(45678.0, false, false), "2025-01-21");
+        assert_eq!(excel_date(45678.5, true, false), "2025-01-21 12:00:00");
+        assert_eq!(excel_date(1.0, false, false), "1900-01-01");
+        assert_eq!(format_serial("0.125", CellFmt::Percent, false), "12.5%");
+    }
+
+    #[test]
+    fn excel_dates_handle_1904_system_time_only_and_overflow() {
+        assert_eq!(excel_date(0.0, false, true), "1904-01-01");
+        assert_eq!(excel_date(45678.0, false, true), "2029-01-22");
+        assert_eq!(excel_date(0.5, true, false), "12:00:00");
+        assert_eq!(excel_date(0.999999999, true, false), "00:00:00");
+        // Beyond Excel's last date the raw serial is shown instead of panicking.
+        assert_eq!(excel_date(2_958_466.0, false, false), "2958466");
+    }
+
+    #[test]
+    fn docx_decodes_entities_and_skips_drawing_text() {
+        let xml = br#"<w:document xmlns:w="w"><w:body>
+            <w:p><w:r><w:t>A &amp; B &#65;</w:t></w:r></w:p>
+            <w:p><w:r><w:t>Body</w:t><w:drawing><a:p><a:t>Chart</a:t></a:p></w:drawing></w:r></w:p>
+        </w:body></w:document>"#;
+        let doc = parse_docx(xml, HashMap::new(), false);
+        assert_eq!(doc.blocks[0].text, "A & B A");
+        assert_eq!(doc.blocks[1].text, "Body");
+    }
+
+    #[test]
+    fn docx_uses_style_names_for_localized_heading_ids() {
+        let styles = parse_heading_styles(
+            br#"<w:styles xmlns:w="w"><w:style w:styleId="1"><w:name w:val="heading 1"/></w:style>
+            <w:style w:styleId="Custom"><w:name w:val="Title"/></w:style></w:styles>"#,
+        );
+        assert_eq!(styles.get("1"), Some(&1));
+        assert_eq!(styles.get("Custom"), Some(&1));
+        let xml = br#"<w:document xmlns:w="w"><w:body><w:p><w:pPr><w:pStyle w:val="1"/></w:pPr><w:r><w:t>H</w:t></w:r></w:p></w:body></w:document>"#;
+        let doc = parse_docx(xml, styles, false);
+        assert_eq!(doc.blocks[0].kind, "heading");
+        assert_eq!(doc.blocks[0].level, Some(1));
+    }
+
+    #[test]
+    fn sheet_length_caps_are_marked_truncated() {
+        let xml = format!(
+            "<worksheet><sheetData><row r=\"1\"><c r=\"A1\"><v>{}</v></c></row></sheetData></worksheet>",
+            "1".repeat(MAX_CELL_BYTES + 10)
+        );
+        let (rows, truncated) = parse_sheet(xml.as_bytes(), &[], &Formats::default(), false, false);
+        assert!(truncated);
+        assert_eq!(rows[0][0].len(), MAX_CELL_BYTES);
     }
 
     #[test]

@@ -114,7 +114,7 @@ export function buildBlankMenu(
           label: pane.hidden ? t('list.hideHidden') : t('list.showHidden'),
           onSelect: () => options.toggleHidden(paneId),
         },
-        ...(!inShell && !remote
+        ...(!inArchive && !inShell && !remote
           ? [
               {
                 kind: 'item' as const,

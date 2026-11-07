@@ -19,6 +19,13 @@ use super::ArchiveEntry;
 /// Decompressed bytes a preview may read before it reports what it has so far.
 const PREVIEW_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Budget for materializing a folder inside an archive in the preview cache. Browsing a
+/// crafted archive must not be able to fill the disk; explicit extraction passes `None`.
+pub const MAX_MATERIALIZE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Entries bound for the same browse path (a tree with millions of tiny files is just a
+/// different way to exhaust the cache).
+const MAX_MATERIALIZE_ENTRIES: usize = 200_000;
+
 /// Refusal marker carried inside the `io::Error` a [`Capped`] writer returns.
 #[derive(Debug)]
 struct LimitExceeded;
@@ -881,13 +888,16 @@ pub fn extract_dir(
     inner: &str,
     dest: &std::path::Path,
     uniquify: bool,
+    limit: Option<u64>,
 ) -> Result<Vec<String>, ApiError> {
     // A zip central directory allows one pass; the generic loop below re-opens the archive
     // for every member, which is quadratic for a big folder dragged out of a big zip.
     if format::detect(archive) == Some(Format::Zip) {
-        return extract_zip_dir(archive, inner, dest, uniquify);
+        return extract_zip_dir(archive, inner, dest, uniquify, limit);
     }
     let mut written = Vec::new();
+    let mut total = 0u64;
+    let mut entries = 0usize;
     for entry in list(archive, 500_000)? {
         let norm = entry.name.replace('/', "\\");
         let norm = norm.trim_matches('\\');
@@ -897,6 +907,15 @@ pub fn extract_dir(
         let rel = rel.trim_matches('\\');
         if rel.is_empty() {
             continue;
+        }
+        // Count directories too: a tree of empty folders is another way to exhaust the
+        // cache, and `written` only tracks files.
+        entries += 1;
+        if limit.is_some() && entries > MAX_MATERIALIZE_ENTRIES {
+            return Err(ApiError::new(
+                "TOO_MANY_ENTRIES",
+                format!("more than {MAX_MATERIALIZE_ENTRIES} entries"),
+            ));
         }
         let target = dest.join(rel);
         if entry.is_dir {
@@ -914,7 +933,14 @@ pub fn extract_dir(
         } else {
             target
         };
-        extract_single(archive, norm, &target, None, None)?;
+        let remaining = limit.map(|cap| cap.saturating_sub(total));
+        // A zero-byte member still fits an exhausted budget; a lying header is caught by
+        // the Capped writer inside `extract_single`.
+        if remaining == Some(0) && entry.size > 0 {
+            return Err(ApiError::new("TOO_LARGE", inner.to_string()));
+        }
+        extract_single(archive, norm, &target, None, remaining)?;
+        total = total.saturating_add(std::fs::metadata(&target).map(|meta| meta.len()).unwrap_or(0));
         written.push(target.to_string_lossy().into_owned());
     }
     Ok(written)
@@ -927,12 +953,15 @@ fn extract_zip_dir(
     inner: &str,
     dest: &std::path::Path,
     uniquify: bool,
+    limit: Option<u64>,
 ) -> Result<Vec<String>, ApiError> {
     let inner_norm = inner.replace('/', "\\");
     let inner_norm = inner_norm.trim_matches('\\');
     let file = File::open(archive).map_err(|e| ApiError::from_io(archive, &e))?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| ApiError::new("ARCHIVE", e.to_string()))?;
     let mut written = Vec::new();
+    let mut total = 0u64;
+    let mut entries = 0usize;
     let mut first_error: Option<ApiError> = None;
     for index in 0..zip.len() {
         // Encrypted or damaged members are skipped like the generic path does; the folder
@@ -966,6 +995,13 @@ fn extract_zip_dir(
         if rel.is_empty() {
             continue;
         }
+        entries += 1;
+        if limit.is_some() && entries > MAX_MATERIALIZE_ENTRIES {
+            return Err(ApiError::new(
+                "TOO_MANY_ENTRIES",
+                format!("more than {MAX_MATERIALIZE_ENTRIES} entries"),
+            ));
+        }
         let target = dest.join(rel);
         if member.is_dir() {
             std::fs::create_dir_all(&target)
@@ -984,9 +1020,25 @@ fn extract_zip_dir(
         };
         let mut out = File::create(&target)
             .map_err(|e| ApiError::from_io(&target.to_string_lossy(), &e))?;
-        std::io::copy(&mut member, &mut out)
-            .map_err(|e| ApiError::from_io(&target.to_string_lossy(), &e))?;
+        // Enforce the browse budget on the stream, not on the header: a member can claim
+        // a tiny size and still decompress to gigabytes.
+        let copied = match limit.map(|cap| cap.saturating_sub(total)) {
+            None => std::io::copy(&mut member, &mut out)
+                .map_err(|e| ApiError::from_io(&target.to_string_lossy(), &e))?,
+            // `left` may be 0: `take(1)` then proves whether the member is really empty.
+            Some(left) => {
+                let copied = std::io::copy(&mut (&mut member).take(left.saturating_add(1)), &mut out)
+                    .map_err(|e| ApiError::from_io(&target.to_string_lossy(), &e))?;
+                if copied > left {
+                    drop(out);
+                    let _ = std::fs::remove_file(&target);
+                    return Err(ApiError::new("TOO_LARGE", inner.to_string()));
+                }
+                copied
+            }
+        };
         out.flush().map_err(|e| ApiError::from_io(&target.to_string_lossy(), &e))?;
+        total = total.saturating_add(copied);
         written.push(target.to_string_lossy().into_owned());
     }
     if written.is_empty() {
@@ -1218,7 +1270,7 @@ mod tests {
         std::fs::create_dir_all(&dest).unwrap();
         std::fs::write(dest.join("top.txt"), b"keep").unwrap();
 
-        let written = extract_dir(&archive.to_string_lossy(), "folder", &dest, true).unwrap();
+        let written = extract_dir(&archive.to_string_lossy(), "folder", &dest, true, None).unwrap();
         assert_eq!(written.len(), 2);
         assert!(dest.join("sub").is_dir());
         assert_eq!(std::fs::read(dest.join("sub").join("a.txt")).unwrap(), b"child");

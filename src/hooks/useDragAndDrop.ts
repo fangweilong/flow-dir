@@ -92,8 +92,10 @@ export function useDragAndDrop({
     const hit = document.elementFromPoint(x, y)
     const el = hit instanceof Element ? hit.closest<HTMLElement>('[data-drop-dir]') : null
     const dir = el?.dataset.dropDir
-    // Shell locations are not copy/move targets; their items only accept shell verbs.
-    if (!el || !dir || isShellPath(dir)) return null
+    // Shell locations and archive-internal folders are not copy/move targets: the first
+    // only accepts shell verbs, the second is a read-only virtual path that the local
+    // operation pipeline cannot write to.
+    if (!el || !dir || isShellPath(dir) || isInsideArchive(dir)) return null
     const tabId = el.closest<HTMLElement>('[data-drop-tab]')?.dataset.dropTab
     const rect = el.getBoundingClientRect()
     return { dir, tabId, left: rect.left, top: rect.top, width: rect.width, height: rect.height }

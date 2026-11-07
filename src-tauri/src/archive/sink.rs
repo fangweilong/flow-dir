@@ -63,6 +63,7 @@ impl Progress {
             failed: Vec::new(),
             succeeded: Vec::new(),
             failed_indices: Vec::new(),
+            landed: Vec::new(),
             done: false,
             aborted: false,
             error: None,
@@ -258,7 +259,17 @@ impl Sink {
         let full = self.temp.join(&rel);
         self.current = Some(rel.clone());
         if is_dir {
-            fs::create_dir_all(&full).map_err(|e| self.abort_io(Path::new(&rel), &e))?;
+            if let Err(err) = fs::create_dir_all(&full) {
+                let error = self.abort_io(Path::new(&rel), &err);
+                // A full disk makes every later entry fail too, so it still aborts. A
+                // name conflict (a file already occupies this path) only affects this
+                // entry: skipping it lets the rest of the archive extract.
+                if error.code == "NOT_ENOUGH_SPACE" {
+                    return Err(error);
+                }
+                self.skip_current(&error);
+                return Ok(Take::Skip);
+            }
             self.progress.tick(Some(rel));
             Ok(Take::Dir)
         } else {
@@ -269,7 +280,16 @@ impl Sink {
     /// Streams one file entry to the temporary tree.
     pub fn write(&mut self, path: &Path, reader: &mut dyn Read, declared: u64) -> Result<(), ApiError> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| self.abort_io(path, &e))?;
+            if let Err(err) = fs::create_dir_all(parent) {
+                let error = self.abort_io(path, &err);
+                // Same policy as the directory entry itself: a full disk affects every
+                // later entry and aborts, while a name conflict only skips this file.
+                if error.code == "NOT_ENOUGH_SPACE" {
+                    return Err(error);
+                }
+                self.skip_current(&error);
+                return Ok(());
+            }
         }
         let mut file = match File::create(path) {
             Ok(file) => file,

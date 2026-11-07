@@ -106,6 +106,7 @@ impl Progress {
             failed: if done { self.failed.clone() } else { Vec::new() },
             succeeded: Vec::new(),
             failed_indices: Vec::new(),
+            landed: Vec::new(),
             done,
             aborted: false,
             error: None,
@@ -247,6 +248,7 @@ fn run(
                 failed: Vec::new(),
                 succeeded: Vec::new(),
                 failed_indices: Vec::new(),
+                landed: Vec::new(),
                 done: true,
                 aborted,
                 error: if aborted { None } else { Some(err) },
@@ -326,11 +328,23 @@ fn collect(
         let text = path.display().to_string();
         let error = ApiError::from_io(&text, &err);
         log::warn!(target: "flowdir::archive", "compress skip {text}: {}", error.code);
+        push_skip(skipped, text, &error.code, &error.detail);
+    }
+
+    /// A reparse point that cannot be archived is skipped like an unreadable child; doing
+    /// it silently would make the archive quietly incomplete.
+    fn record_link(skipped: &mut Vec<crate::ops::OpFailure>, path: &Path) {
+        let text = path.display().to_string();
+        log::warn!(target: "flowdir::archive", "compress skip link {text}");
+        push_skip(skipped, text, "SYMLINK", "SYMLINK");
+    }
+
+    fn push_skip(skipped: &mut Vec<crate::ops::OpFailure>, text: String, code: &str, detail: &str) {
         if skipped.len() < 200 {
             skipped.push(crate::ops::OpFailure {
                 path: text,
-                code: error.code,
-                detail: error.detail,
+                code: code.to_string(),
+                detail: detail.to_string(),
             });
         }
     }
@@ -353,10 +367,19 @@ fn collect(
         // A junction/symlink *directory* is skipped: following it would embed files that
         // are not part of the selection and may not terminate. A file reparse point is
         // read normally — OneDrive/Dropbox placeholders and deduplicated files are files,
-        // and skipping them silently dropped cloud-only files from the archive.
+        // and skipping them silently dropped cloud-only files from the archive. Its target
+        // metadata supplies the size, because the writer opens the path (follows the link).
         if meta.is_dir() && is_link(&meta) {
+            record_link(skipped, &root);
             continue;
         }
+        let meta = match link_target_meta(&root, &meta) {
+            Some(meta) => meta,
+            None => {
+                record_link(skipped, &root);
+                continue;
+            }
+        };
         let name = root
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -408,8 +431,15 @@ fn collect(
                         }
                     };
                     if meta.is_dir() && is_link(&meta) {
+                        record_link(skipped, &child);
                         continue;
                     }
+                    // File links are archived by content, so their header must describe
+                    // the target (a dangling link or a link to a folder is skipped).
+                    let Some(meta) = link_target_meta(&child, &meta) else {
+                        record_link(skipped, &child);
+                        continue;
+                    };
                     let child_name = format!("{}/{}", name, entry.file_name().to_string_lossy());
                     children.push((child, child_name, meta));
                 }
@@ -438,6 +468,20 @@ fn collect(
 /// their target is outside the selection and may be unbounded.
 fn is_link(meta: &fs::Metadata) -> bool {
     meta.file_attributes() & 0x400 != 0
+}
+
+/// Effective metadata for a reparse point. A file link is archived by opening the path,
+/// which follows it, so the target's size must be written into the header (using the
+/// link's own size produced ZIP `CHANGED` aborts and zero-byte TAR entries). Links to a
+/// directory and dangling links yield nothing and are skipped.
+fn link_target_meta(path: &Path, meta: &fs::Metadata) -> Option<fs::Metadata> {
+    if !is_link(meta) {
+        return Some(meta.clone());
+    }
+    match fs::metadata(path) {
+        Ok(target) if !target.is_dir() => Some(target),
+        _ => None,
+    }
 }
 
 /// Copies one entry's bytes, stopping on cancel and reporting progress as it goes.

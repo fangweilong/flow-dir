@@ -22,15 +22,26 @@ pub fn existing(paths: &[String]) -> Vec<bool> {
 /// are already free are returned unchanged; the search stops after [`MAX_SUFFIX`] tries so
 /// a pathological folder cannot hang the request.
 ///
-/// `sources` is the parallel list of files the same batch renames away. A target that only
-/// changes the case of its own source ("readme.md" -> "README.md") hits that source on a
-/// case-insensitive volume; it is free by definition and must not gain a ` (1)` suffix.
+/// `sources` lists the paths the same batch renames away, in execution order. Only the
+/// sources already processed are treated as free: the shell applies queued renames
+/// sequentially, so a later row's source still occupies its name when an earlier target
+/// needs it. This keeps chains that run in order (`b`→`c`, then `a`→`b`) suffix-free
+/// while a swap (`a`↔`b`) falls back to `b (1)` instead of producing a target that would
+/// collide at execution time. A target that only changes the case of its own source is
+/// covered by the same rule.
 pub fn unique(paths: &[String], sources: &[String]) -> Vec<String> {
     let mut claimed = std::collections::HashSet::new();
+    let mut released: std::collections::HashSet<String> = std::collections::HashSet::new();
     paths
         .iter()
         .enumerate()
-        .map(|(index, path)| unique_one(path, sources.get(index).map(String::as_str), &mut claimed))
+        .map(|(index, path)| {
+            // The current row's own source is free for a case-only rename.
+            if let Some(source) = sources.get(index) {
+                released.insert(source.to_lowercase());
+            }
+            unique_one(path, &released, &mut claimed)
+        })
         .collect()
 }
 
@@ -38,10 +49,10 @@ const MAX_SUFFIX: u32 = 10_000;
 
 fn unique_one(
     path: &str,
-    source: Option<&str>,
+    released: &std::collections::HashSet<String>,
     claimed: &mut std::collections::HashSet<String>,
 ) -> String {
-    if !is_taken(path, source, claimed) {
+    if !is_taken(path, released, claimed) {
         claimed.insert(path.to_lowercase());
         return path.to_string();
     }
@@ -59,7 +70,7 @@ fn unique_one(
     for n in 1..=MAX_SUFFIX {
         let candidate = dir.join(format!("{stem} ({n}){ext}"));
         let candidate = candidate.to_string_lossy().into_owned();
-        if !is_taken(&candidate, source, claimed) {
+        if !is_taken(&candidate, released, claimed) {
             claimed.insert(candidate.to_lowercase());
             return candidate;
         }
@@ -67,12 +78,18 @@ fn unique_one(
     path.to_string()
 }
 
-fn is_taken(path: &str, source: Option<&str>, claimed: &std::collections::HashSet<String>) -> bool {
+fn is_taken(
+    path: &str,
+    released: &std::collections::HashSet<String>,
+    claimed: &std::collections::HashSet<String>,
+) -> bool {
     let key = path.to_lowercase();
     if claimed.contains(&key) {
         return true;
     }
-    if source.is_some_and(|source| source.to_lowercase() == key) {
+    // A target reusing a path that an earlier row already vacated is intentional
+    // (chain), not a conflict.
+    if released.contains(&key) {
         return false;
     }
     std::fs::symlink_metadata(PathBuf::from(path)).is_ok()
@@ -163,6 +180,47 @@ mod tests {
         assert_ne!(names[0].to_lowercase(), names[1].to_lowercase());
         assert!(names[0].ends_with("same.txt"));
         assert!(names[1].ends_with("same (1).txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_batch_swap_is_numbered_because_the_shell_runs_in_order() {
+        let dir = temp_dir("unique-swap");
+        let a = dir.join("a.txt");
+        let b = dir.join("b.txt");
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+        let from_a = a.to_string_lossy().into_owned();
+        let from_b = b.to_string_lossy().into_owned();
+        // a→b executes while b still exists, so `b` must be numbered; b→a then finds
+        // `a` vacated by the first row.
+        let names = unique(
+            &[from_b.clone(), from_a.clone()],
+            &[from_a.clone(), from_b.clone()],
+        );
+        assert_eq!(
+            names,
+            vec![
+                dir.join("b (1).txt").to_string_lossy().into_owned(),
+                from_a
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_chain_in_execution_order_keeps_the_target_free() {
+        let dir = temp_dir("unique-chain");
+        let a = dir.join("a.txt");
+        let b = dir.join("b.txt");
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+        let from_a = a.to_string_lossy().into_owned();
+        let from_b = b.to_string_lossy().into_owned();
+        let free = dir.join("c.txt").to_string_lossy().into_owned();
+        // b→c runs first, so a→b may reuse `b` without a suffix.
+        let names = unique(&[free.clone(), from_b.clone()], &[from_b.clone(), from_a]);
+        assert_eq!(names, vec![free, from_b]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

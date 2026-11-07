@@ -62,6 +62,8 @@ export type MenuOutcome = {
 export type OpKind = 'copy' | 'move' | 'delete' | 'rename' | 'newdir'
 /** One item the shell rejected; `code` is the mapped app error code. */
 export type OpFailure = { path: string; code: string; detail: string }
+/** Actual destination of a completed item (differs from the request on "keep both"). */
+export type LandedItem = { index: number; path: string }
 export type OpProgress = {
   opId: string
   phase: string
@@ -77,6 +79,8 @@ export type OpProgress = {
   succeeded?: number[]
   /** Indices of failed sources, complete even when `failed` is capped. */
   failedIndices?: number[]
+  /** Actual destination of each completed source. */
+  landed?: LandedItem[]
   done: boolean
   aborted: boolean
   error: ApiError | null
@@ -132,6 +136,10 @@ export type ElevatedReport = {
   succeeded?: number[]
   /** Indices of failed sources, complete even when `failed` is capped. */
   failedIndices?: number[]
+  /** Actual destination of each completed source. */
+  landed?: LandedItem[]
+  /** `landed` was capped; items without an entry must not be undone by request name. */
+  landedTruncated?: boolean
   error: ApiError | null
 }
 export type AppInfo = {

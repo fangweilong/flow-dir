@@ -1,4 +1,4 @@
-import { pathKey } from './paths'
+import { isWebdavPath, pathKey } from './paths'
 import type { SortState } from './types'
 
 export type TabState = {
@@ -35,10 +35,13 @@ export type DropMode = 'center' | 'left' | 'right' | 'top' | 'bottom'
  * Windows paths for one folder have many spellings (`C:\Dir`, `c:\dir\`, `C:/dir`).
  * Compare them with unified separators, case-folded, and without a trailing separator;
  * a drive root keeps its colon (`c:`), which is still unique enough for identity checks.
+ * WebDAV addresses are compared by `pathKey` instead: folding their case or replacing
+ * `/` would merge distinct folders on a case-sensitive server.
  */
-export const samePath = (a: string, b: string) =>
-  pathKey(a.replace(/\//g, '\\')).replace(/\\+$/, '') ===
-  pathKey(b.replace(/\//g, '\\')).replace(/\\+$/, '')
+const pathIdentity = (path: string) =>
+  isWebdavPath(path) ? pathKey(path) : pathKey(path.replace(/\//g, '\\')).replace(/\\+$/, '')
+
+export const samePath = (a: string, b: string) => pathIdentity(a) === pathIdentity(b)
 
 /**
  * Back/forward moves only the cursor: the stack is the record of visited folders, so a

@@ -187,7 +187,9 @@ export const DEFAULT_SETTINGS: Settings = {
   undoLimit: 10,
   previewMaxFileMb: 64,
   previewMaxDimension: 4096,
-  previewTextKb: 8,
+  // Must match the backend default (`DEFAULT_PREVIEW_TEXT_KB`); the old 8 KB value only
+  // applied before settings arrived, then silently changed the effective size.
+  previewTextKb: 256,
   closedTabLimit: 20,
   restoreTabsOnStart: true,
   newTabOnMiddleClick: true,
