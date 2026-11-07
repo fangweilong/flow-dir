@@ -255,6 +255,9 @@ export function ComparePanel({
         // a "0/0/0" badge on that folder until the restarted recount reached it again.
         if (event.done) {
           countsJob.current = null
+          // A partial walk still produced numbers, but they may classify files as
+          // one-sided because a subtree could not be read.
+          if (event.error) setError(describeError(t, event.error))
           return
         }
         setCounts((prev) => ({ ...prev, [event.name]: event }))

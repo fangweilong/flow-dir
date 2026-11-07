@@ -370,7 +370,13 @@ export function useDirectoryScanner({
     const current = new Map<string, string>()
     for (const pane of Object.values(ws.panes)) {
       const tab = ws.tabs[pane.activeTabId]
-      if (tab?.path) current.set(pane.id, tab.path)
+      if (tab?.path) {
+        current.set(pane.id, tab.path)
+      } else {
+        // The drive overview has no path: forget the previous tab so returning to it is
+        // treated as a tab switch and rescans the changes made while the watcher was off.
+        lastActiveTab.current.delete(pane.id)
+      }
     }
     for (const [paneId, path] of current) {
       const pane = ws.panes[paneId]

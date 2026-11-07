@@ -270,6 +270,9 @@ export function fromSnapshot(value: unknown): Workspace | null {
     if (!Array.isArray(pane.tabIds) || !pane.tabIds.length) return null
     if (!pane.tabIds.every((id) => id in tabMap)) return null
     if (!(pane.activeTabId in tabMap)) return null
+    // The active tab must belong to this pane, otherwise the filter below can drop the
+    // record and leave the pane with no active tab.
+    if (!pane.tabIds.includes(pane.activeTabId)) return null
     if (!pane.sort || typeof pane.sort.key !== 'string') return null
     // `layout.json` is hand-editable; an unknown view would leave the pane with no body.
     if (
@@ -285,6 +288,15 @@ export function fromSnapshot(value: unknown): Workspace | null {
     if (typeof tab.path !== 'string') return null
     if (!Array.isArray(tab.history) || typeof tab.histIdx !== 'number') return null
     if (!tab.history.every((entry) => typeof entry === 'string')) return null
+  }
+  // A tab id shared by two panes would let closing it in one pane remove the record the
+  // other pane still references.
+  const seenTabIds = new Set<string>()
+  for (const pane of Object.values(paneMap)) {
+    for (const id of pane.tabIds) {
+      if (seenTabIds.has(id)) return null
+      seenTabIds.add(id)
+    }
   }
   // Older builds could leave tab records no pane points at; restoring them would show
   // closed folders in the compare pickers forever and keep growing the file.

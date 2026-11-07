@@ -1133,6 +1133,7 @@ async fn titlebar_menu(window: tauri::WebviewWindow, x: i32, y: i32) -> Result<(
 
 #[tauri::command]
 async fn shell_menu_show(
+    app: tauri::AppHandle,
     paths: Vec<String>,
     x: i32,
     y: i32,
@@ -1142,7 +1143,23 @@ async fn shell_menu_show(
     extract_here: Option<String>,
     extract_to: Option<String>,
     compress: Option<shell_menu::CompressLabels>,
+    confirmed_protected: Option<Vec<String>>,
 ) -> Result<shell_menu::Outcome, ApiError> {
+    // Native verbs run inside Explorer, outside `ops::validate`, so the guard has to run
+    // before the menu opens. A rejection makes the frontend fall back to its own menu,
+    // whose actions go through the normal validated path.
+    let protection = {
+        let current = app.state::<settings::SettingsCache>().get(&app);
+        protect::Protection {
+            block: current.protect_block.clone(),
+            confirm: current.protect_confirm.clone(),
+        }
+    };
+    protect::check(
+        &paths,
+        &protection,
+        &confirmed_protected.unwrap_or_default(),
+    )?;
     let extract = match (extract_title, extract_here, extract_to) {
         (Some(title), Some(here), Some(to)) => Some(shell_menu::ExtractLabels { title, here, to }),
         _ => None,
@@ -1854,10 +1871,18 @@ fn open_terminal(path: String) -> Result<(), ApiError> {
         return Ok(());
     }
 
-    // The shell inherits the working directory, so the path never enters a command line:
-    // a folder named `%TEMP%` would otherwise be expanded by cmd and open the wrong place.
+    // The path travels through an environment variable, never through the command line, so
+    // `%TEMP%` in a folder name is not expanded. The explicit `Set-Location`/`cd` still runs
+    // after a user profile or AutoRun script, which may otherwise change the directory.
+    const CWD_ENV: &str = "FLOWDIR_TERM_CWD";
     if std::process::Command::new("powershell")
-        .args(["-NoExit", "-NoLogo"])
+        .args([
+            "-NoExit",
+            "-NoLogo",
+            "-Command",
+            "Set-Location -LiteralPath $env:FLOWDIR_TERM_CWD",
+        ])
+        .env(CWD_ENV, &path)
         .current_dir(&path)
         .spawn()
         .is_ok()
@@ -1866,7 +1891,8 @@ fn open_terminal(path: String) -> Result<(), ApiError> {
     }
 
     std::process::Command::new("cmd")
-        .arg("/k")
+        .args(["/k", "cd /d \"%FLOWDIR_TERM_CWD%\""])
+        .env(CWD_ENV, &path)
         .current_dir(&path)
         .spawn()
         .map(|_| ())
@@ -1977,8 +2003,13 @@ fn init_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 fn main() {
     // The elevated helper must not start Tauri: no window, no tray, no single-instance
     // mutex, and no second WebView2 process for a filesystem operation.
-    if let Some((pipe, nonce, cancel_event)) = elevated::helper_args() {
-        std::process::exit(elevated::run_helper(&pipe, &nonce, cancel_event.as_deref()));
+    if let Some((pipe, nonce, cancel_event, server_pid)) = elevated::helper_args() {
+        std::process::exit(elevated::run_helper(
+            &pipe,
+            &nonce,
+            cancel_event.as_deref(),
+            server_pid,
+        ));
     }
     // A privilege switch starts this copy while the previous instance is still closing.
     // Waiting before Tauri initializes keeps the single-instance plugin from forwarding
@@ -2022,11 +2053,16 @@ fn main() {
         .register_asynchronous_uri_scheme_protocol("fd", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
             let uri = request.uri().clone();
+            let range = request
+                .headers()
+                .get(tauri::http::header::RANGE)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
             tauri::async_runtime::spawn_blocking(move || {
                 let response = if uri.path() == "/icon" {
                     icons::handle_request(&app, &uri)
                 } else {
-                    preview::handle_request(&app, &uri)
+                    preview::handle_request(&app, &uri, range.as_deref())
                 };
                 responder.respond(response);
             });
@@ -2065,8 +2101,19 @@ fn main() {
             // by origin as well, but refusing the navigation up front means a future
             // preview or link handler can never hand the bridge to foreign content.
             .on_navigation(|url| {
-                if matches!(url.scheme(), "tauri" | "about") {
-                    return true;
+                match url.scheme() {
+                    // `about:blank` is used while the window is being set up; any other
+                    // about/document URL could replace the UI.
+                    "about" => return url.as_str() == "about:blank",
+                    // The custom protocol is the app origin on macOS/Linux; Windows uses
+                    // `http://tauri.localhost` below.
+                    "tauri" => {
+                        return matches!(url.host_str(), Some("localhost") | Some("tauri.localhost"))
+                    }
+                    // Foreign schemes such as `file:` or `ftp:` must never inherit the
+                    // bridge, even when their host happens to spell an allowed name.
+                    "http" | "https" => {}
+                    _ => return false,
                 }
                 match url.host_str() {
                     Some("tauri.localhost") => true,

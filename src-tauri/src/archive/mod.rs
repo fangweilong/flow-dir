@@ -94,11 +94,39 @@ pub fn is_archive_or_inner_dir(path: &str) -> bool {
     is_inner_dir(&archive_path, &inner_path).unwrap_or(false)
 }
 
+/// Removes non-directory ancestors that would make `create_dir_all` fail. The archive may
+/// have been replaced since the cache was written, so a path that used to be a file can now
+/// be a parent folder (and vice versa).
+fn clear_blocking_ancestors(root: &std::path::Path, path: &std::path::Path) {
+    let mut current = path.parent();
+    while let Some(dir) = current {
+        if dir == root {
+            break;
+        }
+        match std::fs::symlink_metadata(dir) {
+            Ok(meta) if meta.is_dir() => break,
+            Ok(_) => {
+                let _ = std::fs::remove_file(dir);
+            }
+            Err(_) => {}
+        }
+        current = dir.parent();
+    }
+}
+
 /// Checks whether `inner_path` represents a directory inside `archive_path`.
 pub fn is_inner_dir(archive_path: &Path, inner_path: &str) -> Result<bool, ApiError> {
-    // A capped listing keeps the previous best-effort answer: a directory whose members all
-    // sit past the cap stays invisible here, exactly as before, so truncation is ignored.
-    let (entries, _) = backends::list_with_truncated(&archive_path.to_string_lossy(), 500_000)?;
+    // Use the unbounded listing and refuse to guess when even that hits the entry cap: a
+    // directory whose first member sits past a truncated listing used to be treated as a
+    // file and materialized as a zero-byte entry.
+    let (entries, truncated) =
+        backends::list_unbounded_with_truncated(&archive_path.to_string_lossy(), 500_000)?;
+    if truncated {
+        return Err(ApiError::new(
+            "TOO_MANY_ENTRIES",
+            format!("more than {} entries", backends::MAX_MATERIALIZE_ENTRIES),
+        ));
+    }
     let target = inner_path.replace('/', "\\");
     let target = target.trim_matches('\\').to_lowercase();
     if target.is_empty() {
@@ -315,11 +343,12 @@ pub fn extract_cached(
 
     // A directory entry must be materialized as a tree: `extract_single` would write a
     // zero-byte file under the folder's name and every child would then fail.
-    if is_inner_dir(archive_path, inner_path).unwrap_or(false) {
+    if is_inner_dir(archive_path, inner_path)? {
         if dest.is_dir() && dest_mtime >= arc_mtime && arc_mtime > 0 {
             return Ok(dest);
         }
         let parent = dest.parent().unwrap_or(temp.as_path());
+        clear_blocking_ancestors(&temp, parent);
         std::fs::create_dir_all(parent)
             .map_err(|e| ApiError::from_io(&parent.to_string_lossy(), &e))?;
         // Build the tree next to the destination and rename it in: a member that fails
@@ -342,7 +371,9 @@ pub fn extract_cached(
                 &inner_norm,
                 &tmp,
                 false,
-                Some(backends::MAX_MATERIALIZE_BYTES),
+                // Respect the caller's budget; a `None` (user-initiated open) still gets the
+                // materialization ceiling so a hostile archive cannot fill `%TEMP%`.
+                Some(limit.unwrap_or(backends::MAX_MATERIALIZE_BYTES)),
             )
         {
             let _ = std::fs::remove_dir_all(&tmp);
@@ -361,6 +392,7 @@ pub fn extract_cached(
     }
 
     if let Some(parent) = dest.parent() {
+        clear_blocking_ancestors(&temp, parent);
         std::fs::create_dir_all(parent).map_err(|e| ApiError::from_io(&parent.to_string_lossy(), &e))?;
     }
 
@@ -379,6 +411,11 @@ pub fn extract_cached(
     if let Err(err) = backends::extract_single(&archive_path.to_string_lossy(), &inner_norm, &tmp, None, limit) {
         let _ = std::fs::remove_file(&tmp);
         return Err(err);
+    }
+    // The cache may still hold a directory at this path from an older archive revision;
+    // renaming a file over it fails until the entry is removed.
+    if dest.is_dir() {
+        let _ = std::fs::remove_dir_all(&dest);
     }
     std::fs::rename(&tmp, &dest).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);

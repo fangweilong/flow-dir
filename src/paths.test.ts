@@ -160,7 +160,11 @@ describe('tree navigation helpers', () => {
     expect(underPath('C:\\work', 'C:\\Work')).toBe(true)
     expect(underPath('C:\\Workbench', 'C:\\Work')).toBe(false)
     expect(underPath('webdav://nas/a/b', 'webdav://nas/a')).toBe(true)
+    expect(underPath('webdav://nas/a/b', 'webdav://nas/a/')).toBe(true)
     expect(underPath('webdav://nas/ab', 'webdav://nas/a')).toBe(false)
+    // WebDAV servers may be case-sensitive; only local paths are folded.
+    expect(underPath('webdav://nas/Foo/x', 'webdav://nas/Foo')).toBe(true)
+    expect(underPath('webdav://nas/Foo/x', 'webdav://nas/foo')).toBe(false)
   })
 })
 

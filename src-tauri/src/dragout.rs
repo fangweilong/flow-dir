@@ -292,13 +292,23 @@ fn prime_drag_button() {
 /// state, and `DoDragDrop` pumps its own message loop until the drop finishes. COM alone
 /// is not enough — `OleInitialize` is what initializes OLE's drag/drop subsystem.
 pub fn drag_out(paths: &[String]) -> Result<String, ApiError> {
+    // Shell-namespace items carry a parsing name, not a filesystem path. Placing one in the
+    // OLE data object gives drop targets something they cannot resolve.
+    let paths: Vec<String> = paths
+        .iter()
+        .filter(|path| !crate::shellfs::is_shell_path(path))
+        .cloned()
+        .collect();
+    if paths.is_empty() {
+        return Err(ApiError::new(
+            "INVALID_PATH",
+            "shell namespace items cannot be dragged out as files",
+        ));
+    }
     unsafe {
         OleInitialize(None).map_err(|e| ApiError::new("COM", e.to_string()))?;
         prime_drag_button();
-        let data: IDataObject = DragData {
-            paths: paths.to_vec(),
-        }
-        .into();
+        let data: IDataObject = DragData { paths }.into();
         let source: IDropSource = DropSource.into();
         let mut effect = DROPEFFECT_NONE;
         let result = DoDragDrop(&data, &source, DROPEFFECT(ALLOWED), &mut effect);

@@ -332,16 +332,31 @@ fn walk_files(
     cancel: &std::sync::atomic::AtomicBool,
     out: &mut HashMap<String, (Meta, bool)>,
     scanned: &mut u32,
+    skipped: &mut u32,
 ) {
     let mut stack = vec![(root.to_path_buf(), String::new())];
     while let Some((dir, rel)) = stack.pop() {
         if cancel.load(Ordering::Relaxed) {
             return;
         }
-        let Ok(reader) = fs::read_dir(&dir) else { continue };
+        let reader = match fs::read_dir(&dir) {
+            Ok(reader) => reader,
+            Err(_) => {
+                // An unreadable subtree would otherwise look like "only on the other side";
+                // count it so the terminal event can mark the numbers as partial.
+                *skipped = skipped.saturating_add(1);
+                continue;
+            }
+        };
         for entry in reader.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            let Ok(meta) = entry.metadata() else { continue };
+            let meta = match entry.metadata() {
+                Ok(meta) => meta,
+                Err(_) => {
+                    *skipped = skipped.saturating_add(1);
+                    continue;
+                }
+            };
             let (hidden, link) = hidden_or_link(&meta);
             if (hidden && !options.include_hidden) || link || excluded(options, &name) {
                 continue;
@@ -377,10 +392,11 @@ fn count_pair(
     options: &Options,
     cancel: &std::sync::atomic::AtomicBool,
     scanned: &mut u32,
+    skipped: &mut u32,
 ) -> Counts {
     let mut left_files = HashMap::new();
     let mut right_files = HashMap::new();
-    walk_files(left, options, cancel, &mut left_files, scanned);
+    walk_files(left, options, cancel, &mut left_files, scanned, skipped);
     if cancel.load(Ordering::Relaxed) {
         return Counts {
             left_only: 0,
@@ -389,7 +405,7 @@ fn count_pair(
             same: 0,
         };
     }
-    walk_files(right, options, cancel, &mut right_files, scanned);
+    walk_files(right, options, cancel, &mut right_files, scanned, skipped);
     let mut counts = Counts {
         left_only: 0,
         right_only: 0,
@@ -470,6 +486,7 @@ pub fn start_counts(
             let mut keys: Vec<&String> = sides.0.keys().filter(|key| sides.1.contains_key(*key)).collect();
             keys.sort_unstable();
             let mut scanned = 0u32;
+            let mut skipped = 0u32;
             for key in keys {
                 let Some(l) = sides.0.get(key) else { continue };
                 let Some(r) = sides.1.get(key) else { continue };
@@ -497,6 +514,7 @@ pub fn start_counts(
                     &options,
                     &job.cancel,
                     &mut scanned,
+                    &mut skipped,
                 );
                 // A walk that stopped early reports zeros; publishing them would leave
                 // the folder showing 0/0/0/0 until a manual refresh.
@@ -536,7 +554,12 @@ pub fn start_counts(
                 scanned,
                 done: true,
                 aborted: job.stopped(),
-                error: None,
+                error: (skipped > 0).then(|| {
+                    ApiError::new(
+                        "SCAN_PARTIAL",
+                        format!("{skipped} folders or entries could not be read"),
+                    )
+                }),
             });
             state.finish(&job_id);
         });
@@ -802,12 +825,14 @@ mod tests {
         };
         let cancel = std::sync::atomic::AtomicBool::new(false);
         let mut scanned = 0;
+        let mut skipped = 0;
         let counts = count_pair(
             &left.join("shared"),
             &right.join("shared"),
             &options,
             &cancel,
             &mut scanned,
+            &mut skipped,
         );
         assert_eq!(counts.same, 1);
         assert_eq!(counts.left_only, 1);

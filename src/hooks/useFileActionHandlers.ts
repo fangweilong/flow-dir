@@ -196,7 +196,12 @@ export function useFileActionHandlers({
                 selected: new Set([name]),
                 anchor: name,
               }))
-              startRename(paneId, name)
+              // `startRename` resolves the pane's *current* tab; if the user navigated
+              // while the folder was being created, that is a different directory and the
+              // prompt would rename a same-named item there.
+              if (wsRef.current?.panes[paneId]?.activeTabId === tab.id) {
+                startRename(paneId, name)
+              }
             },
           })
         })
@@ -290,7 +295,15 @@ export function useFileActionHandlers({
       const list = listData[tab.id]
       const names = list ? Array.from(list.selected) : []
       if (!names.length) return
-      const paths = names.map((name) => joinPath(tab.path, name))
+      // Shell-namespace rows carry their own parsing name in `href`; joining the folder
+      // path produced a path neither the shell nor the backend can resolve.
+      const byName = list?.entries
+        ? new Map(list.entries.map((entry) => [entry.name, entry]))
+        : null
+      const paths = names.map((name) => {
+        const entry = byName?.get(name)
+        return entry ? entryPath(tab.path, entry) : joinPath(tab.path, name)
+      })
       clipboardCopy(paths, cut)
         .then(() => showToast(cut ? t('toast.cut', { count: paths.length }) : t('toast.copied', { count: paths.length })))
         .catch(() => showToast(t('toast.copyFailed')))

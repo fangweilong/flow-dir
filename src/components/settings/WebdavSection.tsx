@@ -184,7 +184,7 @@ export function WebdavSection({ settings, onChange, t, visible }: WebdavSectionP
                   {conn.root ? `/${conn.root}` : ''}
                 </div>
                 {isPlainHttp(conn.url) && (
-                  <div className="truncate text-[0.625rem] text-warning-soft">
+                  <div className="truncate text-[0.625rem] text-warning-strong dark:text-warning-soft">
                     {t('settings.webdavPlainHttpShort')}
                   </div>
                 )}
@@ -233,7 +233,7 @@ export function WebdavSection({ settings, onChange, t, visible }: WebdavSectionP
               />
             </Field>
             {isPlainHttp(draft.url) && (
-              <div className="text-[0.625rem] text-warning-soft">
+              <div className="text-[0.625rem] text-warning-strong dark:text-warning-soft">
                 {t('settings.webdavPlainHttp')}
               </div>
             )}

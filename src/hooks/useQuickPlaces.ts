@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import type { Place, Lang } from '../types'
 import type { Settings } from '../persist'
@@ -26,6 +26,9 @@ export function useQuickPlaces({
   lang,
 }: UseQuickPlacesOptions) {
   const [sidebarWidth, setSidebarWidth] = useState(settings.sidebarWidth)
+  /** Live settings for pointerup merges; the drag closure otherwise holds a snapshot. */
+  const settingsRef = useRef(settings)
+  settingsRef.current = settings
 
   const toggleSidebar = useCallback(() => {
     updateSettings({ ...settings, sidebarOpen: !settings.sidebarOpen })
@@ -55,9 +58,10 @@ export function useQuickPlaces({
         window.removeEventListener('pointerup', up)
         window.removeEventListener('pointercancel', up)
         updateSettings({
-          ...settings,
+          ...settingsRef.current,
           sidebarOpen: open,
-          sidebarWidth: finalWidth >= sidebarMin ? finalWidth : settings.sidebarWidth,
+          sidebarWidth:
+            finalWidth >= sidebarMin ? finalWidth : settingsRef.current.sidebarWidth,
         })
       }
       window.addEventListener('pointermove', move)

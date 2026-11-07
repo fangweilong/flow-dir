@@ -673,8 +673,8 @@ impl Settings {
         self.color_rules.truncate(200);
         for rule in &mut self.color_rules {
             rule.pattern = rule.pattern.trim().to_string();
-            if rule.pattern.len() > 120 {
-                rule.pattern.truncate(120);
+            if rule.pattern.chars().count() > 120 {
+                rule.pattern = rule.pattern.chars().take(120).collect();
             }
             rule.foreground = sanitize_color(&rule.foreground);
             rule.background = sanitize_color(&rule.background);
@@ -1512,6 +1512,21 @@ fn set_value(doc: &mut DocumentMut, key: &str, value: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn color_rule_patterns_are_truncated_on_a_char_boundary() {
+        // 120 ASCII bytes followed by a multi-byte character used to make `String::truncate`
+        // panic on a save or on startup.
+        let mut settings = Settings::default();
+        settings.color_rules.push(ColorRule {
+            pattern: format!("{}汉", "a".repeat(120)),
+            foreground: String::new(),
+            background: String::new(),
+            folders: false,
+        });
+        let normalized = settings.normalize();
+        assert_eq!(normalized.color_rules[0].pattern.chars().count(), 120);
+    }
 
     #[test]
     fn invalid_font_values_fall_back() {

@@ -48,12 +48,23 @@ pub fn copy_paths(paths: &[String], cut: bool) -> Result<(), ApiError> {
     }
     let local: Vec<String> = paths
         .iter()
-        .filter(|path| !crate::webdav::is_webdav(path))
+        .filter(|path| !crate::webdav::is_webdav(path) && !crate::shellfs::is_shell_path(path))
         .cloned()
         .collect();
-    let has_remote = local.len() != paths.len();
+    let has_remote = paths.iter().any(|path| crate::webdav::is_webdav(path));
+    if local.is_empty() && !has_remote {
+        // Shell-namespace items have no filesystem path, so `CF_HDROP` cannot represent
+        // them. Writing the parse name produced a clipboard no paste target could resolve.
+        return Err(ApiError::new(
+            "INVALID_PATH",
+            "shell namespace items cannot be copied as files",
+        ));
+    }
 
-    write_os_paths(&local, cut)?;
+    // Read the sequence while the clipboard is still ours; reading it after
+    // `CloseClipboard` lets a clipboard manager change it first and makes the stored
+    // internal selection look current when it is not.
+    let sequence = write_os_paths(&local, cut)?;
     let mut internal = INTERNAL.lock().unwrap();
     if has_remote {
         *internal = Some(InternalClip {
@@ -61,7 +72,7 @@ pub fn copy_paths(paths: &[String], cut: bool) -> Result<(), ApiError> {
                 paths: paths.to_vec(),
                 cut,
             },
-            sequence: unsafe { GetClipboardSequenceNumber() },
+            sequence,
         });
     } else {
         *internal = None;
@@ -71,7 +82,7 @@ pub fn copy_paths(paths: &[String], cut: bool) -> Result<(), ApiError> {
 
 /// Writes the shell-compatible subset. An empty list still empties the clipboard, so a
 /// remote-only copy cannot leave an unrelated file list behind for a later paste.
-fn write_os_paths(paths: &[String], cut: bool) -> Result<(), ApiError> {
+fn write_os_paths(paths: &[String], cut: bool) -> Result<u32, ApiError> {
     let mut wide: Vec<u16> = Vec::new();
     for path in paths {
         wide.extend(path.encode_utf16());
@@ -140,8 +151,13 @@ fn write_os_paths(paths: &[String], cut: bool) -> Result<(), ApiError> {
             }
             Ok(())
         })();
+        // Capture the sequence before closing: it must describe the data this process just
+        // wrote, not whatever another clipboard client may write immediately afterwards.
+        let sequence = GetClipboardSequenceNumber();
         let _ = CloseClipboard();
-        result.map_err(|e| ApiError::new("CLIPBOARD", e.to_string()))
+        result
+            .map(|()| sequence)
+            .map_err(|e| ApiError::new("CLIPBOARD", e.to_string()))
     }
 }
 

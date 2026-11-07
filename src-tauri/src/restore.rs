@@ -135,7 +135,7 @@ unsafe fn restore_items(paths: &[String]) -> Result<RestoreReport, ApiError> {
             };
             newest[index] = newest[index].max(deleted_stamp(&folder, item).unwrap_or(0));
             true
-        });
+        })?;
 
         let mut handled = vec![false; wanted.len()];
         for_each_recycled(&folder, |item| {
@@ -162,7 +162,7 @@ unsafe fn restore_items(paths: &[String]) -> Result<RestoreReport, ApiError> {
                 }
             }
             true
-        });
+        })?;
 
         for (index, path) in paths.iter().enumerate() {
             if !handled[index] {
@@ -184,26 +184,38 @@ unsafe fn deleted_stamp(folder: &IShellFolder, item: *const ITEMIDLIST) -> Optio
 }
 
 /// Visits every item in the bin; the callback returns false to stop early.
+///
+/// Enumeration failures are reported instead of treated as an empty bin: the caller uses
+/// "not visited" to mean "no longer in the recycle bin", which would silently drop the
+/// undo entry for an item that is still restorable.
 unsafe fn for_each_recycled(
     folder: &IShellFolder,
     mut visit: impl FnMut(*const ITEMIDLIST) -> bool,
-) {
+) -> Result<(), ApiError> {
     unsafe {
         let mut iter: Option<IEnumIDList> = None;
-        let _ = folder
+        folder
             .EnumObjects(
                 HWND::default(),
                 (SHCONTF_FOLDERS.0 | SHCONTF_NONFOLDERS.0) as u32,
                 &mut iter,
             )
-            .ok();
+            .ok()
+            .map_err(|e| ApiError::new("SHELL_ENUM", e.to_string()))?;
         let Some(iter) = iter else {
-            return;
+            return Err(ApiError::new("SHELL_ENUM", "no enumerator"));
         };
         loop {
             let mut ids: [*mut ITEMIDLIST; 1] = [std::ptr::null_mut()];
             let mut fetched = 0u32;
-            if iter.Next(&mut ids, Some(&mut fetched)).is_err() || fetched == 0 {
+            if let Err(err) = iter.Next(&mut ids, Some(&mut fetched)).ok() {
+                // A provider can fail after handing back an item; free it before reporting.
+                if fetched > 0 && !ids[0].is_null() {
+                    CoTaskMemFree(Some(ids[0] as *const c_void));
+                }
+                return Err(ApiError::new("SHELL_ENUM", err.to_string()));
+            }
+            if fetched == 0 {
                 break;
             }
             let item = ids[0];
@@ -216,6 +228,7 @@ unsafe fn for_each_recycled(
                 break;
             }
         }
+        Ok(())
     }
 }
 
@@ -259,13 +272,18 @@ unsafe fn recycle_folder() -> Result<IShellFolder, ApiError> {
         // CSIDL form always yields the desktop-relative item that owns the bin folder.
         let pidl = SHGetFolderLocation(None, CSIDL_BITBUCKET as i32, None, 0)
             .map_err(|e| ApiError::new("SHELL_PATH", e.to_string()))?;
-        let mut child: *mut ITEMIDLIST = std::ptr::null_mut();
-        let desktop: IShellFolder = SHBindToParent(pidl, Some(&mut child))
-            .map_err(|e| ApiError::new("SHELL_BIND", e.to_string()))?;
-        let folder: Result<IShellFolder, _> = desktop.BindToObject(child, None::<&IBindCtx>);
-        // `child` points into `pidl`; only the full pidl is ours to free.
+        // `child` points into `pidl`; only the full pidl is ours to free, including when
+        // binding fails.
+        let bound = (|| -> Result<IShellFolder, ApiError> {
+            let mut child: *mut ITEMIDLIST = std::ptr::null_mut();
+            let desktop: IShellFolder = SHBindToParent(pidl, Some(&mut child))
+                .map_err(|e| ApiError::new("SHELL_BIND", e.to_string()))?;
+            desktop
+                .BindToObject(child, None::<&IBindCtx>)
+                .map_err(|e| ApiError::new("SHELL_FOLDER", e.to_string()))
+        })();
         ILFree(Some(pidl));
-        folder.map_err(|e| ApiError::new("SHELL_FOLDER", e.to_string()))
+        bound
     }
 }
 

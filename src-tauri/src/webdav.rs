@@ -30,7 +30,7 @@ use windows::Win32::Networking::WinHttp::{
     WINHTTP_AUTH_SCHEME_NEGOTIATE, WINHTTP_AUTH_SCHEME_NTLM, WINHTTP_AUTH_TARGET_SERVER,
     WINHTTP_CREDS_AUTHSCHEME,
     WINHTTP_OPEN_REQUEST_FLAGS, WINHTTP_OPTION_REDIRECT_POLICY,
-    WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS, WINHTTP_OPTION_SECURITY_FLAGS,
+    WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP, WINHTTP_OPTION_SECURITY_FLAGS,
     WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE, WINHTTP_QUERY_WWW_AUTHENTICATE,
 };
 
@@ -199,7 +199,12 @@ pub fn unique_paths(settings: &Settings, paths: &[String], sources: &[String]) -
     // Folder listings are fetched once per destination instead of once per candidate.
     let mut listings: std::collections::HashMap<String, std::collections::HashSet<String>> =
         std::collections::HashMap::new();
-    let mut claimed = std::collections::HashSet::new();
+    // Both sets are per destination: a name claimed in `A` does not block `B`, and a name
+    // vacated by an earlier batch row is free even though the server still lists it.
+    let mut claimed: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+    let mut released: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
 
     for (index, path) in paths.iter().enumerate() {
         if !is_webdav(path) {
@@ -221,16 +226,28 @@ pub fn unique_paths(settings: &Settings, paths: &[String], sources: &[String]) -
             }
             listings.insert(dir.clone(), names);
         }
-        let taken = listings.get_mut(&dir).expect("listing inserted above");
+        let taken = listings.get(&dir).expect("listing inserted above");
+        let claimed = claimed.entry(dir.clone()).or_default();
+        let released = released.entry(dir.clone()).or_default();
         let name = base_name(path).to_string();
         let source = sources.get(index).map(String::as_str);
+        // A row whose source sits in the same directory releases its old name, so a chain
+        // (`b`→`c`, then `a`→`b`) does not grow a spurious ` (1)` suffix.
+        if let Some(source) = source {
+            if virtual_parent(source) == dir {
+                released.insert(base_name(source).to_lowercase());
+            }
+        }
         let mut candidate = name.clone();
         let mut n = 0u32;
         loop {
             let key = candidate.to_lowercase();
-            let same_source = source.is_some_and(|s| base_name(s).eq_ignore_ascii_case(&candidate));
-            if same_source || (!taken.contains(&key) && !claimed.contains(&key)) {
-                taken.insert(key.clone());
+            let same_source = source.is_some_and(|s| {
+                virtual_parent(s) == dir
+                    && base_name(s).eq_ignore_ascii_case(candidate.as_str())
+            });
+            let free = !claimed.contains(&key) && (released.contains(&key) || !taken.contains(&key));
+            if same_source || free {
                 claimed.insert(key);
                 break;
             }
@@ -301,7 +318,14 @@ pub fn ensure_local(
         TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
     let cancel = AtomicBool::new(false);
-    client.get_to_file(&dav.path, &temp, &cancel)?;
+    if let Err(err) = client.get_to_file(&dav.path, &temp, &cancel, max_bytes) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(if err.code == "TOO_LARGE" {
+            ApiError::new("FILE_TOO_LARGE", path.to_string())
+        } else {
+            err
+        });
+    }
     // A failed download must not leave a partial file that a later preview mistakes for
     // a complete one; only a successful transfer reaches the rename.
     if target.exists() {
@@ -379,18 +403,19 @@ fn encode_segment(segment: &str) -> String {
 /// and a password must never reach a log or an IPC response.
 fn redact_userinfo(url: &str) -> String {
     let Some(scheme_end) = url.find("://") else {
-        return url.to_string();
+        // Without a scheme the whole string may be `user:password@host`, so echoing it
+        // would leak the credential the redaction exists to hide.
+        return "<invalid url>".to_string();
     };
     let rest = &url[scheme_end + 3..];
-    let Some(at) = rest.find('@') else {
+    let authority_end = rest
+        .find(['/', '?', '#'])
+        .unwrap_or(rest.len());
+    // Passwords may contain `@`; the last one in the authority separates the userinfo.
+    let Some(at) = rest[..authority_end].rfind('@') else {
         return url.to_string();
     };
-    let authority_end = rest.find('/').unwrap_or(rest.len());
-    if at < authority_end {
-        format!("{}://{}", &url[..scheme_end], &rest[at + 1..])
-    } else {
-        url.to_string()
-    }
+    format!("{}://{}", &url[..scheme_end], &rest[at + 1..])
 }
 
 #[derive(Clone)]
@@ -738,8 +763,10 @@ impl DavClient {
             }
         }
         // The default policy only follows redirects for GET/HEAD; PROPFIND and PUT are
-        // commonly redirected to the canonical `https://` or trailing-slash URL.
-        let policy: u32 = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
+        // commonly redirected to the canonical `https://` or trailing-slash URL. HTTPS to
+        // HTTP is still refused: Basic credentials and upload bodies must not fall back to
+        // cleartext just because a server returned a redirect.
+        let policy: u32 = WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;
         let policy_bytes: [u8; 4] = policy.to_le_bytes();
         unsafe {
             let _ = WinHttpSetOption(
@@ -887,6 +914,7 @@ impl DavClient {
         rel: &str,
         target: &Path,
         cancel: &AtomicBool,
+        max_bytes: Option<u64>,
     ) -> Result<u64, ApiError> {
         let response = self.request("GET", rel, "", None)?;
         if !(200..300).contains(&response.status) {
@@ -895,7 +923,10 @@ impl DavClient {
         let file = std::fs::File::create(target)
             .map_err(|e| ApiError::from_io(&target.to_string_lossy(), &e))?;
         let mut writer = std::io::BufWriter::new(file);
-        let written = response.copy_to(&mut writer, cancel)?;
+        // The cap is enforced on the body, not on PROPFIND's declared size: a server may
+        // omit or under-report `getcontentlength` and still stream gigabytes.
+        let cap = max_bytes.map(|limit| limit.min(usize::MAX as u64) as usize);
+        let written = response.copy_into(&mut writer, cancel, cap)?;
         writer
             .flush()
             .map_err(|e| ApiError::from_io(&target.to_string_lossy(), &e))?;
@@ -1072,10 +1103,6 @@ impl Response {
         let mut out = Vec::new();
         self.copy_into(&mut out, cancel, Some(cap))?;
         Ok(out)
-    }
-
-    fn copy_to<W: Write>(&self, writer: &mut W, cancel: &AtomicBool) -> Result<u64, ApiError> {
-        self.copy_into(writer, cancel, None)
     }
 
     fn copy_into<W: Write>(

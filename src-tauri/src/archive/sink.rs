@@ -414,6 +414,13 @@ impl Sink {
         }
         if let Err(err) = result {
             let _ = fs::remove_file(path);
+            // A member with a bad checksum is reported per item and the rest of the archive
+            // still lands. Password/volume errors stay fatal: continuing without them
+            // would produce an incomplete tree with no indication of what is missing.
+            if err.code == "CORRUPT" {
+                self.skip_current(&err);
+                return Ok(());
+            }
             return Err(err);
         }
         if declared > 0 && outcome.written != declared {

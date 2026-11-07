@@ -13,8 +13,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 use windows::core::PCWSTR;
-use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLongPathNameW};
-use windows::Win32::System::WindowsProgramming::{DRIVE_FIXED, DRIVE_RAMDISK, DRIVE_REMOVABLE};
+use windows::Win32::Storage::FileSystem::GetLongPathNameW;
 
 use crate::error::ApiError;
 use crate::fs::expand_path;
@@ -179,27 +178,14 @@ pub fn key(raw: &str) -> Option<String> {
     Some(out.to_ascii_lowercase())
 }
 
-/// `GetLongPathNameW` touches the filesystem, so it is only probed for local media. The
-/// caller is a synchronous command on the UI thread; a dead UNC share or mapped network
-/// drive would block it for the SMB timeout.
-fn probe_is_local(path: &str) -> bool {
-    if path.starts_with(r"\\") {
-        return false;
-    }
-    let bytes = path.as_bytes();
-    if bytes.len() < 2 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' {
-        return false;
-    }
-    let root = [bytes[0] as u16, b':' as u16, b'\\' as u16, 0];
-    let kind = unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) };
-    matches!(kind, DRIVE_FIXED | DRIVE_REMOVABLE | DRIVE_RAMDISK)
-}
-
-/// `GetLongPathNameW` for paths that may contain an 8.3 component. The probe is skipped
-/// unless the path contains `~`, because it touches the filesystem and a dead network
-/// share or unresponsive device must not stall ordinary validation.
+/// `GetLongPathNameW` for paths that may contain an 8.3 component.
+///
+/// This runs for network paths too: `PROGRA~1` on a UNC share or mapped drive names the
+/// same protected folder, and skipping the expansion let a short spelling bypass the rule.
+/// The probe is still skipped unless the path contains `~`, so ordinary validation never
+/// touches the network.
 fn resolve_short_name(path: &str) -> Option<String> {
-    if !path.contains('~') || !probe_is_local(path) {
+    if !path.contains('~') {
         return None;
     }
     let wide: Vec<u16> = path.encode_utf16().chain([0]).collect();

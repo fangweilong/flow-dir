@@ -12,6 +12,7 @@ use std::fs;
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -226,13 +227,13 @@ pub fn check<R: Runtime>(app: &AppHandle<R>, force: bool) -> UpdateStatus {
     match fetch_manifest(&slug) {
         Ok(manifest) => {
             let now = now_secs();
-            // Mutate the cached state instead of replacing it: the release history lives
-            // in the same file and must survive an update check.
-            let mut state = cached;
-            state.last_check = now;
-            state.latest = Some(manifest.version.clone());
-            state.notes = manifest.notes.clone();
-            write_state(app, &state);
+            // Re-read under the lock: the history command writes the same file from another
+            // blocking task, and replacing the whole snapshot here would drop its update.
+            mutate_state(app, |state| {
+                state.last_check = now;
+                state.latest = Some(manifest.version.clone());
+                state.notes = manifest.notes.clone();
+            });
             status.last_check = Some(now);
             status.latest = Some(manifest.version.clone());
             status.notes = manifest.notes;
@@ -259,10 +260,11 @@ pub fn history<R: Runtime>(app: &AppHandle<R>, force: bool) -> Result<Vec<Releas
     }
     match fetch_history(&slug) {
         Ok(list) => {
-            let mut next = state;
-            next.history = list.clone();
-            next.history_at = now_secs();
-            write_state(app, &next);
+            let refreshed = list.clone();
+            mutate_state(app, |next| {
+                next.history = refreshed;
+                next.history_at = now_secs();
+            });
             Ok(list)
         }
         Err(err) if !state.history.is_empty() => {
@@ -478,6 +480,18 @@ fn read_state<R: Runtime>(app: &AppHandle<R>) -> State {
         .and_then(|dir| fs::read(dir.join(STATE_FILE)).ok())
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default()
+}
+
+/// Serialises read-modify-write cycles on `update.json`. `check` and `history` are separate
+/// blocking commands, so an unlocked whole-file write from one would silently revert the
+/// other's fields.
+static STATE_LOCK: Mutex<()> = Mutex::new(());
+
+fn mutate_state<R: Runtime>(app: &AppHandle<R>, mutate: impl FnOnce(&mut State)) {
+    let _guard = STATE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut state = read_state(app);
+    mutate(&mut state);
+    write_state(app, &state);
 }
 
 fn write_state<R: Runtime>(app: &AppHandle<R>, state: &State) {

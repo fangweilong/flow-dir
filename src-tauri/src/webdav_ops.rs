@@ -584,8 +584,10 @@ fn ensure_merge_clear(
         };
         if entry.is_dir() && existing.is_dir {
             ensure_merge_clear(client, &child_src, &child_dest, overwrite, cancel)?;
-        } else if !(entry.is_dir() && !existing.is_dir && overwrite) {
-            // Only "folder replacing a file with overwrite" is allowed to proceed.
+        } else if !(overwrite && !existing.is_dir) {
+            // With overwrite, a file may replace a file and a folder may replace a file;
+            // replacing a folder with one file stays a conflict, mirroring
+            // `transfer_same_connection`.
             return Err(ApiError::new("EXISTS", client.url_for(&child_dest)));
         }
     }
@@ -767,7 +769,7 @@ fn copy_between_recursive(
     // makes a round trip through the temp directory rather than through memory.
     let temp = temp_path();
     let result = src
-        .get_to_file(src_rel, &temp, cancel)
+        .get_to_file(src_rel, &temp, cancel, None)
         .and_then(|_| dst.upload_file(dst_rel, &temp, cancel));
     let _ = std::fs::remove_file(&temp);
     result?;
@@ -798,14 +800,22 @@ fn upload_tree(
     if meta.is_dir() {
         ensure_remote_dir(client, rel)?;
         let mut bytes = 0u64;
-        let mut entries: Vec<_> = std::fs::read_dir(local)
+        // An unreadable child must abort the upload: silently skipping it while a Move
+        // deletes the source afterwards loses the file.
+        let mut entries = std::fs::read_dir(local)
             .map_err(|e| ApiError::from_io(&local.to_string_lossy(), &e))?
-            .filter_map(Result::ok)
-            .collect();
+            .collect::<Result<Vec<_>, std::io::Error>>()
+            .map_err(|e| ApiError::from_io(&local.to_string_lossy(), &e))?;
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
             check_cancel(cancel)?;
-            let name = entry.file_name().to_string_lossy().into_owned();
+            // A lossy name would upload under U+FFFD and then let the Move delete the
+            // original; refuse the transfer instead.
+            let name = entry
+                .file_name()
+                .to_str()
+                .map(str::to_string)
+                .ok_or_else(|| ApiError::new("INVALID_NAME", entry.file_name().to_string_lossy()))?;
             let child = entry.path();
             bytes += upload_tree(
                 client,
@@ -889,7 +899,7 @@ fn download_tree(
         // Stream into a sibling first: a canceled or dropped transfer must never truncate
         // an existing local file. The rename only happens after the body is complete.
         let temp = sibling_temp(local);
-        let result = client.get_to_file(rel, &temp, cancel);
+        let result = client.get_to_file(rel, &temp, cancel, None);
         match result {
             Ok(written) => {
                 if let Err(err) = replace_file(&temp, local) {

@@ -24,7 +24,7 @@ const PREVIEW_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_MATERIALIZE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Entries bound for the same browse path (a tree with millions of tiny files is just a
 /// different way to exhaust the cache).
-const MAX_MATERIALIZE_ENTRIES: usize = 200_000;
+pub const MAX_MATERIALIZE_ENTRIES: usize = 200_000;
 
 /// Refusal marker carried inside the `io::Error` a [`Capped`] writer returns.
 #[derive(Debug)]
@@ -430,14 +430,17 @@ fn rar_error(err: unrar_rs::RarError, had_password: bool) -> ApiError {
             ApiError::new("WRONG_PASSWORD", "wrong password")
         }
         // Decrypting with the wrong key yields garbage that fails the member's own
-        // checksum; without a password the same failure means real corruption.
+        // checksum; without a password the same failure means real corruption. The latter
+        // is per member, so the sink can skip it and keep the rest of the archive.
         RarError::DataCrcMismatch { .. }
         | RarError::PackedDataCrcMismatch { .. }
         | RarError::Blake2Mismatch { .. }
-        | RarError::PackedDataBlake2Mismatch { .. }
-            if had_password =>
-        {
-            ApiError::new("WRONG_PASSWORD", "wrong password")
+        | RarError::PackedDataBlake2Mismatch { .. } => {
+            if had_password {
+                ApiError::new("WRONG_PASSWORD", "wrong password")
+            } else {
+                ApiError::new("CORRUPT", "member checksum mismatch")
+            }
         }
         other => ApiError::new("ARCHIVE", other.to_string()),
     }
@@ -499,8 +502,10 @@ fn extract_iso_dir(
         } else if let Take::File(target) = sink.accept(&rel, false, false)? {
             let size = child.size;
             sink.write_with(&target, size, |writer| {
+                // A damaged member is reported and skipped; an unreadable image fails every
+                // member and leaves the sink's failure list to say so.
                 isomage::cat_node(file, child, writer)
-                    .map_err(|err| ApiError::new("ARCHIVE", err.to_string()))
+                    .map_err(|err| ApiError::new("CORRUPT", err.to_string()))
             })?;
         }
     }
@@ -686,6 +691,24 @@ pub fn list_with_truncated(
     path: &str,
     limit: usize,
 ) -> Result<(Vec<ArchiveEntry>, bool), ApiError> {
+    list_with_truncated_impl(path, limit, true)
+}
+
+/// Same listing without the preview decompression budget. Extraction must not reuse the
+/// preview cap: stopping a tar walk at 64 MiB would silently omit every later member while
+/// the caller still reports a complete directory.
+pub fn list_unbounded_with_truncated(
+    path: &str,
+    limit: usize,
+) -> Result<(Vec<ArchiveEntry>, bool), ApiError> {
+    list_with_truncated_impl(path, limit, false)
+}
+
+fn list_with_truncated_impl(
+    path: &str,
+    limit: usize,
+    preview: bool,
+) -> Result<(Vec<ArchiveEntry>, bool), ApiError> {
     let format = format::detect(path).ok_or_else(|| ApiError::new("UNSUPPORTED_FORMAT", path))?;
     if format == Format::Zip {
         let file = File::open(path).map_err(|e| ApiError::from_io(path, &e))?;
@@ -798,9 +821,14 @@ pub fn list_with_truncated(
     }
     if format.is_tar() {
         let mut entries = Vec::new();
-        // Listing a compressed tar means decompressing it; stop after a bounded amount so
-        // previewing a multi-gigabyte archive cannot stall the panel.
-        let mut archive = tar::Archive::new(reader(path, format)?.take(PREVIEW_BYTES));
+        // Listing a compressed tar means decompressing it; previews stop after a bounded
+        // amount, but extraction walks the whole stream.
+        let stream: Box<dyn std::io::Read> = if preview {
+            Box::new(reader(path, format)?.take(PREVIEW_BYTES))
+        } else {
+            Box::new(reader(path, format)?)
+        };
+        let mut archive = tar::Archive::new(stream);
         let Ok(mut items) = archive.entries() else {
             return Ok((entries, false));
         };
@@ -898,7 +926,16 @@ pub fn extract_dir(
     let mut written = Vec::new();
     let mut total = 0u64;
     let mut entries = 0usize;
-    for entry in list(archive, 500_000)? {
+    // Extraction uses the unbounded listing: a truncated preview listing would drop every
+    // member past the cap and still look successful.
+    let (listed, truncated) = list_unbounded_with_truncated(archive, 500_000)?;
+    if truncated {
+        return Err(ApiError::new(
+            "TOO_MANY_ENTRIES",
+            format!("more than {MAX_MATERIALIZE_ENTRIES} entries"),
+        ));
+    }
+    for entry in listed {
         let norm = entry.name.replace('/', "\\");
         let norm = norm.trim_matches('\\');
         let Some(rel) = crate::pathkey::strip_prefix_dir(norm, inner) else {
@@ -1041,10 +1078,10 @@ fn extract_zip_dir(
         total = total.saturating_add(copied);
         written.push(target.to_string_lossy().into_owned());
     }
-    if written.is_empty() {
-        if let Some(err) = first_error {
-            return Err(err);
-        }
+    // Any member that could not be opened makes the tree incomplete. Report it even when
+    // other members landed, so a caller never caches a partial folder as complete.
+    if let Some(err) = first_error {
+        return Err(err);
     }
     Ok(written)
 }

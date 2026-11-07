@@ -236,11 +236,15 @@ export const isFsPath = (path: string) => /^[a-zA-Z]:/.test(path) || path.starts
 
 /** True when `path` is `root` or sits inside it; `C:\x` does not match `C:\xy`. */
 export function underPath(path: string, root: string): boolean {
+  if (isWebdavPath(path) || isWebdavPath(root)) {
+    // WebDAV servers may be case-sensitive, so this branch keeps the original spelling
+    // (matching `pathKey`) and only drops trailing separators.
+    const p = path.replace(/\/+$/, '')
+    const r = root.replace(/\/+$/, '')
+    return p === r || p.startsWith(`${r}/`)
+  }
   const p = path.toLowerCase()
   const r = root.toLowerCase()
-  if (isWebdavPath(path) || isWebdavPath(root)) {
-    return p === r || p.startsWith(r.endsWith('/') ? r : `${r}/`)
-  }
   return p === r || p.startsWith(r.endsWith('\\') ? r : `${r}\\`)
 }
 

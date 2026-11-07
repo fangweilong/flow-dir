@@ -370,6 +370,7 @@ pub fn run(
         .map(|(_, root)| root)
         .collect();
 
+    let mut scan_error: Option<ApiError> = None;
     'outer: for root in effective_roots.iter().copied() {
         let root_path = PathBuf::from(root);
         // jwalk's own `skip_hidden` only understands dot-prefixed names; Windows hides files
@@ -410,8 +411,16 @@ pub fn run(
             if cancel.load(Ordering::Relaxed) {
                 return;
             }
-            let Ok(entry) = entry else {
-                continue;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    // Report the first traversal failure instead of returning a partial
+                    // result that looks complete.
+                    if scan_error.is_none() {
+                        scan_error = Some(ApiError::new("SCAN_PARTIAL", err.to_string()));
+                    }
+                    continue;
+                }
             };
             let item_path = entry.path().to_string_lossy().into_owned();
         // Folders are search hits too: Everything returns them, so the built-in provider
@@ -495,12 +504,24 @@ pub fn run(
             }
         }
     }
+    if scan_error.is_some() && !batch.is_empty() {
+        // Deliver the last matches before the error terminal: the frontend stops applying
+        // items from a batch that carries an error.
+        let items = std::mem::take(&mut batch);
+        let _ = on_batch.send(SearchBatch {
+            gen,
+            provider: "jwalk".into(),
+            items,
+            done: false,
+            error: None,
+        });
+    }
     let _ = on_batch.send(SearchBatch {
         gen,
         provider: "jwalk".into(),
         items: batch,
         done: true,
-        error: None,
+        error: scan_error,
     });
 }
 

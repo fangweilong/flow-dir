@@ -198,15 +198,23 @@ export function FileToolsPanel({
   }
 
   const cancel = () => {
-    void toolCancel(jobId.current)
+    void toolCancel(jobId.current).catch(() => {
+      // The job may already have finished; keep the UI consistent with the backend.
+      setRunning(false)
+      onToast(t('tools.failed'))
+    })
     setPaused(false)
     setRunning(false)
   }
 
   const togglePause = () => {
     const next = !paused
+    const previous = paused
     setPaused(next)
-    void toolPause(jobId.current, next)
+    void toolPause(jobId.current, next).catch(() => {
+      setPaused(previous)
+      onToast(t('tools.failed'))
+    })
   }
 
   const copyHashResults = async () => {
@@ -215,8 +223,12 @@ export function FileToolsPanel({
     const text = results
       .map((row) => (row.error ? `${t('tools.failed')}  ${row.path}` : `${row.hash}  ${row.path}`))
       .join('\r\n')
-    await navigator.clipboard.writeText(text)
-    onToast(t('tools.copyDone'))
+    try {
+      await navigator.clipboard.writeText(text)
+      onToast(t('tools.copyDone'))
+    } catch {
+      onToast(t('toast.copyFailed'))
+    }
   }
 
   const exportCsv = async () => {

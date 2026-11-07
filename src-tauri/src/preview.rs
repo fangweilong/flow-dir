@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path as FsPath;
 use std::sync::Mutex;
 
@@ -130,7 +131,10 @@ pub struct PreviewCache {
 
 #[derive(Default)]
 struct CacheInner {
-    entries: HashMap<String, (Vec<u8>, u64)>,
+    /// Payload plus the content type it was generated as. Recomputing the type from the
+    /// extension on a cache hit duplicated the mapping and could drift after a new
+    /// extension was added to only one of the two branches.
+    entries: HashMap<String, (Vec<u8>, Option<String>, u64)>,
     total: usize,
     tick: u64,
 }
@@ -138,40 +142,42 @@ struct CacheInner {
 /// Per-entry cost used for eviction. Payload length alone charged cached failures (empty
 /// bytes) nothing, so a dead share could pin one immortal entry per path per icon revision.
 fn entry_cost(key: &str, data: &[u8]) -> usize {
-    data.len() + key.len() + std::mem::size_of::<(String, (Vec<u8>, u64))>()
+    data.len() + key.len() + std::mem::size_of::<(String, (Vec<u8>, Option<String>, u64))>()
 }
 
 const MAX_CACHE_ENTRIES: usize = 512;
 
 impl PreviewCache {
-    pub fn get(&self, key: &str) -> Option<Vec<u8>> {
+    pub fn get(&self, key: &str) -> Option<(Vec<u8>, Option<String>)> {
         let mut inner = self.inner.lock().unwrap();
         inner.tick += 1;
         let tick = inner.tick;
         let entry = inner.entries.get_mut(key)?;
-        entry.1 = tick;
-        Some(entry.0.clone())
+        entry.2 = tick;
+        Some((entry.0.clone(), entry.1.clone()))
     }
 
-    pub fn put(&self, key: String, data: Vec<u8>) {
+    pub fn put(&self, key: String, data: Vec<u8>, content_type: Option<&str>) {
         let mut inner = self.inner.lock().unwrap();
         inner.tick += 1;
         let tick = inner.tick;
-        if let Some((old, _)) = inner.entries.remove(&key) {
+        if let Some((old, _, _)) = inner.entries.remove(&key) {
             inner.total = inner.total.saturating_sub(entry_cost(&key, &old));
         }
         inner.total += entry_cost(&key, &data);
-        inner.entries.insert(key, (data, tick));
+        inner
+            .entries
+            .insert(key, (data, content_type.map(str::to_string), tick));
         while (inner.total > MAX_CACHE_BYTES || inner.entries.len() > MAX_CACHE_ENTRIES)
             && !inner.entries.is_empty()
         {
             let oldest = inner
                 .entries
                 .iter()
-                .min_by_key(|(_, (_, used))| *used)
+                .min_by_key(|(_, (_, _, used))| *used)
                 .map(|(k, _)| k.clone());
             if let Some(key) = oldest {
-                if let Some((old, _)) = inner.entries.remove(&key) {
+                if let Some((old, _, _)) = inner.entries.remove(&key) {
                     inner.total = inner.total.saturating_sub(entry_cost(&key, &old));
                 }
             } else {
@@ -319,7 +325,11 @@ impl Drop for ComMtaGuard {
 }
 
 /// HTTP response for `http://fd.localhost/preview?...`.
-pub fn handle_request<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) -> Response<Vec<u8>> {
+pub fn handle_request<R: Runtime>(
+    app: &AppHandle<R>,
+    uri: &tauri::http::Uri,
+    range: Option<&str>,
+) -> Response<Vec<u8>> {
     let params: HashMap<String, String> = uri
         .query()
         .map(|q| url_form(q).into_iter().collect::<HashMap<_, _>>())
@@ -351,16 +361,10 @@ pub fn handle_request<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) ->
         .unwrap_or_else(|| path.clone());
     let cache = app.state::<PreviewCache>();
 
-    if let Some(bytes) = cache.get(&key) {
-        let content_type = match extension(path).as_str() {
-            "pdf" => "image/png",
-            "svg" => "image/svg+xml",
-            "woff" => "font/woff",
-            "woff2" => "font/woff2",
-            "ttf" => "font/ttf",
-            "otf" => "font/otf",
-            _ => "image/bmp",
-        };
+    if let Some((bytes, stored_type)) = cache.get(&key) {
+        // Use the type the payload was actually generated as; the extension mapping lives
+        // in exactly one place per branch below.
+        let content_type = stored_type.as_deref().unwrap_or("application/octet-stream");
         return if content_type.starts_with("font/") {
             ok_font(content_type, bytes)
         } else {
@@ -371,7 +375,7 @@ pub fn handle_request<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) ->
     match extension(path).as_str() {
         "svg" => match std::fs::read(path) {
             Ok(bytes) => {
-                cache.put(key, bytes.clone());
+                cache.put(key, bytes.clone(), Some("image/svg+xml"));
                 ok("image/svg+xml", bytes)
             }
             Err(err) => plain(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
@@ -385,48 +389,130 @@ pub fn handle_request<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) ->
                     "otf" => "font/otf",
                     _ => "application/octet-stream",
                 };
-                cache.put(key, bytes.clone());
+                cache.put(key, bytes.clone(), Some(mime));
                 ok_font(mime, bytes)
             }
             Err(err) => plain(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
         },
         ext if IMAGE_EXT.contains(&ext) => match render_image(path, width, bg) {
             Ok(bytes) => {
-                cache.put(key, bytes.clone());
+                cache.put(key, bytes.clone(), Some("image/bmp"));
                 ok("image/bmp", bytes)
             }
             Err(err) => plain(StatusCode::INTERNAL_SERVER_ERROR, &err.code),
         },
         ext if VIDEO_EXT.contains(&ext) => match render_video(path, width, bg) {
             Ok(bytes) => {
-                cache.put(key, bytes.clone());
+                cache.put(key, bytes.clone(), Some("image/bmp"));
                 ok("image/bmp", bytes)
             }
             Err(err) => plain(StatusCode::INTERNAL_SERVER_ERROR, &err.code),
         },
         "pdf" => match render_pdf(path, width) {
             Ok(bytes) => {
-                cache.put(key, bytes.clone());
+                cache.put(key, bytes.clone(), Some("image/png"));
                 ok("image/png", bytes)
             }
             Err(err) => plain(StatusCode::INTERNAL_SERVER_ERROR, &err.code),
         },
-        ext if AUDIO_EXT.contains(&ext) => match std::fs::read(path) {
-            Ok(bytes) => {
-                let mime = match ext {
-                    "mp3" => "audio/mpeg",
-                    "wav" => "audio/wav",
-                    "flac" => "audio/flac",
-                    "ogg" | "opus" => "audio/ogg",
-                    "m4a" | "aac" => "audio/mp4",
-                    _ => "audio/octet-stream",
-                };
-                ok(mime, bytes)
-            }
-            Err(err) => plain(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
-        },
+        ext if AUDIO_EXT.contains(&ext) => {
+            let mime = match ext {
+                "mp3" => "audio/mpeg",
+                "wav" => "audio/wav",
+                "flac" => "audio/flac",
+                "ogg" | "opus" => "audio/ogg",
+                "m4a" | "aac" => "audio/mp4",
+                _ => "audio/octet-stream",
+            };
+            audio_response(path, mime, range)
+        }
         _ => plain(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported"),
     }
+}
+
+/// Serves an audio file, honouring a single `Range` request. Media elements issue one for
+/// seeking, and without it the whole file has to be buffered for every playback position.
+fn audio_response(path: &str, mime: &str, range: Option<&str>) -> Response<Vec<u8>> {
+    let full = |bytes: Vec<u8>| {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, mime)
+            .header(header::ACCEPT_RANGES, "bytes")
+            .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+            .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+            .body(bytes)
+            .unwrap_or_else(|_| status(StatusCode::INTERNAL_SERVER_ERROR))
+    };
+    let Ok(meta) = std::fs::metadata(path) else {
+        return plain(StatusCode::INTERNAL_SERVER_ERROR, "not found");
+    };
+    let len = meta.len();
+    let Some(range) = range else {
+        return match std::fs::read(path) {
+            Ok(bytes) => full(bytes),
+            Err(err) => plain(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+        };
+    };
+    let Some((start, end)) = parse_range(range, len) else {
+        return Response::builder()
+            .status(StatusCode::RANGE_NOT_SATISFIABLE)
+            .header(header::CONTENT_RANGE, format!("bytes */{len}"))
+            .body(Vec::new())
+            .unwrap_or_else(|_| status(StatusCode::INTERNAL_SERVER_ERROR));
+    };
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return plain(StatusCode::INTERNAL_SERVER_ERROR, "not found");
+    };
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return plain(StatusCode::INTERNAL_SERVER_ERROR, "seek failed");
+    }
+    let count = end - start + 1;
+    let mut body = Vec::with_capacity(count as usize);
+    if let Err(err) = file.take(count).read_to_end(&mut body) {
+        return plain(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string());
+    }
+    Response::builder()
+        .status(StatusCode::PARTIAL_CONTENT)
+        .header(header::CONTENT_TYPE, mime)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(
+            header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{len}"),
+        )
+        .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .body(body)
+        .unwrap_or_else(|_| status(StatusCode::INTERNAL_SERVER_ERROR))
+}
+
+/// Parses `bytes=start-end`, `bytes=start-` or `bytes=-suffix`. Multiple ranges are not
+/// supported; returning `None` makes the caller answer 416 instead of serving wrong bytes.
+fn parse_range(value: &str, len: u64) -> Option<(u64, u64)> {
+    if len == 0 {
+        return None;
+    }
+    let spec = value.trim().strip_prefix("bytes=")?;
+    if spec.contains(',') {
+        return None;
+    }
+    let (start, end) = spec.split_once('-')?;
+    if start.is_empty() {
+        let suffix: u64 = end.trim().parse().ok()?;
+        if suffix == 0 {
+            return None;
+        }
+        return Some((len.saturating_sub(suffix), len - 1));
+    }
+    let start: u64 = start.trim().parse().ok()?;
+    if start >= len {
+        return None;
+    }
+    let end = if end.trim().is_empty() {
+        len - 1
+    } else {
+        end.trim().parse::<u64>().ok()?.min(len - 1)
+    };
+    (end >= start).then_some((start, end))
 }
 
 fn ok(content_type: &str, body: Vec<u8>) -> Response<Vec<u8>> {
@@ -1424,6 +1510,19 @@ fn version_rows(path: &str) -> Vec<MetaRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn range_requests_are_parsed_and_bounded() {
+        assert_eq!(parse_range("bytes=0-99", 1000), Some((0, 99)));
+        assert_eq!(parse_range("bytes=900-", 1000), Some((900, 999)));
+        assert_eq!(parse_range("bytes=-100", 1000), Some((900, 999)));
+        // An end past EOF is clamped, but a start past EOF is not satisfiable.
+        assert_eq!(parse_range("bytes=990-5000", 1000), Some((990, 999)));
+        assert_eq!(parse_range("bytes=1000-", 1000), None);
+        assert_eq!(parse_range("bytes=0-9,20-29", 1000), None);
+        assert_eq!(parse_range("bytes=-0", 1000), None);
+        assert_eq!(parse_range("bytes=0-", 0), None);
+    }
 
     #[test]
     fn ads_and_device_paths_are_rejected() {

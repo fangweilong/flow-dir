@@ -1066,7 +1066,10 @@ impl Sink {
             if let Some(index) = self.source_of(&path) {
                 self.succeeded.lock().unwrap().push(index);
             }
-        } else if !self.cancel.load(Ordering::Relaxed) {
+        } else if hr != E_ABORT && hr.0 != 0x8027_0004u32 as i32 {
+            // A cancel only explains `E_ABORT`/the copy engine's own cancel code. Any other
+            // failure after the flag was set still happened, and dropping it would hide an
+            // item from the failure list, the elevated retry and the undo subset.
             let path = self.current_path.lock().unwrap();
             if let Some(index) = self.source_of(&path) {
                 self.failed_indices.lock().unwrap().push(index);

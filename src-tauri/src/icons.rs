@@ -82,7 +82,7 @@ pub fn handle_request<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) ->
         u8::from(thumb)
     );
     let cache = app.state::<PreviewCache>();
-    if let Some(bytes) = cache.get(&key) {
+    if let Some((bytes, _)) = cache.get(&key) {
         // An empty entry is a cached failure (see below).
         if bytes.is_empty() {
             return plain(StatusCode::INTERNAL_SERVER_ERROR, "icon failed");
@@ -91,14 +91,14 @@ pub fn handle_request<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) ->
     }
     match render(path, size, thumb) {
         Ok(bytes) => {
-            cache.put(key, bytes.clone());
+            cache.put(key, bytes.clone(), Some("image/png"));
             ok(bytes)
         }
         Err(_) => {
             // Remember the failure: a dead share or a broken shell handler would otherwise
             // pay for a COM + shell + PNG-encode round trip on every scroll pass. The key
             // carries the `v` revision, so a changed file retries.
-            cache.put(key, Vec::new());
+            cache.put(key, Vec::new(), None);
             plain(StatusCode::INTERNAL_SERVER_ERROR, "icon failed")
         }
     }

@@ -67,16 +67,17 @@ impl Drop for OwnedHandle {
 }
 
 /// Parses the helper arguments from the process command line, skipping `argv[0]`.
-pub fn helper_args() -> Option<(String, String, Option<String>)> {
+pub fn helper_args() -> Option<(String, String, Option<String>, u32)> {
     parse_helper_args(std::env::args_os().skip(1))
 }
 
 fn parse_helper_args<I: Iterator<Item = std::ffi::OsString>>(
     mut args: I,
-) -> Option<(String, String, Option<String>)> {
+) -> Option<(String, String, Option<String>, u32)> {
     let mut pipe = None;
     let mut nonce = None;
     let mut cancel = None;
+    let mut server_pid = 0u32;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--elevated-op") => pipe = args.next().and_then(|v| v.to_str().map(str::to_string)),
@@ -84,10 +85,16 @@ fn parse_helper_args<I: Iterator<Item = std::ffi::OsString>>(
             Some("--cancel-event") => {
                 cancel = args.next().and_then(|v| v.to_str().map(str::to_string))
             }
+            Some("--server-pid") => {
+                server_pid = args
+                    .next()
+                    .and_then(|v| v.to_str().and_then(|text| text.parse().ok()))
+                    .unwrap_or(0)
+            }
             _ => {}
         }
     }
-    Some((pipe?, nonce?, cancel))
+    Some((pipe?, nonce?, cancel, server_pid))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -101,8 +108,13 @@ struct Payload {
 
 /// Helper-process body: receives the request from the GUI pipe, runs it synchronously and
 /// writes the report back over the same connection.
-pub fn run_helper(pipe_name: &str, nonce: &str, cancel_event: Option<&str>) -> i32 {
-    let report = helper_body(pipe_name, nonce, cancel_event);
+pub fn run_helper(
+    pipe_name: &str,
+    nonce: &str,
+    cancel_event: Option<&str>,
+    server_pid: u32,
+) -> i32 {
+    let report = helper_body(pipe_name, nonce, cancel_event, server_pid);
     match report {
         Ok(report) => {
             if report.error.is_none() && report.failed_total == 0 {
@@ -111,7 +123,17 @@ pub fn run_helper(pipe_name: &str, nonce: &str, cancel_event: Option<&str>) -> i
                 1
             }
         }
-        Err(_) => 2,
+        Err(err) => {
+            // Exit code 2 is all the GUI can report, so keep the real reason in the log;
+            // otherwise a rejected pipe and a crash look identical.
+            log::warn!(
+                target: "flowdir::elevated",
+                "helper failed before replying: {} {}",
+                err.code,
+                err.detail
+            );
+            2
+        }
     }
 }
 
@@ -119,11 +141,12 @@ fn helper_body(
     pipe_name: &str,
     nonce: &str,
     cancel_event: Option<&str>,
+    server_pid: u32,
 ) -> Result<ops::ElevatedReport, ApiError> {
     let pipe = open_client(pipe_name)?;
     // The pipe decides which operations this process runs with an elevated token, so the
     // peer is checked before a single byte is read.
-    verify_server(pipe.0)?;
+    verify_server(pipe.0, server_pid)?;
     let payload: Payload = serde_json::from_slice(&read_message_sync(pipe.0)?)
         .map_err(|err| ApiError::new("BAD_ARGS", format!("elevated request: {err}")))?;
     if payload.nonce != nonce {
@@ -223,8 +246,8 @@ fn random_hex() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// `--elevated-op "<pipe>" --nonce "<nonce>" --cancel-event "<event>"` as a NUL-terminated
-/// UTF-16 command line.
+/// `--elevated-op "<pipe>" --nonce "<nonce>" --cancel-event "<event>" --server-pid <pid>`
+/// as a NUL-terminated UTF-16 command line.
 fn params_for(pipe_name: &str, nonce: &str, cancel_name: &str) -> Vec<u16> {
     let mut params: Vec<u16> = "--elevated-op \"".encode_utf16().collect();
     params.extend(pipe_name.encode_utf16());
@@ -232,7 +255,7 @@ fn params_for(pipe_name: &str, nonce: &str, cancel_name: &str) -> Vec<u16> {
     params.extend(nonce.encode_utf16());
     params.extend("\" --cancel-event \"".encode_utf16());
     params.extend(cancel_name.encode_utf16());
-    params.push(u16::from(b'"'));
+    params.extend(format!("\" --server-pid {}", std::process::id()).encode_utf16());
     params.push(0);
     params
 }
@@ -401,10 +424,19 @@ fn open_client(name: &str) -> Result<OwnedHandle, ApiError> {
 /// legitimate GUI's pipe from being hijacked. Tying the server to this exact image closes
 /// the other direction: the attacker also needs a process running the installed binary as
 /// the pipe server, which requires write access to the install directory.
-fn verify_server(pipe: HANDLE) -> Result<(), ApiError> {
+fn verify_server(pipe: HANDLE, expected_pid: u32) -> Result<(), ApiError> {
     let mut server = 0u32;
     unsafe { GetNamedPipeServerProcessId(pipe, &mut server) }
         .map_err(|err| ApiError::new("ELEVATION_SERVER", err.to_string()))?;
+    // The GUI passes its own PID on the helper command line. Matching it prevents a
+    // same-session process from serving this pipe even when the image check below is
+    // unavailable.
+    if expected_pid != 0 && server != expected_pid {
+        return Err(ApiError::new(
+            "ELEVATION_SERVER",
+            format!("pipe server pid {server} != expected {expected_pid}"),
+        ));
+    }
     let mut server_session = 0u32;
     let mut client_session = 0u32;
     unsafe {
@@ -419,8 +451,26 @@ fn verify_server(pipe: HANDLE) -> Result<(), ApiError> {
         ));
     }
 
-    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, server) }
-        .map_err(|err| ApiError::new("ELEVATION_SERVER", format!("server pid {server}: {err}")))?;
+    let process = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, server) } {
+        Ok(process) => process,
+        // Over-the-shoulder UAC runs the helper as a different administrator account, and
+        // that token can be denied access to the standard user's GUI process. The PID and
+        // session checks still tie the pipe to the GUI that launched us, so treat the
+        // image check as unavailable instead of failing a legitimate elevation.
+        Err(err) if expected_pid != 0 => {
+            log::warn!(
+                target: "flowdir::elevated",
+                "cannot open pipe server {server} for image verification: {err}"
+            );
+            return Ok(());
+        }
+        Err(err) => {
+            return Err(ApiError::new(
+                "ELEVATION_SERVER",
+                format!("server pid {server}: {err}"),
+            ))
+        }
+    };
     let process = OwnedHandle(process);
     // Room for a full Win32 long path; the call reports an error instead of truncating,
     // so a short buffer would fail the check closed.
@@ -765,13 +815,16 @@ mod tests {
             "abc",
             "--cancel-event",
             "flowdir-elevated-cancel-abc",
+            "--server-pid",
+            "4321",
         ];
-        let (pipe, nonce, cancel) =
+        let (pipe, nonce, cancel, server_pid) =
             parse_helper_args(args.into_iter().map(OsStr::new).map(|s| s.to_os_string()))
                 .expect("both flags are present");
         assert_eq!(pipe, r"\\.\pipe\flowdir-elevated-abc");
         assert_eq!(nonce, "abc");
         assert_eq!(cancel.as_deref(), Some("flowdir-elevated-cancel-abc"));
+        assert_eq!(server_pid, 4321);
     }
 
     #[test]

@@ -177,7 +177,11 @@ export function usePreviewController({
         window.removeEventListener('pointermove', move)
         window.removeEventListener('pointerup', up)
         window.removeEventListener('pointercancel', up)
-        if (open && finalWidth >= previewMin) updateSettings({ ...settings, previewWidth: finalWidth })
+        // Merge into the live settings, not the snapshot captured at pointerdown: a
+        // shortcut pressed during the drag must not be reverted on release.
+        if (open && finalWidth >= previewMin) {
+          updateSettings({ ...settingsRef.current, previewWidth: finalWidth })
+        }
       }
       window.addEventListener('pointermove', move)
       window.addEventListener('pointerup', up)

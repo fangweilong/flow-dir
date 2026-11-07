@@ -114,7 +114,15 @@ pub fn enumerate(path: &str, show_hidden: bool, cancel: &AtomicBool) -> Result<S
             let mut child: *mut ITEMIDLIST = std::ptr::null_mut();
             let mut fetched = 0u32;
             let hr = enumerator.Next(std::slice::from_mut(&mut child), Some(&mut fetched));
-            if fetched == 0 || hr.is_err() {
+            if hr.is_err() {
+                // The provider may have handed back an item before failing; it is still
+                // ours to release.
+                if fetched > 0 && !child.is_null() {
+                    CoTaskMemFree(Some(child as *const c_void));
+                }
+                break;
+            }
+            if fetched == 0 {
                 break;
             }
             let entry = read_item(&folder, root.0, child as *const _, show_hidden);
