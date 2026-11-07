@@ -1854,9 +1854,10 @@ fn open_terminal(path: String) -> Result<(), ApiError> {
         return Ok(());
     }
 
-    let escaped = path.replace('\'', "''");
+    // The shell inherits the working directory, so the path never enters a command line:
+    // a folder named `%TEMP%` would otherwise be expanded by cmd and open the wrong place.
     if std::process::Command::new("powershell")
-        .args(["-NoExit", "-Command", &format!("Set-Location -LiteralPath '{escaped}'")])
+        .args(["-NoExit", "-NoLogo"])
         .current_dir(&path)
         .spawn()
         .is_ok()
@@ -1865,7 +1866,7 @@ fn open_terminal(path: String) -> Result<(), ApiError> {
     }
 
     std::process::Command::new("cmd")
-        .args(["/k", &format!("cd /d \"{path}\"")])
+        .arg("/k")
         .current_dir(&path)
         .spawn()
         .map(|_| ())
@@ -2060,6 +2061,20 @@ fn main() {
             .min_inner_size(900.0, 520.0)
             .center()
             .decorations(false)
+            // Only the bundled UI may replace the main document. Tauri scopes the IPC ACL
+            // by origin as well, but refusing the navigation up front means a future
+            // preview or link handler can never hand the bridge to foreign content.
+            .on_navigation(|url| {
+                if matches!(url.scheme(), "tauri" | "about") {
+                    return true;
+                }
+                match url.host_str() {
+                    Some("tauri.localhost") => true,
+                    // `npm run dev:app` loads the Vite server; release builds never do.
+                    Some("localhost") | Some("127.0.0.1") => cfg!(debug_assertions),
+                    _ => false,
+                }
+            })
             .visible(false)
             // The webview paints nothing while it is parked or still loading; this is what
             // the window shows instead, so it has to be the app surface, not white.

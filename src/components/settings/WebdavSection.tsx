@@ -16,6 +16,9 @@ type Draft = WebdavConnection & { password: string }
 
 type Status = { tone: 'ok' | 'error'; text: string }
 
+/** Plain HTTP puts the password and file bodies on the wire unencrypted. */
+const isPlainHttp = (url: string) => /^http:\/\//i.test(url.trim())
+
 const draftFor = (existing: WebdavConnection[]): Draft => {
   let n = 1
   while (existing.some((conn) => conn.id === `conn-${n}`)) n += 1
@@ -180,6 +183,11 @@ export function WebdavSection({ settings, onChange, t, visible }: WebdavSectionP
                   {conn.url}
                   {conn.root ? `/${conn.root}` : ''}
                 </div>
+                {isPlainHttp(conn.url) && (
+                  <div className="truncate text-[0.625rem] text-warning-soft">
+                    {t('settings.webdavPlainHttpShort')}
+                  </div>
+                )}
               </div>
               <div className="flex shrink-0 items-center gap-1">
                 <button
@@ -224,6 +232,11 @@ export function WebdavSection({ settings, onChange, t, visible }: WebdavSectionP
                 className={INPUT}
               />
             </Field>
+            {isPlainHttp(draft.url) && (
+              <div className="text-[0.625rem] text-warning-soft">
+                {t('settings.webdavPlainHttp')}
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-1.5">
               <Field label={t('settings.webdavUsername')}>
                 <input

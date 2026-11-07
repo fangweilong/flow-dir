@@ -10,14 +10,14 @@
 //! helper start, which was the original TOCTOU.
 
 use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
-use windows::core::{w, PCWSTR};
+use windows::core::{w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED,
     GENERIC_READ, GENERIC_WRITE, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
@@ -28,12 +28,14 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, PIPE_READMODE_BYTE,
+    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, GetNamedPipeClientSessionId,
+    GetNamedPipeServerProcessId, GetNamedPipeServerSessionId, PIPE_READMODE_BYTE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows::Win32::System::Threading::{
-    CreateEventW, GetProcessId, OpenEventW, SetEvent, TerminateProcess, WaitForMultipleObjects,
-    WaitForSingleObject, INFINITE, SYNCHRONIZATION_SYNCHRONIZE,
+    CreateEventW, GetProcessId, OpenEventW, OpenProcess, QueryFullProcessImageNameW, SetEvent,
+    TerminateProcess, WaitForMultipleObjects, WaitForSingleObject, INFINITE,
+    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, SYNCHRONIZATION_SYNCHRONIZE,
 };
 use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
 use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
@@ -119,6 +121,9 @@ fn helper_body(
     cancel_event: Option<&str>,
 ) -> Result<ops::ElevatedReport, ApiError> {
     let pipe = open_client(pipe_name)?;
+    // The pipe decides which operations this process runs with an elevated token, so the
+    // peer is checked before a single byte is read.
+    verify_server(pipe.0)?;
     let payload: Payload = serde_json::from_slice(&read_message_sync(pipe.0)?)
         .map_err(|err| ApiError::new("BAD_ARGS", format!("elevated request: {err}")))?;
     if payload.nonce != nonce {
@@ -261,7 +266,8 @@ fn run_worker(
         let process = Some(fork.0);
         connect(pipe.0, event.0, process, &cancel, budget)?;
         // The nonce hides the name, but a same-user process could still win the race to
-        // an instance; only the helper this GUI launched may send the request.
+        // an instance; only the helper this GUI launched may send the request. The helper
+        // mirrors this check by requiring a pipe server that runs its own image.
         verify_client(pipe.0, fork.0)?;
         trusted.set(true);
         let payload = serde_json::to_vec(&Payload {
@@ -386,6 +392,66 @@ fn open_client(name: &str) -> Result<OwnedHandle, ApiError> {
     }
     .map_err(|err| ApiError::new("ELEVATED", format!("connect pipe: {err}")))?;
     Ok(OwnedHandle(handle))
+}
+
+/// Rejects a pipe whose server is not this same executable in the same session.
+///
+/// The nonce travels on the helper's own command line, so a local attacker who starts the
+/// helper can choose both the pipe name and the nonce; the nonce only protects the
+/// legitimate GUI's pipe from being hijacked. Tying the server to this exact image closes
+/// the other direction: the attacker also needs a process running the installed binary as
+/// the pipe server, which requires write access to the install directory.
+fn verify_server(pipe: HANDLE) -> Result<(), ApiError> {
+    let mut server = 0u32;
+    unsafe { GetNamedPipeServerProcessId(pipe, &mut server) }
+        .map_err(|err| ApiError::new("ELEVATION_SERVER", err.to_string()))?;
+    let mut server_session = 0u32;
+    let mut client_session = 0u32;
+    unsafe {
+        GetNamedPipeServerSessionId(pipe, &mut server_session)
+            .and_then(|()| GetNamedPipeClientSessionId(pipe, &mut client_session))
+    }
+    .map_err(|err| ApiError::new("ELEVATION_SERVER", err.to_string()))?;
+    if server_session != client_session {
+        return Err(ApiError::new(
+            "ELEVATION_SERVER",
+            format!("pipe server session {server_session} != helper session {client_session}"),
+        ));
+    }
+
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, server) }
+        .map_err(|err| ApiError::new("ELEVATION_SERVER", format!("server pid {server}: {err}")))?;
+    let process = OwnedHandle(process);
+    // Room for a full Win32 long path; the call reports an error instead of truncating,
+    // so a short buffer would fail the check closed.
+    let mut buffer = vec![0u16; 32 * 1024];
+    let mut len = buffer.len() as u32;
+    unsafe {
+        QueryFullProcessImageNameW(
+            process.0,
+            PROCESS_NAME_WIN32,
+            PWSTR(buffer.as_mut_ptr()),
+            &mut len,
+        )
+    }
+    .map_err(|err| ApiError::new("ELEVATION_SERVER", format!("server pid {server}: {err}")))?;
+    let server_image = PathBuf::from(String::from_utf16_lossy(&buffer[..len as usize]));
+    let own = std::env::current_exe()
+        .map_err(|err| ApiError::new("ELEVATION_SERVER", format!("current exe: {err}")))?;
+    // `current_exe` and the process image can differ in case or 8.3 spelling; canonicalize
+    // both so the comparison is about the file, not the spelling.
+    let own = std::fs::canonicalize(&own).unwrap_or(own);
+    let server_image = std::fs::canonicalize(&server_image).unwrap_or(server_image);
+    if !own
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&server_image.to_string_lossy())
+    {
+        return Err(ApiError::new(
+            "ELEVATION_SERVER",
+            format!("pipe server image {server_image:?} is not {own:?}"),
+        ));
+    }
+    Ok(())
 }
 
 fn connect(

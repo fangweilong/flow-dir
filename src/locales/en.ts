@@ -246,6 +246,9 @@ export const en: Record<BaseKey, string> = {
   'settings.webdavNamePh': 'e.g. Home NAS',
   'settings.webdavUrl': 'Server URL',
   'settings.webdavUrlPh': 'https://nas.example.com/dav',
+  'settings.webdavPlainHttp':
+    'This address uses plain HTTP, so the password and file contents travel unencrypted. Use https:// instead.',
+  'settings.webdavPlainHttpShort': 'Plain HTTP',
   'settings.webdavUsername': 'Username',
   'settings.webdavUsernamePh': 'Leave empty for anonymous access',
   'settings.webdavRoot': 'Root path',

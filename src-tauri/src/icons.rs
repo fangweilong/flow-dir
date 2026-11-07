@@ -231,7 +231,9 @@ fn ok(body: Vec<u8>) -> Response<Vec<u8>> {
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "image/png")
         .header(header::CACHE_CONTROL, "public, max-age=86400")
-        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        // Icons are loaded through `<img>`, which is not a CORS request; no other origin
+        // should be able to read this response.
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .body(body)
         .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "encode"))
 }

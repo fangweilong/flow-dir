@@ -242,6 +242,8 @@ export const zh = {
   'settings.webdavNamePh': '例如：家庭 NAS',
   'settings.webdavUrl': '服务器地址',
   'settings.webdavUrlPh': 'https://nas.example.com/dav',
+  'settings.webdavPlainHttp': '当前地址使用明文 HTTP，密码和文件内容会在网络中明文传输，建议改用 https://。',
+  'settings.webdavPlainHttpShort': '明文 HTTP',
   'settings.webdavUsername': '用户名',
   'settings.webdavUsernamePh': '留空表示匿名访问',
   'settings.webdavRoot': '根路径',

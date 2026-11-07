@@ -361,7 +361,11 @@ pub fn handle_request<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) ->
             "otf" => "font/otf",
             _ => "image/bmp",
         };
-        return ok(content_type, bytes);
+        return if content_type.starts_with("font/") {
+            ok_font(content_type, bytes)
+        } else {
+            ok(content_type, bytes)
+        };
     }
 
     match extension(path).as_str() {
@@ -382,7 +386,7 @@ pub fn handle_request<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) ->
                     _ => "application/octet-stream",
                 };
                 cache.put(key, bytes.clone());
-                ok(mime, bytes)
+                ok_font(mime, bytes)
             }
             Err(err) => plain(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
         },
@@ -426,11 +430,36 @@ pub fn handle_request<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) ->
 }
 
 fn ok(content_type: &str, body: Vec<u8>) -> Response<Vec<u8>> {
-    Response::builder()
+    ok_with_cors(content_type, body, false)
+}
+
+/// `@font-face` fetches are CORS requests, so font payloads alone opt in. The other
+/// payloads are consumed by an image/audio/video element that never needs the header;
+/// omitting it keeps an arbitrary local file from being readable by a foreign origin.
+fn ok_font(content_type: &str, body: Vec<u8>) -> Response<Vec<u8>> {
+    ok_with_cors(content_type, body, true)
+}
+
+fn ok_with_cors(content_type: &str, body: Vec<u8>, cors: bool) -> Response<Vec<u8>> {
+    let mut builder = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
         .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
-        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        // Payloads are chosen by absolute path; never let a browser sniff one into a
+        // document type.
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff");
+    if cors {
+        builder = builder.header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");
+    }
+    if content_type == "image/svg+xml" {
+        // Applies only if the URL is opened as a document instead of an `<img>`; a
+        // top-level SVG would otherwise run its scripts.
+        builder = builder.header(
+            header::CONTENT_SECURITY_POLICY,
+            "default-src 'none'; style-src 'unsafe-inline'",
+        );
+    }
+    builder
         .body(body)
         .unwrap_or_else(|_| status(StatusCode::INTERNAL_SERVER_ERROR))
 }
