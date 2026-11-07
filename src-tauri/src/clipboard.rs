@@ -46,20 +46,24 @@ pub fn copy_paths(paths: &[String], cut: bool) -> Result<(), ApiError> {
     if paths.is_empty() {
         return Err(ApiError::new("EMPTY", "没有选中任何项目"));
     }
-    let local: Vec<String> = paths
+    // Shell-namespace items have no filesystem path, so `CF_HDROP` cannot represent them.
+    // Rejecting the whole selection is honest: silently dropping them from a mixed
+    // selection would report success while copying only part of what the user selected.
+    if paths
         .iter()
-        .filter(|path| !crate::webdav::is_webdav(path) && !crate::shellfs::is_shell_path(path))
-        .cloned()
-        .collect();
-    let has_remote = paths.iter().any(|path| crate::webdav::is_webdav(path));
-    if local.is_empty() && !has_remote {
-        // Shell-namespace items have no filesystem path, so `CF_HDROP` cannot represent
-        // them. Writing the parse name produced a clipboard no paste target could resolve.
+        .any(|path| crate::shellfs::is_shell_path(path))
+    {
         return Err(ApiError::new(
             "INVALID_PATH",
             "shell namespace items cannot be copied as files",
         ));
     }
+    let local: Vec<String> = paths
+        .iter()
+        .filter(|path| !crate::webdav::is_webdav(path))
+        .cloned()
+        .collect();
+    let has_remote = local.len() != paths.len();
 
     // Read the sequence while the clipboard is still ours; reading it after
     // `CloseClipboard` lets a clipboard manager change it first and makes the stored

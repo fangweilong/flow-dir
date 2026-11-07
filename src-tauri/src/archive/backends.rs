@@ -829,14 +829,27 @@ fn list_with_truncated_impl(
             Box::new(reader(path, format)?)
         };
         let mut archive = tar::Archive::new(stream);
-        let Ok(mut items) = archive.entries() else {
-            return Ok((entries, false));
-        };
+        let mut items = archive
+            .entries()
+            .map_err(|err| ApiError::new("ARCHIVE", err.to_string()))?;
         let mut visited = 0usize;
         let mut truncated = false;
         for item in items.by_ref().take(limit) {
             visited += 1;
-            let Ok(item) = item else { break };
+            let item = match item {
+                Ok(item) => item,
+                // A preview stops the stream at `PREVIEW_BYTES`, which the tar reader
+                // reports as an entry error when the cut lands mid-entry. That is the
+                // budget, not corruption: keep the entries read so far and say so.
+                Err(_) if preview => {
+                    truncated = true;
+                    break;
+                }
+                // The unbounded walk used by extraction cannot run out of budget. A broken
+                // entry means the rest of the stream is unreadable, and ending the walk
+                // here would report a clean, complete prefix that extraction then caches.
+                Err(err) => return Err(ApiError::new("ARCHIVE", err.to_string())),
+            };
             let raw = item.path_bytes().to_vec();
             let Ok(name) = entry::decode(&raw, false) else {
                 continue;
@@ -866,6 +879,55 @@ fn list_with_truncated_impl(
         }],
         false,
     ))
+}
+
+/// Whether a tar archive contains `target` or any entry beneath it.
+///
+/// Returns `None` for other formats so the caller keeps using the full listing. A
+/// compressed tar has no index, but the walk stops at the first match: answering "is this
+/// a directory?" must not decompress an entire multi-gigabyte archive.
+pub fn tar_contains_entry(
+    path: &str,
+    target: &str,
+    limit: usize,
+) -> Result<Option<bool>, ApiError> {
+    let Some(format) = format::detect(path) else {
+        return Ok(None);
+    };
+    if !format.is_tar() {
+        return Ok(None);
+    }
+    let target = target.trim_matches('\\').to_lowercase();
+    if target.is_empty() {
+        return Ok(Some(true));
+    }
+    let prefix = format!("{target}\\");
+    let mut archive = tar::Archive::new(reader(path, format)?);
+    let items = archive
+        .entries()
+        .map_err(|err| ApiError::new("ARCHIVE", err.to_string()))?;
+    for (index, item) in items.enumerate() {
+        if index >= limit {
+            return Err(ApiError::new(
+                "TOO_MANY_ENTRIES",
+                format!("more than {limit} entries"),
+            ));
+        }
+        // A broken stream cannot be inspected further; surfacing the error is better than
+        // guessing that the entry is not a directory.
+        let item = item.map_err(|err| ApiError::new("ARCHIVE", err.to_string()))?;
+        let raw = item.path_bytes().to_vec();
+        let Ok(name) = entry::decode(&raw, false) else {
+            continue;
+        };
+        let norm = name.trim_matches('\\').to_lowercase();
+        if norm.starts_with(&prefix)
+            || (norm == target && item.header().entry_type().is_dir())
+        {
+            return Ok(Some(true));
+        }
+    }
+    Ok(Some(false))
 }
 
 /// Drop-in for callers that only need the entries and ignore truncation.
@@ -1001,15 +1063,31 @@ fn extract_zip_dir(
     let mut entries = 0usize;
     let mut first_error: Option<ApiError> = None;
     for index in 0..zip.len() {
+        // Resolve the name before `by_index`: the member handle borrows the archive, so a
+        // lookup from the failure arm is rejected by the borrow checker. The central
+        // directory is already in memory, so this is a cheap name decode.
+        // Unknown names count as inside: a failure we cannot attribute must still be
+        // reported rather than silently dropped.
+        let inside = zip
+            .name_for_index(index)
+            .and_then(Result::ok)
+            .map(|name| {
+                let name = name.replace('/', "\\");
+                crate::pathkey::strip_prefix_dir(&name, inner_norm).is_some()
+            })
+            .unwrap_or(true);
         // Encrypted or damaged members are skipped like the generic path does; the folder
         // is still extracted with everything readable.
         let mut member = match zip.by_index(index) {
             Ok(member) => member,
             Err(err) => {
-                // Remember the first failure: if nothing at all could be opened (an
+                // Only a failure under the requested subtree makes this folder incomplete.
+                // An unrelated member (encrypted, unsupported method) must not fail a
+                // folder whose own members all extracted.
+                // Remember the first inside failure: if nothing at all could be opened (an
                 // encrypted folder dragged without a password), reporting success would
                 // hand the user an empty folder instead.
-                if first_error.is_none() {
+                if inside && first_error.is_none() {
                     first_error = Some(match err {
                         ZipError::UnsupportedArchive(_) => {
                             ApiError::new("PASSWORD_REQUIRED", "archive is encrypted")
@@ -1282,7 +1360,10 @@ fn name_of(path: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_dir, list, list_with_truncated, VolumeFamily};
+    use super::{
+        extract_dir, list, list_unbounded_with_truncated, list_with_truncated, tar_contains_entry,
+        VolumeFamily,
+    };
     use std::io::Write;
 
     #[test]
@@ -1388,6 +1469,79 @@ mod tests {
             assert!(!truncated, "{}", path);
             assert_eq!(list(&path, 2).unwrap().len(), 2, "{}", path);
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tar_inner_dir_scan_matches_directories_only() {
+        let dir = std::env::temp_dir().join(format!("flowdir-tar-inner-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let tar_path = dir.join("tree.tar");
+        let mut builder = tar::Builder::new(std::fs::File::create(&tar_path).unwrap());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(0);
+        header.set_mode(0o755);
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_cksum();
+        builder.append_data(&mut header, "docs/", &[][..]).unwrap();
+        let mut header = tar::Header::new_gnu();
+        header.set_size(1);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append_data(&mut header, "docs/a.txt", &b"x"[..]).unwrap();
+        // A file whose name matches a queried path must not be reported as a directory.
+        let mut header = tar::Header::new_gnu();
+        header.set_size(1);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append_data(&mut header, "notes.txt", &b"y"[..]).unwrap();
+        builder.finish().unwrap();
+
+        let zip_path = dir.join("tree.zip");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
+        zip.start_file("docs/a.txt", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"x").unwrap();
+        zip.finish().unwrap();
+
+        let tar = tar_path.to_string_lossy().into_owned();
+        assert_eq!(tar_contains_entry(&tar, "docs", 100).unwrap(), Some(true));
+        assert_eq!(tar_contains_entry(&tar, "missing", 100).unwrap(), Some(false));
+        assert_eq!(
+            tar_contains_entry(&tar, "notes.txt", 100).unwrap(),
+            Some(false)
+        );
+        let zip = zip_path.to_string_lossy().into_owned();
+        assert_eq!(tar_contains_entry(&zip, "docs", 100).unwrap(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn truncated_tar_listing_is_an_error_not_a_partial_success() {
+        let dir = std::env::temp_dir().join(format!("flowdir-tar-cut-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let tar_path = dir.join("cut.tar");
+        let mut builder = tar::Builder::new(std::fs::File::create(&tar_path).unwrap());
+        for name in ["big.txt", "after.txt"] {
+            let body = vec![b'x'; 8192];
+            let mut header = tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, name, &body[..]).unwrap();
+        }
+        builder.finish().unwrap();
+
+        // Keep the first header and half of its payload: reaching the second entry has to
+        // skip the missing bytes and must surface the error.
+        let bytes = std::fs::read(&tar_path).unwrap();
+        std::fs::write(&tar_path, &bytes[..512 + 4096]).unwrap();
+        let path = tar_path.to_string_lossy().into_owned();
+        assert!(list_unbounded_with_truncated(&path, 100).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

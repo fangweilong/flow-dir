@@ -1066,8 +1066,12 @@ impl Sink {
             if let Some(index) = self.source_of(&path) {
                 self.succeeded.lock().unwrap().push(index);
             }
-        } else if hr != E_ABORT && hr.0 != 0x8027_0004u32 as i32 {
-            // A cancel only explains `E_ABORT`/the copy engine's own cancel code. Any other
+        } else if hr != E_ABORT
+            && hr.0 != 0x8027_0000u32 as i32
+            && hr.0 != 0x8027_0001u32 as i32
+        {
+            // A cancel only explains `E_ABORT` or the copy engine's own cancel codes
+            // (`COPYENGINE_E_USER_CANCELLED` / `COPYENGINE_E_CANCELLED`). Any other
             // failure after the flag was set still happened, and dropping it would hide an
             // item from the failure list, the elevated retry and the undo subset.
             let path = self.current_path.lock().unwrap();

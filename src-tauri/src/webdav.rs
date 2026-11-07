@@ -320,7 +320,7 @@ pub fn ensure_local(
     let cancel = AtomicBool::new(false);
     if let Err(err) = client.get_to_file(&dav.path, &temp, &cancel, max_bytes) {
         let _ = std::fs::remove_file(&temp);
-        return Err(if err.code == "TOO_LARGE" {
+        return Err(if err.code == "FILE_TOO_LARGE" {
             ApiError::new("FILE_TOO_LARGE", path.to_string())
         } else {
             err

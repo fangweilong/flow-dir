@@ -514,6 +514,7 @@ export const zh = {
   'compare.root': '根目录',
   'compare.loading': '比较中…',
   'compare.error': '比较失败：',
+  'compare.partial': '部分子目录无法读取，数量可能不完整：',
   'compare.sameRoot': '两侧目录相同，无法比较',
   'compare.name': '名称',
   'compare.leftSize': '左侧',

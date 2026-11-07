@@ -523,6 +523,7 @@ export const en: Record<BaseKey, string> = {
   'compare.root': 'Root',
   'compare.loading': 'Comparing…',
   'compare.error': 'Compare failed:',
+  'compare.partial': 'Some subdirectories could not be read; counts may be incomplete:',
   'compare.sameRoot': 'The two folders are the same',
   'compare.name': 'Name',
   'compare.leftSize': 'Left',

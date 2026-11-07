@@ -198,8 +198,12 @@ export function useFileActionHandlers({
               }))
               // `startRename` resolves the pane's *current* tab; if the user navigated
               // while the folder was being created, that is a different directory and the
-              // prompt would rename a same-named item there.
-              if (wsRef.current?.panes[paneId]?.activeTabId === tab.id) {
+              // prompt would rename a same-named item there. Navigation keeps the tab id,
+              // so the path must be compared as well.
+              const live = wsRef.current
+              const livePane = live?.panes[paneId]
+              const liveTab = livePane ? live.tabs[livePane.activeTabId] : undefined
+              if (liveTab?.id === tab.id && liveTab.path === tab.path) {
                 startRename(paneId, name)
               }
             },

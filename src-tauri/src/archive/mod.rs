@@ -98,7 +98,9 @@ pub fn is_archive_or_inner_dir(path: &str) -> bool {
 /// have been replaced since the cache was written, so a path that used to be a file can now
 /// be a parent folder (and vice versa).
 fn clear_blocking_ancestors(root: &std::path::Path, path: &std::path::Path) {
-    let mut current = path.parent();
+    // `path` is the directory that must exist for the destination; it is often exactly the
+    // entry an older archive revision cached as a file, so it must be inspected too.
+    let mut current = Some(path);
     while let Some(dir) = current {
         if dir == root {
             break;
@@ -116,6 +118,19 @@ fn clear_blocking_ancestors(root: &std::path::Path, path: &std::path::Path) {
 
 /// Checks whether `inner_path` represents a directory inside `archive_path`.
 pub fn is_inner_dir(archive_path: &Path, inner_path: &str) -> Result<bool, ApiError> {
+    let target = inner_path.replace('/', "\\");
+    let target = target.trim_matches('\\').to_lowercase();
+    if target.is_empty() {
+        return Ok(true);
+    }
+    // Tar streams have no index. The dedicated scan stops at the first match, so opening
+    // one member no longer decompresses the whole archive just to answer this question.
+    // Other formats read an index and can use the complete listing below.
+    if let Some(found) =
+        backends::tar_contains_entry(&archive_path.to_string_lossy(), &target, 500_000)?
+    {
+        return Ok(found);
+    }
     // Use the unbounded listing and refuse to guess when even that hits the entry cap: a
     // directory whose first member sits past a truncated listing used to be treated as a
     // file and materialized as a zero-byte entry.
@@ -126,11 +141,6 @@ pub fn is_inner_dir(archive_path: &Path, inner_path: &str) -> Result<bool, ApiEr
             "TOO_MANY_ENTRIES",
             format!("more than {} entries", backends::MAX_MATERIALIZE_ENTRIES),
         ));
-    }
-    let target = inner_path.replace('/', "\\");
-    let target = target.trim_matches('\\').to_lowercase();
-    if target.is_empty() {
-        return Ok(true);
     }
     let prefix = format!("{target}\\");
     for entry in entries {
@@ -575,6 +585,22 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Channel::new(|_| Ok(())),
         )
+    }
+
+    #[test]
+    fn clear_blocking_ancestors_inspects_the_parent_itself() {
+        let dir = temp_dir("blocking-parent");
+        let root = dir.join("cache");
+        std::fs::create_dir_all(&root).unwrap();
+        // An older archive revision cached `docs` as a file; the destination now needs it
+        // to be a directory.
+        let parent = root.join("docs");
+        std::fs::write(&parent, b"stale").unwrap();
+        clear_blocking_ancestors(&root, &parent);
+        assert!(!parent.exists());
+        std::fs::create_dir_all(&parent).unwrap();
+        assert!(parent.is_dir());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

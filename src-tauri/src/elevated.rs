@@ -20,7 +20,11 @@ use tauri::{AppHandle, Manager};
 use windows::core::{w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED,
-    GENERIC_READ, GENERIC_WRITE, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE, HANDLE, LUID, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
+use windows::Win32::Security::{
+    AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
+    TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED,
@@ -33,9 +37,10 @@ use windows::Win32::System::Pipes::{
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows::Win32::System::Threading::{
-    CreateEventW, GetProcessId, OpenEventW, OpenProcess, QueryFullProcessImageNameW, SetEvent,
-    TerminateProcess, WaitForMultipleObjects, WaitForSingleObject, INFINITE,
-    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, SYNCHRONIZATION_SYNCHRONIZE,
+    CreateEventW, GetCurrentProcess, GetProcessId, OpenEventW, OpenProcess, OpenProcessToken,
+    QueryFullProcessImageNameW, SetEvent, TerminateProcess, WaitForMultipleObjects,
+    WaitForSingleObject, INFINITE, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    SYNCHRONIZATION_SYNCHRONIZE,
 };
 use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
 use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
@@ -423,14 +428,15 @@ fn open_client(name: &str) -> Result<OwnedHandle, ApiError> {
 /// helper can choose both the pipe name and the nonce; the nonce only protects the
 /// legitimate GUI's pipe from being hijacked. Tying the server to this exact image closes
 /// the other direction: the attacker also needs a process running the installed binary as
-/// the pipe server, which requires write access to the install directory.
+/// the pipe server, which requires write access to the install directory. The image check
+/// is therefore the only trust anchor that survives attacker control of the arguments.
 fn verify_server(pipe: HANDLE, expected_pid: u32) -> Result<(), ApiError> {
     let mut server = 0u32;
     unsafe { GetNamedPipeServerProcessId(pipe, &mut server) }
         .map_err(|err| ApiError::new("ELEVATION_SERVER", err.to_string()))?;
-    // The GUI passes its own PID on the helper command line. Matching it prevents a
-    // same-session process from serving this pipe even when the image check below is
-    // unavailable.
+    // The GUI passes its own PID on the helper command line. This is a consistency check
+    // only: an attacker who starts the helper can put any PID here, so it must never
+    // replace the image check below.
     if expected_pid != 0 && server != expected_pid {
         return Err(ApiError::new(
             "ELEVATION_SERVER",
@@ -453,22 +459,27 @@ fn verify_server(pipe: HANDLE, expected_pid: u32) -> Result<(), ApiError> {
 
     let process = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, server) } {
         Ok(process) => process,
-        // Over-the-shoulder UAC runs the helper as a different administrator account, and
-        // that token can be denied access to the standard user's GUI process. The PID and
-        // session checks still tie the pipe to the GUI that launched us, so treat the
-        // image check as unavailable instead of failing a legitimate elevation.
-        Err(err) if expected_pid != 0 => {
-            log::warn!(
-                target: "flowdir::elevated",
-                "cannot open pipe server {server} for image verification: {err}"
-            );
-            return Ok(());
-        }
-        Err(err) => {
-            return Err(ApiError::new(
-                "ELEVATION_SERVER",
-                format!("server pid {server}: {err}"),
-            ))
+        Err(first) => {
+            // Over-the-shoulder UAC runs the helper as a different administrator account,
+            // and that token can be denied access to the standard user's GUI process.
+            // SeDebugPrivilege bypasses the process DACL, so retrying with it keeps the
+            // image check in place instead of trusting `expected_pid`, which travels on
+            // the attacker-controlled command line.
+            if enable_debug_privilege().is_err() {
+                return Err(ApiError::new(
+                    "ELEVATION_SERVER",
+                    format!("server pid {server}: {first}"),
+                ));
+            }
+            match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, server) } {
+                Ok(process) => process,
+                Err(err) => {
+                    return Err(ApiError::new(
+                        "ELEVATION_SERVER",
+                        format!("server pid {server}: {err}"),
+                    ))
+                }
+            }
         }
     };
     let process = OwnedHandle(process);
@@ -499,6 +510,51 @@ fn verify_server(pipe: HANDLE, expected_pid: u32) -> Result<(), ApiError> {
         return Err(ApiError::new(
             "ELEVATION_SERVER",
             format!("pipe server image {server_image:?} is not {own:?}"),
+        ));
+    }
+    Ok(())
+}
+
+/// Enables `SeDebugPrivilege` for the helper's own token.
+///
+/// An over-the-shoulder elevation runs as a different administrator account, whose token
+/// can be denied access to the standard user's GUI process by its DACL. SeDebugPrivilege
+/// bypasses process access checks, which keeps the image verification working without
+/// trusting the attacker-controlled `--server-pid`.
+fn enable_debug_privilege() -> Result<(), ApiError> {
+    let mut token = HANDLE::default();
+    unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+            &mut token,
+        )
+    }
+    .map_err(|err| ApiError::new("ELEVATION_SERVER", format!("open token: {err}")))?;
+    let token = OwnedHandle(token);
+    let mut luid = LUID::default();
+    unsafe { LookupPrivilegeValueW(PCWSTR::null(), w!("SeDebugPrivilege"), &mut luid) }
+        .map_err(|err| {
+            ApiError::new("ELEVATION_SERVER", format!("lookup SeDebugPrivilege: {err}"))
+        })?;
+    let privileges = TOKEN_PRIVILEGES {
+        PrivilegeCount: 1,
+        Privileges: [LUID_AND_ATTRIBUTES {
+            Luid: luid,
+            Attributes: SE_PRIVILEGE_ENABLED,
+        }],
+    };
+    unsafe {
+        AdjustTokenPrivileges(token.0, false, Some(&privileges), 0, None, None)
+            .map_err(|err| ApiError::new("ELEVATION_SERVER", format!("adjust token: {err}")))?;
+    }
+    // AdjustTokenPrivileges reports success even when the privilege is absent from the
+    // token; only the last error distinguishes that case.
+    let last = unsafe { GetLastError() };
+    if last != ERROR_SUCCESS {
+        return Err(ApiError::new(
+            "ELEVATION_SERVER",
+            format!("SeDebugPrivilege not assigned: {}", last.0),
         ));
     }
     Ok(())

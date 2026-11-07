@@ -71,6 +71,9 @@ export function ComparePanel({
   const [hashProgress, setHashProgress] = useState<CompareHashEvent | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // A partial counts walk still yields usable numbers; keep the table visible and warn
+  // instead of promoting it to the panel-wide error that hides every row.
+  const [countsWarning, setCountsWarning] = useState<string | null>(null)
   const [includeHiddenOn, setIncludeHiddenOn] = useState(includeHidden)
   const [hashOn, setHashOn] = useState(false)
   // `startHash` runs from stale closures (the level loaded before a Refresh, the toggle
@@ -257,7 +260,7 @@ export function ComparePanel({
           countsJob.current = null
           // A partial walk still produced numbers, but they may classify files as
           // one-sided because a subtree could not be read.
-          if (event.error) setError(describeError(t, event.error))
+          setCountsWarning(event.error ? describeError(t, event.error) : null)
           return
         }
         setCounts((prev) => ({ ...prev, [event.name]: event }))
@@ -280,6 +283,7 @@ export function ComparePanel({
       cancelHash()
       setLoading(true)
       setError(null)
+      setCountsWarning(null)
       try {
         const left = rel ? joinPath(active.left, rel) : active.left
         const right = rel ? joinPath(active.right, rel) : active.right
@@ -713,6 +717,11 @@ export function ComparePanel({
           {error && !loading && (
             <div className="m-3 rounded border border-red-300 bg-red-50 p-2 text-[0.6875rem] text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200">
               {t('compare.error')} {error}
+            </div>
+          )}
+          {countsWarning && !loading && (
+            <div className="m-3 rounded border border-amber-300 bg-amber-50 p-2 text-[0.6875rem] text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+              {t('compare.partial')} {countsWarning}
             </div>
           )}
           {!loading && !error && (
