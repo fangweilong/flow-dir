@@ -311,7 +311,9 @@ export function usePaneContextMenus({
       const pane = current.panes[paneId]
       const tab = pane ? current.tabs[pane.activeTabId] : undefined
       if (!pane || !tab) return
-      if (!tab.path || isWebdavPath(tab.path)) {
+      if (!tab.path || isWebdavPath(tab.path) || isInsideArchive(tab.path)) {
+        // Archive-internal paths look like filesystem paths but do not exist on disk; the
+        // shell has no background menu for them, so go straight to the in-app fallback.
         blankFallbackMenu(paneId, point)
         return
       }

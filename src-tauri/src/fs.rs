@@ -155,6 +155,9 @@ fn scan(
     let mut buffer: Vec<u64> = vec![0; 8192];
     let mut entries: Vec<Entry> = Vec::new();
     let mut truncated = false;
+    // A malformed record (possible with a hostile/odd SMB server) ends the scan, but the
+    // listing is then partial and must not be presented as complete.
+    let mut malformed = false;
 
     'scan: loop {
         if cancel.load(Ordering::Relaxed) {
@@ -211,6 +214,7 @@ fn scan(
             // `offset` and `NextEntryOffset` count bytes, `buffer.len()` counts u64 slots.
             let available = (buffer.len() * std::mem::size_of::<u64>()).saturating_sub(offset);
             if available < record_size {
+                malformed = true;
                 break;
             }
             let info = unsafe {
@@ -218,6 +222,7 @@ fn scan(
             };
             let name_len = info.FileNameLength as usize;
             if !name_len.is_multiple_of(2) || name_len > available - name_offset {
+                malformed = true;
                 break;
             }
             let name_ptr =
@@ -260,20 +265,28 @@ fn scan(
             // A record must at least contain its own name, and the next one must start
             // inside the buffer; anything else would loop or read out of bounds.
             if next < name_offset + name_len || next >= available {
+                malformed = true;
                 break;
             }
             // Records are DWORD aligned (`FILE_ID_BOTH_DIR_INFO`), so an odd `next` would
             // hand the next iteration an unaligned `u16` slice and read undefined memory.
             if !next.is_multiple_of(4) {
+                malformed = true;
                 break;
             }
             offset += next;
+        }
+        if malformed {
+            break 'scan;
         }
         // One call per buffer chunk: enough for a progress readout without flooding IPC.
         progress(entries.len());
     }
 
-    Ok(ScanOutcome { entries, truncated })
+    Ok(ScanOutcome {
+        entries,
+        truncated: truncated || malformed,
+    })
 }
 
 /// `ERROR_INVALID_FUNCTION`, `ERROR_NOT_SUPPORTED`, `ERROR_INVALID_PARAMETER` and

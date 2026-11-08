@@ -586,6 +586,9 @@ fn settings_save(
 ) -> Result<Vec<String>, ApiError> {
     let previous = cache.get(&app);
     let settings = settings.normalize();
+    settings::save(&app, &settings)?;
+    // Only after the file is safely written: deleting credentials before a failed save
+    // would permanently lose the passwords of the connections that are still configured.
     // A removed connection must not leave its password behind in Credential Manager.
     for old in &previous.webdav {
         if !settings
@@ -596,7 +599,6 @@ fn settings_save(
             let _ = credentials::delete(&old.id);
         }
     }
-    settings::save(&app, &settings)?;
     crate::logging::set_level(&settings.log_level);
     // Integration switches apply immediately; the returned codes let the frontend toast a
     // hotkey that another program already owns.

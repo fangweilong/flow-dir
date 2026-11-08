@@ -77,8 +77,10 @@ pub fn watch(app: AppHandle) {
             if hidden == parked {
                 continue;
             }
-            parked = hidden;
-            let _ = window.with_webview(move |webview| unsafe {
+            // Only record the new state once the call actually ran. If `with_webview`
+            // fails (window being torn down), leaving `parked` unchanged makes the next
+            // poll retry instead of treating a still-suspended webview as resumed.
+            let applied = window.with_webview(move |webview| unsafe {
                 let controller = webview.controller();
                 let core = controller.CoreWebView2().ok();
                 if hidden {
@@ -99,6 +101,9 @@ pub fn watch(app: AppHandle) {
                     let _ = controller.SetIsVisible(true);
                 }
             });
+            if applied.is_ok() {
+                parked = hidden;
+            }
         }
     });
 }

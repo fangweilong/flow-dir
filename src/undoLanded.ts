@@ -1,3 +1,4 @@
+import { pathKey } from './paths'
 import type { OpFailure } from './types'
 
 /** Fields shared by an operation progress event and the elevated retry report. */
@@ -31,8 +32,8 @@ export function landedIndices(
     return all.filter((index) => !failed.has(index))
   }
   if (report.failedCount === report.failed.length && report.failed.every((failure) => failure.path)) {
-    const failed = new Set(report.failed.map((failure) => failure.path.toLowerCase()))
-    return all.filter((index) => !failed.has(sources[index].toLowerCase()))
+    const failed = new Set(report.failed.map((failure) => pathKey(failure.path)))
+    return all.filter((index) => !failed.has(pathKey(sources[index])))
   }
   return []
 }

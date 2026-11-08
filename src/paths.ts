@@ -10,11 +10,28 @@ export const pathKey = (path: string) => {
   ) {
     return `${WEBDAV_SCHEME}${path.slice(WEBDAV_SCHEME.length).replace(/\/+$/, '')}`
   }
-  return path.toLowerCase()
+  // Keep `C:\` intact but drop separators elsewhere, so `C:\foo\` and `C:\foo` compare
+  // equal in same-folder checks (the address bar can preserve a trailing slash).
+  const trimmed = path.length > 3 ? path.replace(/[\\/]+$/, '') : path
+  return trimmed.toLowerCase()
 }
 
 /** Virtual address scheme for WebDAV servers, e.g. `webdav://nas/photos`. */
 export const WEBDAV_SCHEME = 'webdav://'
+
+let revealSeq = 0
+
+/**
+ * One-shot marker for "scroll this row into view".
+ *
+ * A `PaneView` remembers the last id it handled across tab switches, so the ids must be
+ * unique across every producer (launch request, drag-drop, up-one-level pick); separate
+ * per-hook counters all started at 1 and made a later reveal look already handled.
+ */
+export const nextRevealId = () => {
+  revealSeq += 1
+  return revealSeq
+}
 
 /**
  * Connection names for the breadcrumb. The backend stores the stable id in the tab path,

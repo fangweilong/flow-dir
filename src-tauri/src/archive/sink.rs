@@ -162,6 +162,9 @@ pub struct Sink {
     cancel: Arc<AtomicBool>,
     progress: Progress,
     used: HashSet<String>,
+    /// Next ` (n)` suffix to try per original name. Restarting at 1 for every duplicate
+    /// made a crafted archive with N identical names cost O(N²) lookups.
+    next_suffix: std::collections::HashMap<String, usize>,
     current: Option<String>,
     /// Bytes still allowed to be written; the disk's free space at start, minus a margin.
     budget: u64,
@@ -226,6 +229,7 @@ impl Sink {
                 last: Instant::now(),
             },
             used: HashSet::new(),
+            next_suffix: std::collections::HashMap::new(),
             current: None,
             budget,
             failures: Vec::new(),
@@ -588,17 +592,25 @@ impl Sink {
         if self.used.insert(key.clone()) {
             return rel.to_string();
         }
+        // The extension dot must come after the last separator. Treating `.gitignore` as
+        // ` (1).gitignore` put the counter before the name.
+        let base_start = rel.rfind(['\\', '/']).map(|at| at + 1).unwrap_or(0);
         let (stem, ext) = match rel.rfind('.') {
-            Some(dot) if dot > rel.rfind('\\').unwrap_or(0) => (&rel[..dot], &rel[dot..]),
+            Some(dot) if dot > base_start => (&rel[..dot], &rel[dot..]),
             _ => (rel, ""),
         };
-        for n in 1..10_000 {
+        // Resume from the last suffix used for this name. Every duplicate in a crafted
+        // archive then costs one lookup instead of rescanning 1..n.
+        let mut n = *self.next_suffix.get(&key).unwrap_or(&1);
+        loop {
             let candidate = format!("{stem} ({n}){ext}");
-            if self.used.insert(candidate.to_lowercase()) {
+            let candidate_key = candidate.to_lowercase();
+            if self.used.insert(candidate_key) {
+                self.next_suffix.insert(key, n + 1);
                 return candidate;
             }
+            n += 1;
         }
-        rel.to_string()
     }
 
     fn skip_current(&mut self, err: &ApiError) {

@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import type { GitStatus } from '../types'
-import { EMPTY_GIT } from '../types'
 import type { Settings } from '../persist'
 import type { Workspace } from '../workspace'
 import { gitStatus, treeDirs } from '../api'
@@ -171,7 +170,10 @@ export function useTreeAndGit({
       })
     gitStatus(dir)
       .then(store)
-      .catch(() => store(EMPTY_GIT))
+      // A transient IPC failure must not be cached as "not a repository": doing so hides
+      // every badge until an unrelated action invalidates the cache. Leave the entry
+      // missing so the next effect/invalidation retries.
+      .catch(() => undefined)
       .finally(() => {
         if (gitSeq.current.get(key) === seq) gitPending.current.delete(key)
       })

@@ -16,6 +16,7 @@ use tauri::ipc::Channel;
 
 use crate::error::ApiError;
 use crate::hash::{hash_file, sha256_bytes, Job, Throttle, ToolState};
+use crate::pathkey::path_key;
 
 /// Sample size per end for the quick pre-pass.
 const SAMPLE: u64 = 64 * 1024;
@@ -172,7 +173,30 @@ fn walk(
     started: Instant,
     files: &mut Vec<Candidate>,
 ) {
-    let mut stack: Vec<PathBuf> = roots.iter().map(PathBuf::from).collect();
+    // Overlapping roots (the same folder twice, or a parent plus its child) would scan one
+    // physical file twice and report it as a duplicate of itself.
+    let mut ordered: Vec<(String, PathBuf)> = roots
+        .iter()
+        .map(|root| (path_key(root), PathBuf::from(root)))
+        .collect();
+    // Shortest first, so a parent is always considered before a nested child regardless
+    // of the order the caller supplied.
+    ordered.sort_by(|a, b| a.0.len().cmp(&b.0.len()));
+    let mut kept: Vec<(String, PathBuf)> = Vec::new();
+    for (key, path) in ordered {
+        if kept.iter().any(|(parent, _)| {
+            key == *parent
+                || key
+                    .strip_prefix(parent.as_str())
+                    // A volume root key keeps its trailing separator, so `c:\` must cover
+                    // `c:\users` without adding a second backslash.
+                    .is_some_and(|rest| rest.starts_with('\\') || parent.ends_with('\\'))
+        }) {
+            continue;
+        }
+        kept.push((key, path));
+    }
+    let mut stack: Vec<PathBuf> = kept.into_iter().map(|(_, path)| path).collect();
     let mut last = Instant::now();
     while let Some(dir) = stack.pop() {
         if job.wait_if_paused() {

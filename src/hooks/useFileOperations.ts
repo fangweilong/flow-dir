@@ -7,7 +7,7 @@ import type { Translate } from '../i18n'
 import type { SyncAction } from '../ComparePanel'
 import { notifyOp, opRetryElevated, opStart, pathsExist, restoreRecycle } from '../api'
 import { errorCode } from '../errorCode'
-import { joinPath, parentPath } from '../paths'
+import { joinPath, parentPath, pathKey } from '../paths'
 import { protectionError, protectWord } from '../protection'
 import type { ProtectPromptState } from '../protection'
 import { undoEntryFor, UNDO_LIMIT } from '../undo'
@@ -29,7 +29,9 @@ function landedMap(items: LandedItem[] | undefined, list: readonly string[]) {
   const map = new Map<string, string>()
   for (const item of items ?? []) {
     const source = list[item.index]
-    if (source) map.set(source.toLowerCase(), item.path)
+    // `pathKey` keeps WebDAV paths case-sensitive; a plain lowercase would merge
+    // `Report.txt` and `report.txt` into one undo entry.
+    if (source) map.set(pathKey(source), item.path)
   }
   return map
 }
@@ -42,6 +44,8 @@ export type RunOpOptions = {
   overwrite?: boolean
   /** Paths the user already confirmed for the `protect_confirm` tier. */
   confirmedProtected?: string[]
+  /** Actual destinations the shell reported (keyed by source), for redo bookkeeping. */
+  onLanded?: (landed: ReadonlyMap<string, string>) => void
   after?: () => void
   record?: boolean
   dirsAfter?: string[]
@@ -264,10 +268,12 @@ export function useFileOperations({
               drop(denied ? 600_000 : 15000)
               return
             }
+            const landed = landedMap(progress.landed, sources)
+            options?.onLanded?.(landed)
             recordEntry(
               undoEntryFor(kind, sources, {
                 ...options,
-                landed: landedMap(progress.landed, sources),
+                landed,
               }),
               options?.dirsAfter ?? [],
             )
@@ -644,6 +650,11 @@ export function useFileOperations({
         while (redoStack.current.length > undoLimit()) redoStack.current.shift()
         setHistoryEpoch((epoch) => epoch + 1)
       })
+      .catch((err: unknown) => {
+        // `applyUndo` awaits IPC (`pathsExist`); a rejection would otherwise leave the
+        // user with no feedback and the entry silently stuck on the stack.
+        showToast(t('op.failed', { code: t(errorKey(errorCode(err))) }))
+      })
       .finally(() => {
         undoBusy.current = false
       })
@@ -657,27 +668,48 @@ export function useFileOperations({
       return
     }
     const { request } = entry
+    // Redo used to invalidate only `entry.dirs`, which no caller ever fills. Derive the
+    // affected folders from the replayed request instead, so the tree/git badges refresh
+    // even when the target is not an open pane.
+    const dirs = new Set<string>(entry.dirs)
+    for (const source of request.sources) dirs.add(parentPath(source))
+    if (request.targetDir) dirs.add(request.targetDir)
     const afterDirs = () => {
-      for (const dir of new Set(entry.dirs)) {
+      for (const dir of dirs) {
         invalidateTree(dir)
         invalidateGit(dir)
       }
     }
+    let landed: ReadonlyMap<string, string> = new Map()
     undoBusy.current = true
     void runStep(request.kind, request.sources, {
       targetDir: request.targetDir,
       newName: request.newName,
       newNames: request.newNames,
+      permanent: request.permanent,
       overwrite: request.overwrite,
       confirmedProtected: request.confirmedProtected,
       after: afterDirs,
+      onLanded: (map) => {
+        landed = map
+      },
     })
       .then((ok: boolean) => {
         if (!ok) return
         const at = redoStack.current.lastIndexOf(entry)
         if (at < 0) return
         redoStack.current.splice(at, 1)
-        undoStack.current.push(entry)
+        // The replay may have landed under a different name ("keep both"). Re-arm the
+        // entry with what actually landed so the next Ctrl+Z never targets a path the
+        // redo did not create.
+        const updated = undoEntryFor(request.kind, request.sources, {
+          targetDir: request.targetDir,
+          newName: request.newName,
+          newNames: request.newNames,
+          permanent: request.permanent,
+          landed,
+        })
+        undoStack.current.push(updated ? { ...entry, ...updated } : entry)
         while (undoStack.current.length > undoLimit()) undoStack.current.shift()
         setHistoryEpoch((epoch) => epoch + 1)
       })
@@ -707,11 +739,13 @@ export function useFileOperations({
           while (redoStack.current.length > undoLimit()) redoStack.current.shift()
         }
         setHistoryEpoch((epoch) => epoch + 1)
+      } catch (err: unknown) {
+        showToast(t('op.failed', { code: t(errorKey(errorCode(err))) }))
       } finally {
         undoBusy.current = false
       }
     },
-    [applyUndo, undoLimit],
+    [applyUndo, showToast, t, undoLimit],
   )
 
   return {

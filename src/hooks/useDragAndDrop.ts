@@ -21,6 +21,7 @@ import {
   isShellPath,
   isWebdavPath,
   joinPath,
+  nextRevealId,
   parentPath,
   pathKey,
   sameVolume,
@@ -102,7 +103,6 @@ export function useDragAndDrop({
   }, [])
 
   const [pendingDrop, setPendingDrop] = useState<{ tabId: string; names: string[] } | null>(null)
-  const revealSeq = useRef(0)
   const elevated = useRef<boolean | null>(null)
   const warnedElevated = useRef(false)
 
@@ -119,12 +119,11 @@ export function useDragAndDrop({
       .map((entry) => entry.name)
     if (!landed.length) return
     setPendingDrop(null)
-    revealSeq.current += 1
     update(pendingDrop.tabId, (data) => ({
       ...data,
       selected: new Set(landed),
       anchor: landed[0],
-      reveal: { name: landed[0], id: revealSeq.current },
+      reveal: { name: landed[0], id: nextRevealId() },
     }))
   }, [listData, pendingDrop, update])
 

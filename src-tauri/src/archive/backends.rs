@@ -446,6 +446,10 @@ fn rar_error(err: unrar_rs::RarError, had_password: bool) -> ApiError {
     }
 }
 
+/// A crafted image can nest directories arbitrarily deep. Recursive traversal would
+/// overflow the worker stack, which Rust cannot catch, before any size limit applies.
+const MAX_ISO_DEPTH: usize = 512;
+
 /// ISO/UDF images are parsed into a tree first: the format has no random access cost and
 /// the tree gives both the totals and the extraction order.
 fn extract_iso(path: &str, sink: &mut Sink) -> Result<(), ApiError> {
@@ -455,16 +459,23 @@ fn extract_iso(path: &str, sink: &mut Sink) -> Result<(), ApiError> {
     let (entries, bytes) = iso_totals(&root);
     sink.set_totals(Some(entries), Some(bytes))?;
     sink.progress_phase("extract");
-    extract_iso_dir(&mut file, root, "", sink)
+    extract_iso_dir(&mut file, root, "", sink, 0)
 }
 
 fn iso_totals(node: &isomage::TreeNode) -> (u32, u64) {
+    iso_totals_at(node, 0)
+}
+
+fn iso_totals_at(node: &isomage::TreeNode, depth: usize) -> (u32, u64) {
+    if depth > MAX_ISO_DEPTH {
+        return (0, 0);
+    }
     let mut entries = 0u32;
     let mut bytes = 0u64;
     for child in &node.children {
         entries += 1;
         if child.is_directory {
-            let (nested_entries, nested_bytes) = iso_totals(child);
+            let (nested_entries, nested_bytes) = iso_totals_at(child, depth + 1);
             entries += nested_entries;
             bytes += nested_bytes;
         } else {
@@ -479,7 +490,11 @@ fn extract_iso_dir(
     node: isomage::TreeNode,
     prefix: &str,
     sink: &mut Sink,
+    depth: usize,
 ) -> Result<(), ApiError> {
+    if depth > MAX_ISO_DEPTH {
+        return Err(ApiError::new("ARCHIVE", "ISO directory nesting is too deep"));
+    }
     for child in &node.children {
         if sink.cancelled() {
             return Err(ApiError::new("CANCELED", "extraction canceled"));
@@ -498,7 +513,7 @@ fn extract_iso_dir(
         };
         if child.is_directory {
             sink.accept(&rel, true, false)?;
-            extract_iso_dir(file, child.clone(), &raw, sink)?;
+            extract_iso_dir(file, child.clone(), &raw, sink, depth + 1)?;
         } else if let Take::File(target) = sink.accept(&rel, false, false)? {
             let size = child.size;
             sink.write_with(&target, size, |writer| {
@@ -855,7 +870,9 @@ fn list_with_truncated_impl(
                 continue;
             };
             let is_dir = item.header().entry_type().is_dir();
-            let mtime = item.header().mtime().unwrap_or(0) * 1000;
+            // GNU base-256 tar headers can encode the full u64 range; an unchecked
+            // multiply panics in debug builds on a crafted member.
+            let mtime = item.header().mtime().unwrap_or(0).saturating_mul(1000);
             entries.push(ArchiveEntry {
                 name,
                 size: if is_dir { 0 } else { item.header().size().unwrap_or(0) },
@@ -1306,7 +1323,7 @@ pub fn extract_single(
             let mut file = File::open(archive).map_err(|err| ApiError::from_io(archive, &err))?;
             let root = isomage::detect_and_parse_filesystem(&mut file, name_of(archive))
                 .map_err(|err| ApiError::new("ARCHIVE", err.to_string()))?;
-            if extract_iso_single(&mut file, &root, "", inner_norm, dest, limit)? {
+            if extract_iso_single(&mut file, &root, "", inner_norm, dest, limit, 0)? {
                 return Ok(());
             }
             Err(ApiError::new("NOT_FOUND", inner))
@@ -1322,7 +1339,11 @@ fn extract_iso_single(
     target: &str,
     dest: &std::path::Path,
     limit: Option<u64>,
+    depth: usize,
 ) -> Result<bool, ApiError> {
+    if depth > MAX_ISO_DEPTH {
+        return Err(ApiError::new("ARCHIVE", "ISO directory nesting is too deep"));
+    }
     for child in &node.children {
         let raw = if prefix.is_empty() {
             child.name.clone()
@@ -1331,7 +1352,7 @@ fn extract_iso_single(
         };
         if let Ok(name) = entry::decode(raw.as_bytes(), true) {
             if child.is_directory {
-                if extract_iso_single(file, child, &raw, target, dest, limit)? {
+                if extract_iso_single(file, child, &raw, target, dest, limit, depth + 1)? {
                     return Ok(true);
                 }
             } else if name.eq_ignore_ascii_case(target) {

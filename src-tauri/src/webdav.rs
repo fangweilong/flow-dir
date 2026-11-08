@@ -173,7 +173,9 @@ pub fn tree_dirs(
 ) -> Result<ScanOutcome, ApiError> {
     let mut outcome = list(settings, path, false, cancel)?;
     outcome.entries.retain(|entry| entry.is_dir());
-    let truncated = outcome.entries.len() > limit;
+    // `list` may already have hit its own entry ceiling; keep that flag instead of
+    // replacing it with a check that only sees the (possibly filtered) remainder.
+    let truncated = outcome.truncated || outcome.entries.len() > limit;
     outcome.entries.truncate(limit);
     outcome.truncated = truncated;
     Ok(outcome)
@@ -327,12 +329,22 @@ pub fn ensure_local(
         });
     }
     // A failed download must not leave a partial file that a later preview mistakes for
-    // a complete one; only a successful transfer reaches the rename.
-    if target.exists() {
-        let _ = std::fs::remove_file(&target);
-    }
+    // a complete one; only a successful transfer reaches the rename. `fs::rename` replaces
+    // an existing file on Windows, so the old target is never removed first: another
+    // caller that already returned this path must not transiently see it missing.
     std::fs::rename(&temp, &target).map_err(|e| ApiError::from_io(path, &e))?;
-    let _ = std::fs::write(&stamp, signature);
+    // Write the stamp through a temp file: a concurrent reader must not see a half-written
+    // signature and trigger a needless re-download of the file that was just materialised.
+    let stamp_temp = folder.join(format!(
+        "{hash}.stamp.{}.{}.tmp",
+        std::process::id(),
+        TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    if std::fs::write(&stamp_temp, signature).is_ok() {
+        let _ = std::fs::rename(&stamp_temp, &stamp);
+    } else {
+        let _ = std::fs::remove_file(&stamp_temp);
+    }
     Ok(target)
 }
 
@@ -407,6 +419,12 @@ fn redact_userinfo(url: &str) -> String {
         // would leak the credential the redaction exists to hide.
         return "<invalid url>".to_string();
     };
+    // `user:password@https://host` is not a valid URL but would otherwise survive: the
+    // scheme marker is found, and the credentials sit before it rather than in the
+    // authority. Never echo a string whose pre-scheme part could be a credential.
+    if url[..scheme_end].contains('@') {
+        return "<invalid url>".to_string();
+    }
     let rest = &url[scheme_end + 3..];
     let authority_end = rest
         .find(['/', '?', '#'])
@@ -1191,18 +1209,28 @@ fn response_header(handle: &Handle, query: u32) -> Option<String> {
 }
 
 fn pick_scheme(challenge: &str) -> Option<WINHTTP_CREDS_AUTHSCHEME> {
-    let lower = challenge.to_ascii_lowercase();
+    // Only the first token of each comma-separated challenge is a scheme name. A plain
+    // substring search picked NTLM from `Basic realm="NTLM users"`, configured the wrong
+    // scheme and failed an otherwise valid login.
+    let schemes: Vec<String> = challenge
+        .split(',')
+        .filter_map(|part| {
+            let part = part.trim_start();
+            let end = part.find(char::is_whitespace).unwrap_or(part.len());
+            (end > 0).then(|| part[..end].to_ascii_lowercase())
+        })
+        .collect();
     // Security order: Digest never puts the password on the wire; NTLM/Negotiate are
     // preferable to Basic when the server offers both.
-    if lower.contains("digest") {
+    if schemes.iter().any(|scheme| scheme == "digest") {
         // The metadata declares only this scheme as a bare `u32`; wrap it so the return
         // type stays consistent with the other constants.
         Some(WINHTTP_CREDS_AUTHSCHEME(WINHTTP_AUTH_SCHEME_DIGEST))
-    } else if lower.contains("ntlm") {
+    } else if schemes.iter().any(|scheme| scheme == "ntlm") {
         Some(WINHTTP_AUTH_SCHEME_NTLM)
-    } else if lower.contains("negotiate") {
+    } else if schemes.iter().any(|scheme| scheme == "negotiate") {
         Some(WINHTTP_AUTH_SCHEME_NEGOTIATE)
-    } else if lower.contains("basic") {
+    } else if schemes.iter().any(|scheme| scheme == "basic") {
         Some(WINHTTP_AUTH_SCHEME_BASIC)
     } else {
         None

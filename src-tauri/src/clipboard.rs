@@ -65,11 +65,14 @@ pub fn copy_paths(paths: &[String], cut: bool) -> Result<(), ApiError> {
         .collect();
     let has_remote = local.len() != paths.len();
 
+    // Hold the internal lock across the clipboard write. Otherwise a concurrent paste can
+    // observe the new `CF_HDROP` (local subset only) before the full mixed selection is
+    // stored and silently drop the WebDAV items.
     // `write_os_paths` captures the sequence after the clipboard is closed; `read_paths`
     // compares it with the current number to decide whether the internal selection is
     // still current.
-    let sequence = write_os_paths(&local, cut)?;
     let mut internal = INTERNAL.lock().unwrap();
+    let sequence = write_os_paths(&local, cut)?;
     if has_remote {
         *internal = Some(InternalClip {
             clip: Clip {

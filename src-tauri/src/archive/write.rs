@@ -356,6 +356,9 @@ fn collect(
         .collect();
     let mut sources = Vec::new();
     let mut seen_dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // A file selected twice (directly and through an overlapping folder) must not become
+    // two archive members with the same name.
+    let mut seen_files: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut roots: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
     roots.sort();
     for root in roots {
@@ -446,6 +449,9 @@ fn collect(
                 children.sort_by(|a, b| b.1.cmp(&a.1));
                 stack.extend(children);
             } else {
+                if !seen_files.insert(disk.to_string_lossy().to_lowercase()) {
+                    continue;
+                }
                 sources.push(Source {
                     disk,
                     name,

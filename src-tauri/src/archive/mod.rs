@@ -268,10 +268,16 @@ fn validate_inner_path(inner: &str) -> Result<(), ApiError> {
     if inner.is_empty() || inner.starts_with(['\\', '/']) || inner.contains(':') {
         return Err(ApiError::new("INVALID_PATH", inner));
     }
-    if inner
-        .split(['\\', '/'])
-        .any(|part| part.is_empty() || part == "." || part == "..")
-    {
+    if inner.split(['\\', '/']).any(|part| {
+        part.is_empty()
+            || part == "."
+            || part == ".."
+            // Win32 strips trailing dots/spaces from every component, so `.. ` resolves
+            // to `..` and `name.` aliases `name`. Reject rather than resolve a path the
+            // caller did not spell (this string crosses IPC and is joined under the cache).
+            || part.ends_with([' ', '.'])
+            || part.chars().any(char::is_control)
+    }) {
         return Err(ApiError::new("INVALID_PATH", inner));
     }
     Ok(())
@@ -585,6 +591,18 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Channel::new(|_| Ok(())),
         )
+    }
+
+    #[test]
+    fn inner_paths_cannot_use_win32_aliases() {
+        // Win32 trims trailing dots/spaces per component, so these would resolve outside
+        // the cache root (`.. ` becomes `..`).
+        for inner in [".. ", "a/.. ", "a./b", "a /b", "a/...", "a/\u{1}b"] {
+            assert!(validate_inner_path(inner).is_err(), "{inner:?}");
+        }
+        for inner in ["a/b.txt", "a/.gitignore", "dir name/file"] {
+            assert!(validate_inner_path(inner).is_ok(), "{inner:?}");
+        }
     }
 
     #[test]

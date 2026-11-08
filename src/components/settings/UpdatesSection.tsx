@@ -59,7 +59,8 @@ export function UpdatesSection({ settings, info, lang, onChange, t, visible }: U
 
   useEffect(() => {
     let disposed = false
-    let unlisten: (() => void) | undefined
+    let unlistenProgress: (() => void) | undefined
+    let unlistenUpdate: (() => void) | undefined
     void listen<UpdateProgress>('flowdir:update-progress', (event) => {
       setUpdateProgress(event.payload)
       if (event.payload.phase === 'ready') {
@@ -72,11 +73,19 @@ export function UpdatesSection({ settings, info, lang, onChange, t, visible }: U
       // The settings panel can close before `listen` resolves; the handler then keeps a
       // dead component subscribed unless it is released here.
       if (disposed) fn()
-      else unlisten = fn
+      else unlistenProgress = fn
+    })
+    // The background checker announces releases it finds on this channel. Without it a
+    // page that was already open when the check finished kept showing the old cached
+    // status (and no install button) until the user pressed the manual check button.
+    void listen<UpdateStatus>('flowdir:update', (event) => setUpdate(event.payload)).then((fn) => {
+      if (disposed) fn()
+      else unlistenUpdate = fn
     })
     return () => {
       disposed = true
-      if (unlisten) unlisten()
+      unlistenProgress?.()
+      unlistenUpdate?.()
     }
   }, [])
 

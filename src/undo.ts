@@ -1,4 +1,4 @@
-import { baseName, joinPath } from './paths'
+import { baseName, joinPath, pathKey } from './paths'
 import type { OpKind } from './types'
 
 export type RenameMove = { path: string; oldName: string; newName: string }
@@ -55,13 +55,15 @@ export function undoEntryFor(
   },
 ): UndoPayload | null {
   if (!sources.length) return null
-  const skip = new Set((options?.skip ?? []).map((path) => path.toLowerCase()))
+  // `pathKey` folds local paths but keeps WebDAV case, where `Report.txt` and
+  // `report.txt` are distinct files.
+  const skip = new Set((options?.skip ?? []).map((path) => pathKey(path)))
   // The shell may have resolved a name conflict with "keep both"; undo/redo must use the
   // file it actually created, not the requested name that already belonged to someone else.
-  const landing = (path: string) => options?.landed?.get(path.toLowerCase())
+  const landing = (path: string) => options?.landed?.get(pathKey(path))
   const kept = sources
     .map((path, index) => ({ path, index }))
-    .filter((item) => !skip.has(item.path.toLowerCase()))
+    .filter((item) => !skip.has(pathKey(item.path)))
   if (!kept.length) return null
   const paths = kept.map((item) => item.path)
   if (kind === 'rename') {

@@ -15,7 +15,15 @@ import type { SortItem } from '../api'
 import { EMPTY_LIST, emptyList } from '../types'
 import type { Drive, Entry, GitStatus, ListData, SortState } from '../types'
 import type { Settings } from '../persist'
-import { baseName, isDir, isFsPath, markVirtualRoot, parentPath, pathKey } from '../paths'
+import {
+  baseName,
+  isDir,
+  isFsPath,
+  markVirtualRoot,
+  nextRevealId,
+  parentPath,
+  pathKey,
+} from '../paths'
 import { pushHistory, samePath, stepHistory } from '../workspace'
 import type { ViewMode, Workspace } from '../workspace'
 
@@ -86,8 +94,6 @@ export function useDirectoryScanner({
   // Row the destination listing must select because the move went one level up; the
   // folder being left is the one the user expects to see highlighted.
   const pendingPick = useRef(new Map<string, string>())
-  /** Makes each pick's scroll request one-shot. */
-  const pickSeq = useRef(0)
 
   useEffect(() => {
     listDataRef.current = listData
@@ -166,7 +172,7 @@ export function useDirectoryScanner({
         const wanted = pendingPick.current.get(tabId)
         const picked = wanted ? acc.find((entry) => entry.name.toLowerCase() === wanted) : undefined
         const reveal = picked
-          ? { name: picked.name, id: (pickSeq.current += 1) }
+          ? { name: picked.name, id: nextRevealId() }
           : undefined
         if (picked) pendingPick.current.delete(tabId)
         setListData((prev) => {
@@ -185,7 +191,12 @@ export function useDirectoryScanner({
               },
             }
           }
-          if (!old.loading && sameEntries(old.entries, acc) && old.truncated === batch.truncated) {
+          if (
+            !old.loading &&
+            !old.error &&
+            sameEntries(old.entries, acc) &&
+            old.truncated === batch.truncated
+          ) {
             return prev
           }
           const names = new Set(acc.map((entry) => entry.name))

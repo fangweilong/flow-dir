@@ -14,6 +14,7 @@ import {
   joinPath,
   markVirtualRoot,
   parentPath,
+  pathKey,
   pathLabel,
   resolveAddress,
   sameVolume,
@@ -26,6 +27,20 @@ import {
 
 beforeEach(() => {
   setWebdavConnections([])
+})
+
+describe('pathKey', () => {
+  it('drops trailing separators for local paths but keeps drive roots', () => {
+    expect(pathKey('C:\\Work\\')).toBe('c:\\work')
+    expect(pathKey('C:\\Work')).toBe('c:\\work')
+    expect(pathKey('C:\\')).toBe('c:\\')
+    expect(pathKey('\\\\server\\share\\')).toBe('\\\\server\\share')
+  })
+
+  it('keeps WebDAV case and drops only trailing slashes', () => {
+    expect(pathKey('webdav://nas/Photos/')).toBe('webdav://nas/Photos')
+    expect(pathKey('webdav://nas/Photos')).not.toBe(pathKey('webdav://nas/photos'))
+  })
 })
 
 describe('joinPath / parentPath / baseName', () => {

@@ -49,15 +49,27 @@ pub fn check(
     let mut pending = Vec::new();
 
     for source in sources {
-        // Virtual addresses are not filesystem paths: `webdav://` and shell namespace
-        // folders are validated by their own runners (`webdav_ops` rejects unsafe child
-        // names), and no local protection rule can describe them.
-        if crate::webdav::is_webdav(source) || crate::shellfs::is_shell_path(source) {
+        // `webdav://` is not a filesystem path: its runner (`webdav_ops`) rejects unsafe
+        // child names, and no local protection rule can describe it.
+        if crate::webdav::is_webdav(source) {
             continue;
         }
+        // Shell parsing names are not always virtual: `shell:Startup` resolves to a real
+        // folder, and skipping it entirely let a delete bypass every rule. Resolve to the
+        // filesystem path when there is one; namespace-only items (recycle bin) have none
+        // and keep their old behaviour.
+        let resolved = if crate::shellfs::is_shell_path(source) {
+            match crate::shellfs::filesystem_path(source) {
+                Some(path) => Some(path),
+                None => continue,
+            }
+        } else {
+            None
+        };
+        let candidate = resolved.as_deref().unwrap_or(source);
         // Fail closed: a spelling that does not resolve to a filesystem location cannot be
         // proven safe, and silently skipping it was a bypass (relative paths, `...`).
-        let Some(source_key) = key(source) else {
+        let Some(source_key) = key(candidate) else {
             refused.push(source.clone());
             continue;
         };
@@ -175,7 +187,10 @@ pub fn key(raw: &str) -> Option<String> {
     // Expand 8.3 aliases (`PROGRA~1`) before lowercasing; otherwise a short spelling
     // reaches the same folder while bypassing the rule.
     let out = resolve_short_name(&out).unwrap_or(out);
-    Some(out.to_ascii_lowercase())
+    // NTFS compares case-insensitively across the whole Unicode range, so ASCII-only
+    // folding let a rule spelled with different non-ASCII casing (`Иван` vs `иван`) miss
+    // the same folder.
+    Some(out.to_lowercase())
 }
 
 /// `GetLongPathNameW` for paths that may contain an 8.3 component.
@@ -285,6 +300,18 @@ mod tests {
         assert!(check(&sources(&["::20D04FE0-3AEA-1069-A2D8-08002B30309D"]), &rules, &[]).is_ok());
         // A relative path is still refused.
         assert!(check(&sources(&["..\\Windows"]), &rules, &[]).is_err());
+    }
+
+    #[test]
+    fn shell_aliases_are_checked_against_the_folder_they_name() {
+        // `shell:Startup` resolves to a real folder; deleting it must hit the same rule
+        // as the filesystem spelling. Skip when the test host cannot resolve the alias.
+        let Some(startup) = crate::shellfs::filesystem_path("shell:Startup") else {
+            return;
+        };
+        let rules = protection(&[&startup], &[]);
+        let error = check(&sources(&["shell:Startup"]), &rules, &[]).unwrap_err();
+        assert_eq!(error.code, "PROTECTED");
     }
 
     #[test]

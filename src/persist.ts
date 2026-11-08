@@ -261,7 +261,22 @@ export function fromSnapshot(value: unknown): Workspace | null {
   if (!panes || typeof panes !== 'object' || !tabs || typeof tabs !== 'object') return null
   if (!isNode(snapshot.root, panes as Record<string, unknown>)) return null
 
-  const paneMap = panes as Record<string, PaneState>
+  // A pane record the split tree does not reference is invisible to the user but would
+  // still be accepted as the active pane (and drive keyboard/preview/refresh). Drop it
+  // before validating, so junk in an unused record cannot block the real layout either.
+  const livePaneIds = new Set<string>()
+  const collectPanes = (node: Node) => {
+    if (node.t === 'pane') {
+      livePaneIds.add(node.id)
+      return
+    }
+    collectPanes(node.a)
+    collectPanes(node.b)
+  }
+  collectPanes(snapshot.root as Node)
+  const paneMap = Object.fromEntries(
+    Object.entries(panes as Record<string, PaneState>).filter(([id]) => livePaneIds.has(id)),
+  )
   const tabMap = tabs as Record<string, TabState>
   for (const pane of Object.values(paneMap)) {
     // `layout.json` is user-editable data; a `null` member must reject the snapshot, not

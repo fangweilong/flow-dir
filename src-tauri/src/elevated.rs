@@ -29,6 +29,7 @@ use windows::Win32::Security::{
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED,
     FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
+    SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
 };
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows::Win32::System::Pipes::{
@@ -148,6 +149,16 @@ fn helper_body(
     cancel_event: Option<&str>,
     server_pid: u32,
 ) -> Result<ops::ElevatedReport, ApiError> {
+    // The helper runs elevated and its arguments are attacker-controlled. Restricting the
+    // name to a local pipe keeps a forged `--elevated-op` from making the elevated process
+    // open a UNC file/device (`\\attacker\share\x`), which would leak NTLM credentials
+    // before `verify_server` ever runs.
+    if !is_local_pipe_name(pipe_name) {
+        return Err(ApiError::new(
+            "BAD_ARGS",
+            "elevated pipe must be a local named pipe",
+        ));
+    }
     let pipe = open_client(pipe_name)?;
     // The pipe decides which operations this process runs with an elevated token, so the
     // peer is checked before a single byte is read.
@@ -405,6 +416,13 @@ fn verify_client(pipe: HANDLE, child: HANDLE) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// `\\.\pipe\<name>` only; UNC and device spellings are rejected.
+fn is_local_pipe_name(name: &str) -> bool {
+    name.get(..9)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(r"\\.\pipe\"))
+        && name.len() > 9
+}
+
 fn open_client(name: &str) -> Result<OwnedHandle, ApiError> {
     let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
     let handle = unsafe {
@@ -414,7 +432,11 @@ fn open_client(name: &str) -> Result<OwnedHandle, ApiError> {
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             None,
             OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
+            // Identification level: the pipe server may learn who the client is but cannot
+            // impersonate the elevated helper's token. Without it the default is
+            // impersonation, so a hostile server could steal the elevated token during
+            // `CreateFileW`, before `verify_server` has a chance to run.
+            FILE_ATTRIBUTE_NORMAL | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
             None,
         )
     }

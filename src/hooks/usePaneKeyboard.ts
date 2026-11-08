@@ -358,9 +358,12 @@ export function usePaneKeyboard({
         const entry = view[cursorIndex()]
         const name = entry?.name
         const row = name ? sectionRef.current?.querySelector<HTMLElement>(`[data-row="${CSS.escape(name)}"]`) : null
-        if (entry && row) {
+        // The cursor row may be virtualized out of the DOM. It still exists in `view`, so
+        // fall back to the viewport rect instead of clearing the selection and opening the
+        // folder background menu.
+        const rect = row?.getBoundingClientRect() ?? scrollRef.current?.getBoundingClientRect()
+        if (entry && rect) {
           ev.preventDefault()
-          const rect = row.getBoundingClientRect()
           onRowContextMenu(entry, {
             clientX: rect.left + 40,
             clientY: rect.top + 8,
@@ -422,7 +425,10 @@ export function usePaneKeyboard({
         return
       }
 
-      if (matchBinding(ev, keys.cyclePane) || (ev.key === 'Tab' && !ev.ctrlKey && !ev.altKey && !ev.metaKey)) {
+      if (
+        matchBinding(ev, keys.cyclePane) ||
+        (ev.key === 'Tab' && !ev.shiftKey && !ev.ctrlKey && !ev.altKey && !ev.metaKey)
+      ) {
         ev.preventDefault()
         onCyclePane?.()
         return
@@ -434,6 +440,7 @@ export function usePaneKeyboard({
       keys,
       visibleSelected,
       view,
+      columns,
       anchorIdx,
       cursorIndex,
       disabled,

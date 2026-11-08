@@ -36,7 +36,7 @@ import { makeT, setUiLanguage } from './i18n'
 import type { Translate } from './i18n'
 import { DEFAULT_SETTINGS } from './persist'
 import type { Settings } from './persist'
-import { isDir, joinPath, setWebdavConnections } from './paths'
+import { isDir, joinPath, nextRevealId, setWebdavConnections } from './paths'
 import { formatBinding, resolveShortcuts } from './shortcuts'
 
 // Non-first-paint surfaces stay out of the main chunk: preview, search and the operation
@@ -237,7 +237,6 @@ export default function App() {
 
   // "Open with FlowDir" and `flowdir <path>` ask for one row to be selected. The request
   // is only usable once the folder has finished listing, so it waits here.
-  const revealSeq = useRef(0)
   useEffect(() => {
     const pending = pendingSelect.current
     if (!pending) return
@@ -250,12 +249,11 @@ export default function App() {
     )
     if (!match) return
     const name = match.name
-    revealSeq.current += 1
     update(pending.tabId, (d) => ({
       ...d,
       selected: new Set([name]),
       anchor: name,
-      reveal: { name, id: revealSeq.current },
+      reveal: { name, id: nextRevealId() },
     }))
   }, [listData, pendingSelect, pendingSelectTick, update])
 

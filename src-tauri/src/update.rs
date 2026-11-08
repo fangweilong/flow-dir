@@ -369,7 +369,9 @@ fn install_inner<R: Runtime>(app: &AppHandle<R>) -> Result<(), ApiError> {
         Flavor::Portable => &manifest.portable,
         Flavor::Installer => &manifest.installer,
     };
-    let dir = std::env::temp_dir().join(format!("FlowDir-update-{}", random_hex()));
+    let nonce = random_hex()
+        .ok_or_else(|| ApiError::new("UPDATE_IO", "secure random source unavailable"))?;
+    let dir = std::env::temp_dir().join(format!("FlowDir-update-{nonce}"));
     fs::create_dir_all(&dir).map_err(|e| ApiError::new("UPDATE_IO", e.to_string()))?;
     let downloaded = dir.join(&asset.name);
     download(app, &slug, asset, &downloaded)?;
@@ -960,6 +962,9 @@ fn http_get(host: &str, path: &str) -> Result<Vec<u8>, ApiError> {
 
         let mut out = Vec::new();
         let mut buffer = vec![0u8; 64 * 1024];
+        // Manifests and history are small JSON documents; a hostile/broken endpoint must
+        // not be able to exhaust memory before the body is validated.
+        const MAX_RESPONSE: usize = 16 * 1024 * 1024;
         loop {
             let mut read = 0u32;
             WinHttpReadData(
@@ -973,6 +978,9 @@ fn http_get(host: &str, path: &str) -> Result<Vec<u8>, ApiError> {
                 break;
             }
             out.extend_from_slice(&buffer[..read as usize]);
+            if out.len() > MAX_RESPONSE {
+                return Err(ApiError::new("UPDATE_HTTP", "response body is too large"));
+            }
         }
         Ok(out)
     }
@@ -1011,8 +1019,18 @@ fn validate_download_url(url: &str) -> Result<(), ApiError> {
             format!("refusing non-https download: {url}"),
         ));
     };
-    let host = rest
-        .split(['/', ':'])
+    // Take the whole authority, not the text before the first `:`: in
+    // `https://github.com:pass@evil.example/x` the "host" would otherwise read as
+    // `github.com` while the connection target is `evil.example`.
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.contains('@') {
+        return Err(ApiError::new(
+            "UPDATE_HOST",
+            "refusing download URL with userinfo",
+        ));
+    }
+    let host = authority
+        .split(':')
         .next()
         .unwrap_or("")
         .to_ascii_lowercase();
@@ -1029,16 +1047,15 @@ fn validate_download_url(url: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn random_hex() -> String {
+/// 128-bit random hex, or `None` when the system RNG is unavailable. Falling back to a
+/// fixed value would make the staging directory name predictable.
+fn random_hex() -> Option<String> {
     let mut bytes = [0u8; 16];
-    unsafe {
-        let _ = BCryptGenRandom(
-            None,
-            &mut bytes,
-            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
-        );
+    let generated = unsafe { BCryptGenRandom(None, &mut bytes, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
+    if generated.is_err() {
+        return None;
     }
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    Some(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -1194,6 +1211,11 @@ mod tests {
         assert!(validate_download_url("http://github.com/o/r").is_err());
         assert!(validate_download_url("https://evil.example.com/x").is_err());
         assert!(validate_download_url("https://github.com.evil.example/x").is_err());
+        // Userinfo must not smuggle another connection target past the host check.
+        assert!(validate_download_url("https://github.com:pass@evil.example/x").is_err());
+        assert!(validate_download_url("https://user@evil.example/o/r").is_err());
+        // A port after the allowed host is still fine.
+        assert!(validate_download_url("https://github.com:443/o/r").is_ok());
     }
 
     #[test]

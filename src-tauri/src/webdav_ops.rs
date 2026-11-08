@@ -1094,6 +1094,16 @@ fn safe_local_name(name: &str) -> Result<&str, ApiError> {
     if name.ends_with([' ', '.']) || name.contains(':') {
         return Err(ApiError::new("UNSAFE_PATH", name.to_string()));
     }
+    // `CON`, `NUL`, `COM1`, … name devices even with an extension (`NUL.txt`). Writing to
+    // such a path silently targets the device instead of the downloaded file.
+    let stem = name.split('.').next().unwrap_or(name).to_lowercase();
+    const RESERVED: [&str; 22] = [
+        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7",
+        "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    ];
+    if RESERVED.contains(&stem.as_str()) {
+        return Err(ApiError::new("UNSAFE_PATH", name.to_string()));
+    }
     Ok(name)
 }
 
@@ -1150,5 +1160,12 @@ mod tests {
             assert!(safe_remote_name(name).is_ok(), "{name:?}");
             assert!(safe_local_name(name).is_err(), "{name:?}");
         }
+        // Device names stay devices even with an extension; downloading to them would
+        // silently target the device instead of writing the file.
+        for name in ["CON", "nul", "NUL.txt", "com1.log", "Lpt9"] {
+            assert!(safe_remote_name(name).is_ok(), "{name:?}");
+            assert!(safe_local_name(name).is_err(), "{name:?}");
+        }
+        assert!(safe_local_name("console.txt").is_ok());
     }
 }

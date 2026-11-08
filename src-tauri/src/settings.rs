@@ -699,7 +699,10 @@ fn normalize_webdav(list: Vec<WebdavConnection>) -> Vec<WebdavConnection> {
     let mut out: Vec<WebdavConnection> = Vec::new();
     for mut conn in list.into_iter().take(MAX_WEBDAV) {
         conn.name = conn.name.trim().to_string();
-        conn.url = conn.url.trim().trim_end_matches('/').to_string();
+        // Credentials are stored in Credential Manager and have their own fields. A URL
+        // pasted with `user:password@host` must not persist the password in settings.toml
+        // (or echo it back over `settings_load`).
+        conn.url = strip_url_userinfo(conn.url.trim().trim_end_matches('/'));
         conn.username = conn.username.trim().to_string();
         if conn.url.is_empty() {
             continue;
@@ -726,6 +729,19 @@ fn normalize_webdav(list: Vec<WebdavConnection>) -> Vec<WebdavConnection> {
         out.push(conn);
     }
     out
+}
+
+/// Drops `user[:password]@` from the URL authority while keeping scheme, host and path.
+fn strip_url_userinfo(url: &str) -> String {
+    let Some(scheme_end) = url.find("://") else {
+        return url.to_string();
+    };
+    let rest = &url[scheme_end + 3..];
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let Some(at) = rest[..authority_end].rfind('@') else {
+        return url.to_string();
+    };
+    format!("{}://{}", &url[..scheme_end], &rest[at + 1..])
 }
 
 /// Path-safe connection key: letters, digits, `_`, `-` and `.` survive; everything else is
@@ -1706,6 +1722,36 @@ webdav = [{ id = "nas", name = "NAS", url = "https://nas.example/dav", username 
         assert_eq!(settings.webdav[0].id, "nas");
         assert_eq!(settings.webdav[0].root, "photos");
         assert!(settings.webdav[0].insecure_tls);
+    }
+
+    #[test]
+    fn webdav_urls_never_keep_userinfo() {
+        assert_eq!(
+            strip_url_userinfo("https://alice:pass@nas.example/dav"),
+            "https://nas.example/dav"
+        );
+        assert_eq!(
+            strip_url_userinfo("https://nas.example/dav"),
+            "https://nas.example/dav"
+        );
+        // A password may itself contain `@`; the last one separates the userinfo.
+        assert_eq!(
+            strip_url_userinfo("https://alice:p@ss@nas.example/dav"),
+            "https://nas.example/dav"
+        );
+        let normalized = Settings {
+            webdav: vec![WebdavConnection {
+                id: "nas".into(),
+                name: "NAS".into(),
+                url: "https://alice:pass@nas.example/dav/".into(),
+                username: "alice".into(),
+                root: String::new(),
+                insecure_tls: false,
+            }],
+            ..Settings::default()
+        }
+        .normalize();
+        assert_eq!(normalized.webdav[0].url, "https://nas.example/dav");
     }
 
     #[test]

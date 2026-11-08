@@ -377,7 +377,10 @@ fn validate(
             }
         }
     }
-    if kind == Kind::NewDir {
+    // Copy/move `newName` is a single segment too. Without this the shell received
+    // `..\..\Windows\evil.dll` (or an absolute spelling) as a name and resolved it as a
+    // path, escaping `targetDir`.
+    if matches!(kind, Kind::NewDir | Kind::Copy | Kind::Move) {
         if let Some(name) = request.new_name.as_deref() {
             validate_entry_name(name)?;
         }
@@ -671,7 +674,10 @@ fn run(
 fn shell_path(path: &str) -> String {
     // Ordinary paths keep their usual form: the marker also disables `..`/`.` cleanup
     // and trailing-dot trimming inside the shell, which would change their meaning.
-    if path.len() <= 240 || path.starts_with(r"\\?\") {
+    // MAX_PATH is counted in UTF-16 units, not UTF-8 bytes. Counting bytes prefixed
+    // long-before-needed paths, and the verbatim marker disables `..` collapsing and
+    // trailing-dot trimming, changing what the path means.
+    if path.encode_utf16().count() <= 240 || path.starts_with(r"\\?\") {
         return path.to_string();
     }
     let bytes = path.as_bytes();
@@ -988,6 +994,14 @@ struct Sink {
     progress: Channel<OpProgress>,
 }
 
+/// Cancellation surfaces as `E_ABORT` or one of the copy engine's cancel codes. These are
+/// outcomes the user asked for, not item failures.
+fn is_cancelled(hr: HRESULT) -> bool {
+    hr == E_ABORT
+        || hr.0 == 0x8027_0000u32 as i32 // COPYENGINE_E_USER_CANCELLED
+        || hr.0 == 0x8027_0001u32 as i32 // COPYENGINE_E_CANCELLED
+}
+
 impl Sink {
     /// Source index of the item the shell is reporting.
     fn source_of(&self, path: &str) -> Option<u32> {
@@ -1043,9 +1057,10 @@ impl Sink {
             Ordering::Relaxed,
         );
         self.current.fetch_add(1, Ordering::Relaxed);
-        if let Some(path) = item.and_then(item_path) {
-            *self.current_path.lock().unwrap() = path;
-        }
+        // Replace, never leave the previous item's path in place: `Post*Item` would then
+        // attribute this item's success/failure and destination to the wrong source.
+        let captured = item.and_then(item_path).unwrap_or_default();
+        *self.current_path.lock().unwrap() = captured;
         let label = if name.is_null() {
             // Deletes arrive without a name; the path we captured above supplies the caption.
             file_name(&self.current_path.lock().unwrap())
@@ -1066,10 +1081,7 @@ impl Sink {
             if let Some(index) = self.source_of(&path) {
                 self.succeeded.lock().unwrap().push(index);
             }
-        } else if hr != E_ABORT
-            && hr.0 != 0x8027_0000u32 as i32
-            && hr.0 != 0x8027_0001u32 as i32
-        {
+        } else if !is_cancelled(hr) {
             // A cancel only explains `E_ABORT` or the copy engine's own cancel codes
             // (`COPYENGINE_E_USER_CANCELLED` / `COPYENGINE_E_CANCELLED`). Any other
             // failure after the flag was set still happened, and dropping it would hide an
@@ -1110,8 +1122,10 @@ impl IFileOperationProgressSink_Impl for Sink_Impl {
     }
 
     fn FinishOperations(&self, hr: HRESULT) -> WinResult<()> {
-        // `PerformOperations` can return S_OK with a failing final HRESULT here.
-        if hr.is_err() {
+        // `PerformOperations` can return S_OK with a failing final HRESULT here. A user
+        // cancel also arrives as a failure; recording it fabricated an unnamed failure
+        // next to `aborted: true`.
+        if hr.is_err() && !is_cancelled(hr) {
             self.failures.record("", hr);
         }
         Ok(())

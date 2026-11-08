@@ -20,7 +20,8 @@ use windows::Win32::UI::Shell::{
     BHID_SFObject, IContextMenu, IShellFolder, IShellItem, IShellItem2, ILCombine,
     SHBindToParent, SHCONTF_FOLDERS, SHCONTF_INCLUDEHIDDEN, SHCONTF_NONFOLDERS,
     SHCreateItemFromIDList, SHGetNameFromIDList, SHParseDisplayName, SIGDN,
-    SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_NORMALDISPLAY, CMINVOKECOMMANDINFO,
+    SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_FILESYSPATH, SIGDN_NORMALDISPLAY,
+    CMINVOKECOMMANDINFO,
 };
 
 use crate::error::ApiError;
@@ -48,6 +49,28 @@ const EPOCH_DIFF_MS: u64 = 11_644_473_600_000;
 /// Recycle bin, control panel and other `shell:` / `::` locations the shell can resolve.
 pub fn is_shell_path(path: &str) -> bool {
     path.starts_with("shell:") || path.starts_with("::")
+}
+
+/// Filesystem location behind a shell parsing name, when it has one.
+///
+/// Aliases such as `shell:Startup` resolve to a real folder, so operations on them must
+/// pass the same protection checks as the folder they name. Namespace-only items such as
+/// the recycle bin have no filesystem path and return `None`.
+pub fn filesystem_path(path: &str) -> Option<String> {
+    let _com = ComGuard::new();
+    unsafe {
+        let mut raw: *mut ITEMIDLIST = std::ptr::null_mut();
+        SHParseDisplayName(&HSTRING::from(path), None::<&IBindCtx>, &mut raw, 0, None).ok()?;
+        if raw.is_null() {
+            return None;
+        }
+        let pidl = Pidl(raw);
+        let item: IShellItem = SHCreateItemFromIDList(pidl.0).ok()?;
+        let wide = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let text = wide.to_string().ok().filter(|value| !value.is_empty());
+        CoTaskMemFree(Some(wide.0 as *const c_void));
+        text
+    }
 }
 
 struct ComGuard(bool);
