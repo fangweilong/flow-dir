@@ -727,7 +727,7 @@ async fn drag_out(app: tauri::AppHandle, paths: Vec<String>) -> Result<String, A
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn op_start(
+async fn op_start(
     app: tauri::AppHandle,
     state: tauri::State<'_, ops::OpState>,
     cache: tauri::State<'_, settings::SettingsCache>,
@@ -757,24 +757,32 @@ fn op_start(
         block: settings.protect_block.clone(),
         confirm: settings.protect_confirm.clone(),
     };
-    ops::start(
-        &state,
-        ops::Request {
-            op_id,
-            kind,
-            sources,
-            target_dir,
-            new_name,
-            new_names,
-            permanent,
-            overwrite,
-            confirmed_protected: confirmed_protected.unwrap_or_default(),
-        },
-        &protection,
-        hwnd,
-        on_progress,
-        settings,
-    )
+    // Validation calls `GetLongPathNameW`, which can block for the SMB timeout on a UNC
+    // path. A synchronous command runs on the main thread, so keep that wait off it; the
+    // result still reaches the caller through the awaited join.
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        ops::start(
+            &state,
+            ops::Request {
+                op_id,
+                kind,
+                sources,
+                target_dir,
+                new_name,
+                new_names,
+                permanent,
+                overwrite,
+                confirmed_protected: confirmed_protected.unwrap_or_default(),
+            },
+            &protection,
+            hwnd,
+            on_progress,
+            settings,
+        )
+    })
+    .await
+    .map_err(|e| ApiError::new("THREAD", e.to_string()))?
 }
 
 #[tauri::command]
@@ -870,7 +878,10 @@ async fn archive_extract_items(
                     continue;
                 }
                 let archive_str = arc.to_string_lossy().into_owned();
-                let is_dir = archive::is_inner_dir(&arc, &inner).unwrap_or(false);
+                // Propagate the listing error: `is_inner_dir` now refuses to guess when the
+                // archive cannot be read completely, and treating that as "file" would write
+                // a zero-byte member instead of extracting the folder.
+                let is_dir = archive::is_inner_dir(&arc, &inner)?;
                 if is_dir {
                     let folder_name = std::path::Path::new(&inner).file_name().unwrap_or_default();
                     // Never merge into an existing folder: pick a free name, like the copy path.
@@ -1890,8 +1901,12 @@ fn open_terminal(path: String) -> Result<(), ApiError> {
         return Ok(());
     }
 
+    // `Command::args` would escape the embedded quotes as `\"`, which cmd does not treat
+    // as an escape and rejects as an invalid path. `raw_arg` passes the `/k` command line
+    // through unchanged so the quoted environment variable expands inside `cd`.
+    use std::os::windows::process::CommandExt;
     std::process::Command::new("cmd")
-        .args(["/k", "cd /d \"%FLOWDIR_TERM_CWD%\""])
+        .raw_arg("/k cd /d \"%FLOWDIR_TERM_CWD%\"")
         .env(CWD_ENV, &path)
         .current_dir(&path)
         .spawn()

@@ -348,7 +348,16 @@ fn walk_files(
                 continue;
             }
         };
-        for entry in reader.flatten() {
+        for entry in reader {
+            // An iteration error is also an unreadable entry; dropping it here would make
+            // the counts look complete when a file could not be seen.
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => {
+                    *skipped = skipped.saturating_add(1);
+                    continue;
+                }
+            };
             let name = entry.file_name().to_string_lossy().into_owned();
             let meta = match entry.metadata() {
                 Ok(meta) => meta,

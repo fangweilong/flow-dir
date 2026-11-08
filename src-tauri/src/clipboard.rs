@@ -65,9 +65,9 @@ pub fn copy_paths(paths: &[String], cut: bool) -> Result<(), ApiError> {
         .collect();
     let has_remote = local.len() != paths.len();
 
-    // Read the sequence while the clipboard is still ours; reading it after
-    // `CloseClipboard` lets a clipboard manager change it first and makes the stored
-    // internal selection look current when it is not.
+    // `write_os_paths` captures the sequence after the clipboard is closed; `read_paths`
+    // compares it with the current number to decide whether the internal selection is
+    // still current.
     let sequence = write_os_paths(&local, cut)?;
     let mut internal = INTERNAL.lock().unwrap();
     if has_remote {
@@ -155,10 +155,12 @@ fn write_os_paths(paths: &[String], cut: bool) -> Result<u32, ApiError> {
             }
             Ok(())
         })();
-        // Capture the sequence before closing: it must describe the data this process just
-        // wrote, not whatever another clipboard client may write immediately afterwards.
-        let sequence = GetClipboardSequenceNumber();
+        // Read the sequence after closing. Closing can advance the sequence (directly or
+        // through clipboard clients reacting to the update), so a value captured before it
+        // would not match what `read_paths` sees later and the internal WebDAV selection
+        // would be discarded on the first paste.
         let _ = CloseClipboard();
+        let sequence = GetClipboardSequenceNumber();
         result
             .map(|()| sequence)
             .map_err(|e| ApiError::new("CLIPBOARD", e.to_string()))

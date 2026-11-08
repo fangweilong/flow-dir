@@ -90,6 +90,9 @@ pub(crate) struct Guarded<'a> {
     cancelled: bool,
     over_budget: bool,
     over_size: bool,
+    /// First failure of the destination file itself. Kept apart from decoder errors so a
+    /// disk/permission failure is not mistaken for a corrupt archive member and skipped.
+    write_error: Option<std::io::Error>,
 }
 
 struct GuardedOutcome {
@@ -97,6 +100,7 @@ struct GuardedOutcome {
     cancelled: bool,
     over_budget: bool,
     over_size: bool,
+    write_error: Option<std::io::Error>,
 }
 
 impl Guarded<'_> {
@@ -106,6 +110,7 @@ impl Guarded<'_> {
             cancelled: self.cancelled,
             over_budget: self.over_budget,
             over_size: self.over_size,
+            write_error: self.write_error,
         }
     }
 }
@@ -125,13 +130,29 @@ impl Write for Guarded<'_> {
             self.over_size = true;
             return Err(std::io::Error::other("declared size exceeded"));
         }
-        let written = self.file.write(buf)?;
+        let written = match self.file.write(buf) {
+            Ok(written) => written,
+            Err(err) => {
+                // Keep the original error for `write_with`, but still give the decoder a
+                // failure so it stops reading the member.
+                let kind = err.kind();
+                self.write_error = Some(err);
+                return Err(std::io::Error::new(kind, "destination write failed"));
+            }
+        };
         self.written += written as u64;
         Ok(written)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        self.file.flush()
+        match self.file.flush() {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                let kind = err.kind();
+                self.write_error = Some(err);
+                Err(std::io::Error::new(kind, "destination flush failed"))
+            }
+        }
     }
 }
 
@@ -393,6 +414,7 @@ impl Sink {
             cancelled: false,
             over_budget: false,
             over_size: false,
+            write_error: None,
         };
         let result = produce(&mut guard);
         let outcome = guard.finish();
@@ -411,6 +433,19 @@ impl Sink {
                 "TOO_LARGE",
                 format!("{} exceeds its declared size", self.current.as_deref().unwrap_or("entry")),
             ));
+        }
+        // The decoder only sees "write failed" and reports its own generic error. Use the
+        // stored destination error instead so a disk-full or permission failure is not
+        // reported as archive corruption. Policy matches `Sink::write`: only a full disk
+        // aborts the whole job; other I/O errors skip this member with the real code.
+        if let Some(err) = outcome.write_error {
+            let _ = fs::remove_file(path);
+            let error = self.abort_io(path, &err);
+            if error.code == "NOT_ENOUGH_SPACE" {
+                return Err(error);
+            }
+            self.skip_current(&error);
+            return Ok(());
         }
         if let Err(err) = result {
             let _ = fs::remove_file(path);
