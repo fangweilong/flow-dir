@@ -57,6 +57,8 @@ export const openTerminal = (path: string) => invoke<void>('open_terminal', { pa
 
 export const layoutSave = (workspace: unknown) => invoke<void>('layout_save', { workspace })
 export const layoutLoad = () => invoke<unknown>('layout_load')
+/** True when the last `layout_load` used a backup because the primary file was unreadable. */
+export const layoutUnreadable = () => invoke<boolean>('layout_unreadable')
 export const layoutPreserve = () => invoke<string>('layout_preserve')
 
 export const settingsLoad = () => invoke<Settings>('settings_load')

@@ -211,7 +211,9 @@ pub fn check<R: Runtime>(app: &AppHandle<R>, force: bool) -> UpdateStatus {
         error: None,
     };
 
-    let interval = settings::load(app).update_interval_hours;
+    // Must not latch `LOAD_FAILED`: this runs periodically in the background, and a
+    // momentary read failure here would disable saves for the rest of the session.
+    let interval = settings::load_unlatched(app).update_interval_hours;
     if !force && !due(cached.last_check, interval) {
         return status;
     }
@@ -396,13 +398,20 @@ fn install_inner<R: Runtime>(app: &AppHandle<R>) -> Result<(), ApiError> {
         }
         Flavor::Installer => {
             verify_file(&downloaded, asset)?;
-            // A failed installer must not relaunch the old image: the user would see the
-            // update "complete" while nothing changed. `start /wait` propagates the exit
-            // code, so skip the relaunch line when it is non-zero. `goto` (not `exit /b`)
-            // keeps the helper's own `del "%~f0"` cleanup reachable.
+            // The setup runs from `%TEMP%`, which any process of this user can write, and
+            // UAC is only requested when the helper reaches `start`. Re-hashing inside the
+            // helper collapses that TOCTOU window to the gap between `certutil` and
+            // `start`. A same-user attacker already has code execution, so this is
+            // hardening, not a complete boundary: closing it fully needs an elevated
+            // verifier that hashes and then launches the setup itself.
             envs.push((ENV_SETUP, downloaded));
+            let digest = asset.sha256.to_ascii_uppercase();
             format!(
-                "start \"\" /wait \"%{ENV_SETUP}%\" /S\r\nif errorlevel 1 goto installed\r\nstart \"\" \"%{ENV_EXE}%\"\r\n:installed"
+                "certutil -hashfile \"%{ENV_SETUP}%\" SHA256 | find /I \"{digest}\" >nul\r\n\
+                 if errorlevel 1 goto launch\r\n\
+                 start \"\" /wait \"%{ENV_SETUP}%\" /S\r\n\
+                 :launch\r\n\
+                 start \"\" \"%{ENV_EXE}%\""
             )
         }
     };

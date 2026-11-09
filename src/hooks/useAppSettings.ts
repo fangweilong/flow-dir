@@ -6,6 +6,7 @@ import {
   drives,
   layoutLoad,
   layoutPreserve,
+  layoutUnreadable,
   quickAccess,
   setAppTheme,
   settingsLoad,
@@ -42,6 +43,8 @@ export interface UseAppSettingsOptions {
   setDriveList: React.Dispatch<React.SetStateAction<Drive[]>>
   homeRef: MutableRefObject<string>
   readyRef: MutableRefObject<boolean>
+  /** Stops layout autosaves after `layout_load` fell back to a backup/default. */
+  layoutLockedRef: MutableRefObject<boolean>
   settingsRef: MutableRefObject<Settings>
   sidebarMin: number
   previewMin: number
@@ -57,6 +60,7 @@ export function useAppSettings({
   setDriveList,
   homeRef,
   readyRef,
+  layoutLockedRef,
   settingsRef,
   sidebarMin,
   previewMin,
@@ -70,6 +74,10 @@ export function useAppSettings({
   // A load that could not read the real file must not be written back: the snapshot is
   // defaults (or a stale backup), so a save would replace every field the user had.
   const settingsLocked = useRef(false)
+  // Settings changed while `settings_load` is still in flight. The bootstrap merge replays
+  // them over the loaded file: sending them before the load would write defaults, and
+  // dropping them would lose the user's first toggles.
+  const earlyPatch = useRef<Partial<Settings>>({})
   const lastSaveError = useRef(0)
   const [updateAvailable, setUpdateAvailable] = useState<string | null>(null)
   const notifiedUpdate = useRef<string | null>(null)
@@ -81,6 +89,7 @@ export function useAppSettings({
     setDriveList,
     homeRef,
     readyRef,
+    layoutLockedRef,
     sidebarMin,
     previewMin,
     setPreviewOpen,
@@ -94,6 +103,7 @@ export function useAppSettings({
     setDriveList,
     homeRef,
     readyRef,
+    layoutLockedRef,
     sidebarMin,
     previewMin,
     setPreviewOpen,
@@ -130,11 +140,21 @@ export function useAppSettings({
   )
 
   const updateSettings = useCallback((next: Settings) => {
+    const previous = settingsRef.current
     setSettings(next)
     settingsRef.current = next
     // Until the bootstrap load resolves, `settings` is still DEFAULT_SETTINGS; saving a
-    // change now would write those defaults over every field already on disk.
-    if (!optionsRef.current.readyRef.current) return
+    // change now would write those defaults over every field already on disk. Record only
+    // the fields this call changed, for the merge to apply after the load.
+    if (!optionsRef.current.readyRef.current) {
+      const patch = earlyPatch.current as Record<string, unknown>
+      for (const key of Object.keys(next)) {
+        if ((next as Record<string, unknown>)[key] !== (previous as Record<string, unknown>)[key]) {
+          patch[key] = (next as Record<string, unknown>)[key]
+        }
+      }
+      return
+    }
     if (settingsLocked.current) return
     pendingSettings.current = next
     if (settingsSaveTimer.current !== null) window.clearTimeout(settingsSaveTimer.current)
@@ -174,6 +194,7 @@ export function useAppSettings({
         setDriveList: updateDrives,
         homeRef: home,
         readyRef: ready,
+        layoutLockedRef: lockLayout,
         sidebarMin: sMin,
         previewMin: pMin,
         setSidebarWidth: updateSidebarWidth,
@@ -187,15 +208,31 @@ export function useAppSettings({
           unreadable: await settingsUnreadable().catch(() => false),
         }))
         .catch(() => ({ value: DEFAULT_SETTINGS, unreadable: false }))
-      const [savedSettings, placeList, driveListResult, saved, warnings] = await Promise.all([
-        loaded,
-        quickAccess().catch(() => [] as Place[]),
-        drives().catch(() => [] as Drive[]),
-        layoutLoad().catch(() => null),
-        configWarnings().catch(() => [] as string[]),
-      ])
+      const [savedSettings, placeList, driveListResult, saved, warnings, layoutUnreadableFlag] =
+        await Promise.all([
+          loaded,
+          quickAccess().catch(() => [] as Place[]),
+          drives().catch(() => [] as Drive[]),
+          layoutLoad().catch(() => null),
+          configWarnings().catch(() => [] as string[]),
+          // Sticky on the backend: unlike the one-shot warning code, this survives the
+          // `config_warnings` read racing ahead of `layout_load`.
+          layoutUnreadable().catch(() => false),
+        ])
       if (cancelled) return
-      const merged = { ...DEFAULT_SETTINGS, ...savedSettings.value }
+      const early = earlyPatch.current
+      const merged =
+        Object.keys(early).length > 0
+          ? { ...DEFAULT_SETTINGS, ...savedSettings.value, ...early }
+          : { ...DEFAULT_SETTINGS, ...savedSettings.value }
+      if (layoutUnreadableFlag) {
+        // The workspace in memory came from a backup (or defaults); keep it readable but
+        // never overwrite the primary file with this run's edits.
+        lockLayout.current = true
+        if (!warnings.includes('LAYOUT_UNREADABLE')) {
+          toast(makeT(merged.language)('toast.layoutUnreadable'), 12_000)
+        }
+      }
       if (savedSettings.unreadable) {
         // Keep the window usable but never write this run: `settings_load` returned
         // defaults/backup because the real file was inaccessible.
@@ -229,6 +266,9 @@ export function useAppSettings({
       adoptIds(initial)
       updateWs(initial)
       ready.current = true
+      // Changes made while the load was in flight changed `settingsRef` but were not
+      // saved; replay them now that the loaded values are the base.
+      if (Object.keys(early).length > 0) updateSettings(merged)
     })()
     return () => {
       cancelled = true

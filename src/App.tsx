@@ -29,14 +29,14 @@ import { SidebarPanel } from './components/SidebarPanel'
 import { PaneNodeRenderer } from './components/PaneNodeRenderer'
 import { pointOf } from './PaneView'
 import { DragOverlay } from './components/DragOverlay'
-import { paneIds, samePath } from './workspace'
+import { paneIds } from './workspace'
 import { opCancel, quitApp, titlebarMenu } from './api'
 import type { Drive, Lang, ListData, Place } from './types'
 import { makeT, setUiLanguage } from './i18n'
 import type { Translate } from './i18n'
 import { DEFAULT_SETTINGS } from './persist'
 import type { Settings } from './persist'
-import { isDir, joinPath, nextRevealId, setWebdavConnections } from './paths'
+import { isDir, joinPath, setWebdavConnections } from './paths'
 import { formatBinding, resolveShortcuts } from './shortcuts'
 
 // Non-first-paint surfaces stay out of the main chunk: preview, search and the operation
@@ -72,6 +72,7 @@ export default function App() {
   const settingsRef = useRef<Settings>(DEFAULT_SETTINGS)
   const homeRef = useRef('C:\\')
   const readyRef = useRef(false)
+  const layoutLockedRef = useRef(false)
   const listDataRef = useRef<Record<string, ListData>>({})
   const setListDataRef = useRef<React.Dispatch<React.SetStateAction<Record<string, ListData>>>>(() => undefined)
   const setDriveListRef = useRef<React.Dispatch<React.SetStateAction<Drive[]>>>(() => undefined)
@@ -96,6 +97,7 @@ export default function App() {
   const layout = useWorkspaceLayout({
     settingsRef,
     listDataRef,
+    homeRef,
     setListData: (action) => setListDataRef.current(action),
     showToast,
     t: earlyT,
@@ -137,6 +139,7 @@ export default function App() {
     setDriveList: useCallback((v: React.SetStateAction<Drive[]>) => setDriveListRef.current(v), []),
     homeRef,
     readyRef,
+    layoutLockedRef,
     settingsRef,
     sidebarMin: SIDEBAR_MIN,
     previewMin: PREVIEW_MIN,
@@ -215,7 +218,7 @@ export default function App() {
 
   setListDataRef.current = scanner.setListData
   listDataRef.current = listData
-  cancelDirRef.current = (tabId) => void cancelDir(tabId).catch(() => undefined)
+  cancelDirRef.current = cancelDir
   setDriveListRef.current = scanner.setDriveList
 
   const sidebarDrives = useSidebarDrives(driveList, settings.webdav)
@@ -225,45 +228,17 @@ export default function App() {
     evictInactiveTabs(ws)
   }, [ws, evictInactiveTabs])
   // Hook: launch & tray
-  const { pendingSelect, pendingSelectTick } = useLaunchAndTray({
+  useLaunchAndTray({
     ws,
     wsRef,
     setWs,
+    listData,
+    update,
     newTab,
     navigate,
     startScan,
     setSearchOpen,
   })
-
-  // "Open with FlowDir" and `flowdir <path>` ask for one row to be selected. The request
-  // is only usable once the folder has finished listing, so it waits here.
-  useEffect(() => {
-    const pending = pendingSelect.current
-    if (!pending) return
-    // The request names a folder and a row. If the tab was navigated elsewhere (the
-    // folder listing can take a while on a network share), the marker must not select a
-    // same-named row in the new folder.
-    const tab = ws?.tabs[pending.tabId]
-    if (!tab || !samePath(tab.path, pending.path)) {
-      pendingSelect.current = null
-      return
-    }
-    const data = listData[pending.tabId]
-    if (!data || data.loading) return
-    pendingSelect.current = null
-    // Shell arguments keep the user's spelling; Windows names are case-insensitive.
-    const match = data.entries.find(
-      (entry) => entry.name.toLowerCase() === pending.name.toLowerCase(),
-    )
-    if (!match) return
-    const name = match.name
-    update(pending.tabId, (d) => ({
-      ...d,
-      selected: new Set([name]),
-      anchor: name,
-      reveal: { name, id: nextRevealId() },
-    }))
-  }, [listData, pendingSelect, pendingSelectTick, update, ws])
 
   const { elevated, uacOn, switchPrivilege } = usePrivilegeStatus(showToast, t)
 
@@ -469,6 +444,7 @@ export default function App() {
     ws,
     wsRef,
     readyRef,
+    layoutLockedRef,
     reportSaveError: appSettings.reportSaveError,
     flushSettings,
   })
@@ -584,7 +560,9 @@ export default function App() {
         onContextMenu={(ev) => {
           ev.preventDefault()
           const dpr = window.devicePixelRatio || 1
-          void titlebarMenu(Math.round(ev.screenX * dpr), Math.round(ev.screenY * dpr))
+          void titlebarMenu(Math.round(ev.screenX * dpr), Math.round(ev.screenY * dpr)).catch(
+            () => undefined,
+          )
         }}
       />
 
@@ -707,7 +685,7 @@ export default function App() {
             lang={lang}
             elevating={elevating}
             onRetryElevated={retryElevated}
-            onCancel={(opId) => void opCancel(opId)}
+            onCancel={(opId) => void opCancel(opId).catch(() => undefined)}
             onDismiss={(opId) => {
               setOps((prev) => {
                 if (!(opId in prev)) return prev

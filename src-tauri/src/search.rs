@@ -163,6 +163,29 @@ fn utf16_units(bytes: &[u8], big_endian: bool) -> Vec<u16> {
         .collect()
 }
 
+/// Whether an even-length buffer is plausibly BOM-less UTF-16LE text rather than binary.
+///
+/// Valid surrogate pairing plus an overwhelmingly printable result is the only signal
+/// available without a charset library; most binary data fails one of the two. Returns
+/// false for an empty/short buffer so tiny files are not guessed from four bytes.
+fn plausible_utf16(bytes: &[u8]) -> bool {
+    if bytes.len() < 8 || !bytes.len().is_multiple_of(2) {
+        return false;
+    }
+    let Ok(text) = String::from_utf16(&utf16_units(bytes, false)) else {
+        return false;
+    };
+    let total = text.chars().count();
+    if total < 4 {
+        return false;
+    }
+    let printable = text
+        .chars()
+        .filter(|c| !c.is_control() || matches!(c, '\t' | '\r' | '\n'))
+        .count();
+    printable * 20 >= total * 19
+}
+
 /// Decodes a search candidate. UTF-16 (BOM or the typical alternating-NUL pattern of
 /// Notepad's "Unicode" encoding) is decoded instead of being dismissed as binary; any
 /// other NUL byte means binary.
@@ -174,6 +197,12 @@ fn decode_for_search(bytes: &[u8]) -> Option<String> {
         return Some(String::from_utf16_lossy(&utf16_units(&bytes[2..], true)));
     }
     let probe = &bytes[..bytes.len().min(8192)];
+    // Valid UTF-8 without NUL is unambiguous. Returning here matters for the CJK
+    // UTF-16 check below: an even-length ASCII file also decodes into printable UTF-16
+    // units, so it must be ruled out before that heuristic runs.
+    if !probe.contains(&0) && std::str::from_utf8(bytes).is_ok() {
+        return Some(String::from_utf8_lossy(bytes).into_owned());
+    }
     let mut even_nul = 0usize;
     let mut odd_nul = 0usize;
     for (index, byte) in probe.iter().enumerate() {
@@ -193,6 +222,16 @@ fn decode_for_search(bytes: &[u8]) -> Option<String> {
         let even = &bytes[..bytes.len() & !1];
         return Some(String::from_utf16_lossy(&utf16_units(even, true)));
     }
+    // UTF-16LE text made entirely of CJK has no NUL bytes at all, so the alternating
+    // pattern above never fires and it used to fall through to `from_utf8_lossy`,
+    // where no query could ever match. Windows' default "Unicode" encoding is LE, so
+    // only that direction is attempted; the plausibility check rejects binary data.
+    if plausible_utf16(bytes) {
+        return Some(String::from_utf16_lossy(&utf16_units(
+            &bytes[..bytes.len() & !1],
+            false,
+        )));
+    }
     // Only the sampled window decides: a NUL deep inside a large text file is not a
     // reason to hide it from content search.
     if probe.contains(&0) {
@@ -207,6 +246,13 @@ fn content_snippet(path: &Path, regex: &Regex, max_bytes: u64, cancel: &AtomicBo
     // Opening a cloud placeholder's data stream forces a download; content search must
     // not hydrate files the user never asked for (the same rule the preview follows).
     let meta = std::fs::symlink_metadata(path).ok()?;
+    // The walker keeps reparse-point files as hits, but reading one follows it: a link
+    // can point outside the search root, and a link to a cloud placeholder would hydrate
+    // a file the user never asked for. `metadata()` would follow the link, so the link
+    // itself is the only reliable signal here.
+    if meta.file_type().is_symlink() || meta.file_attributes() & ATTR_REPARSE_POINT != 0 {
+        return None;
+    }
     if crate::preview::is_cloud_placeholder(&meta) {
         return None;
     }

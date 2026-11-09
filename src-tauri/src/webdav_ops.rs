@@ -1117,7 +1117,9 @@ fn safe_local_name(name: &str) -> Result<&str, ApiError> {
     safe_remote_name(name)?;
     // Win32 strips trailing dots/spaces, so `a.` and `a ` would silently collide with an
     // existing `a`; `:` would become an alternate data stream or drive-relative path.
-    if name.ends_with([' ', '.']) || name.contains(':') {
+    // Win32 also rejects control characters (the remote server may allow them), so a
+    // name that is legal remotely would fail after the transfer.
+    if name.ends_with([' ', '.']) || name.contains(':') || name.chars().any(char::is_control) {
         return Err(ApiError::new("UNSAFE_PATH", name.to_string()));
     }
     // `CON`, `NUL`, `COM1`, … name devices even with an extension (`NUL.txt`). Writing to
@@ -1153,8 +1155,9 @@ fn rel_parent(path: &str) -> &str {
 }
 
 fn base_name(path: &str) -> &str {
-    path.trim_end_matches(['/', '\\'])
-        .rsplit(['/', '\\'])
+    // Remote names may contain `\`; only `/` separates WebDAV path components.
+    path.trim_end_matches('/')
+        .rsplit('/')
         .next()
         .unwrap_or(path)
 }

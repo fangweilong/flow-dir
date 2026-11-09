@@ -914,9 +914,15 @@ pub fn expand_path(raw: &str) -> String {
         return String::new();
     }
     let mut s = text.to_string();
-    if s.starts_with('~') {
+    // Only `~`, `~/…` and `~\…` mean the home folder. Treating every `~` prefix as home
+    // turned `~backup` into `<home>backup` (the separator was not even inserted).
+    if s == "~" || s.starts_with("~/") || s.starts_with("~\\") {
         if let Some(home) = user_home_dir() {
-            s = format!("{}{}", home, &s[1..]);
+            s = if s == "~" {
+                home
+            } else {
+                format!("{}{}", home, &s[1..])
+            };
         }
     }
     if s.contains('%') {

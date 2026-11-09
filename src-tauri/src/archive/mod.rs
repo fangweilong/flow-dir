@@ -519,6 +519,10 @@ fn run(
     let result =
         backends::extract(&archive, &mut sink, password.as_deref()).and_then(|_| sink.merge());
     let aborted = matches!(&result, Err(err) if err.code == "CANCELED");
+    // Decoding into the temporary tree is all-or-nothing: a cancel before the merge can
+    // drop everything. Once merge has started, entries already moved into the destination
+    // stay there, so the user must not be told the result is a clean "canceled".
+    let merge_partial = aborted && sink.merge_started();
     let error = match result {
         Ok(()) if sink.failed_total() > 0 => {
             log::warn!(
@@ -536,6 +540,13 @@ fn run(
                 sink.bytes()
             );
             None
+        }
+        Err(_err) if aborted && merge_partial => {
+            log::warn!(
+                target: "flowdir::archive",
+                "extract {archive} canceled during merge; {dest} may be incomplete"
+            );
+            Some(ApiError::new("CANCELED_PARTIAL", dest))
         }
         Err(_err) if aborted => {
             log::warn!(target: "flowdir::archive", "extract {archive} canceled");

@@ -109,8 +109,12 @@ pub fn restart<R: Runtime>(app: &AppHandle<R>, elevated: bool) -> Result<(), Api
 
 /// PID of the instance this process must let exit before starting its own Tauri runtime.
 pub fn restart_wait_pid() -> Option<u32> {
-    std::env::args()
+    // `args()` panics on an argument that is not valid Unicode, and this runs before the
+    // panic hook is installed. Only the ASCII switch matters here, so non-Unicode
+    // arguments are skipped.
+    std::env::args_os()
         .skip(1)
+        .filter_map(|arg| arg.into_string().ok())
         .find_map(|arg| arg.strip_prefix("--restart-wait=")?.parse().ok())
 }
 

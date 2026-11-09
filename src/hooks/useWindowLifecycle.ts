@@ -10,6 +10,8 @@ export interface UseWindowLifecycleOptions {
   ws: Workspace | null
   wsRef: MutableRefObject<Workspace | null>
   readyRef: MutableRefObject<boolean>
+  /** Set when `layout_load` fell back because the file was unreadable; saves stay off. */
+  layoutLockedRef: MutableRefObject<boolean>
   reportSaveError: (err: unknown) => void
   flushSettings: () => void
 }
@@ -18,6 +20,7 @@ export function useWindowLifecycle({
   ws,
   wsRef,
   readyRef,
+  layoutLockedRef,
   reportSaveError,
   flushSettings,
 }: UseWindowLifecycleOptions) {
@@ -30,7 +33,10 @@ export function useWindowLifecycle({
       if (!ev.altKey || ev.code !== 'Space') return
       ev.preventDefault()
       const dpr = window.devicePixelRatio || 1
-      void titlebarMenu(Math.round((window.screenX + 16) * dpr), Math.round((window.screenY + 44) * dpr))
+      void titlebarMenu(
+        Math.round((window.screenX + 16) * dpr),
+        Math.round((window.screenY + 44) * dpr),
+      ).catch(() => undefined)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -61,12 +67,12 @@ export function useWindowLifecycle({
 
   // Auto-save layout on change
   useEffect(() => {
-    if (!ws || !readyRef.current) return
+    if (!ws || !readyRef.current || layoutLockedRef.current) return
     const timer = window.setTimeout(() => {
       void layoutSave(toSnapshot(ws)).catch(reportSaveError)
     }, 500)
     return () => window.clearTimeout(timer)
-  }, [ws, readyRef, reportSaveError])
+  }, [ws, readyRef, layoutLockedRef, reportSaveError])
 
   // Flush layout on quit/restart
   useEffect(() => {
@@ -74,7 +80,9 @@ export function useWindowLifecycle({
     let unlisten: (() => void) | undefined
     void listen('flowdir:flush-layout', () => {
       const current = wsRef.current
-      if (current) void layoutSave(toSnapshot(current)).catch(reportSaveError)
+      if (current && !layoutLockedRef.current) {
+        void layoutSave(toSnapshot(current)).catch(reportSaveError)
+      }
       flushSettings()
     }).then((fn) => {
       if (disposed) fn()
@@ -84,7 +92,7 @@ export function useWindowLifecycle({
       disposed = true
       unlisten?.()
     }
-  }, [flushSettings, reportSaveError, wsRef])
+  }, [flushSettings, layoutLockedRef, reportSaveError, wsRef])
 
   // Confirm quit event listener
   useEffect(() => {

@@ -128,8 +128,11 @@ export function useFileActionHandlers({
 
   const openProperties = useCallback(
     (paneId: string, names: string[]) => {
-      // Shell property pages only understand filesystem paths.
-      for (const p of pathsFor(paneId, names).filter((path) => !isWebdavPath(path))) {
+      // Shell property pages only understand filesystem paths; archive entries are
+      // virtual addresses that the shell would rewrite into the archive's own folder.
+      for (const p of pathsFor(paneId, names).filter(
+        (path) => !isWebdavPath(path) && !isArchiveMember(path),
+      )) {
         void shellProperties(p).catch((e: unknown) => showToast(t('op.failed', { code: t(errorKey(errorCode(e))) })))
       }
     },

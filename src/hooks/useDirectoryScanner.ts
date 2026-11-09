@@ -236,6 +236,20 @@ export function useDirectoryScanner({
     setListData((prev) => ({ ...prev, [tabId]: fn(prev[tabId] ?? EMPTY_LIST) }))
   }, [])
 
+  /**
+   * Cancels a tab's enumeration and invalidates its generation.
+   *
+   * `startScan`'s late-batch guard only notices a closed tab when the scan saw it in
+   * `wsRef` when it began; a launch request can start the scan before the tab is in the
+   * workspace, and a batch arriving after the tab closes would then recreate `listData`.
+   * Bumping the generation here rejects those writes regardless of `liveAtStart`.
+   */
+  const cancelTabScan = useCallback((tabId: string) => {
+    gens.current[tabId] = (gens.current[tabId] ?? 0) + 1
+    scanning.current.delete(tabId)
+    void cancelDir(tabId).catch(() => undefined)
+  }, [])
+
   const navigate = useCallback(
     (tabId: string, next: string) => {
       const current = wsRef.current
@@ -602,6 +616,6 @@ export function useDirectoryScanner({
     evictInactiveTabs,
     lastScan,
     gens,
-    cancelDir,
+    cancelDir: cancelTabScan,
   }
 }

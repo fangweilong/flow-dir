@@ -388,8 +388,12 @@ fn validate(
                 ));
             }
             Some(names) => {
+                let webdav = request
+                    .sources
+                    .first()
+                    .is_some_and(|source| crate::webdav::is_webdav(source));
                 for name in names {
-                    validate_entry_name(name)?;
+                    validate_entry_name(name, webdav)?;
                 }
             }
             None => {
@@ -397,7 +401,11 @@ fn validate(
                     .new_name
                     .as_deref()
                     .ok_or_else(|| ApiError::new("BAD_ARGS", "rename needs newName"))?;
-                validate_entry_name(name)?;
+                let webdav = request
+                    .sources
+                    .first()
+                    .is_some_and(|source| crate::webdav::is_webdav(source));
+                validate_entry_name(name, webdav)?;
             }
         }
     }
@@ -406,7 +414,11 @@ fn validate(
     // path, escaping `targetDir`.
     if matches!(kind, Kind::NewDir | Kind::Copy | Kind::Move) {
         if let Some(name) = request.new_name.as_deref() {
-            validate_entry_name(name)?;
+            let webdav = request
+                .target_dir
+                .as_deref()
+                .is_some_and(crate::webdav::is_webdav);
+            validate_entry_name(name, webdav)?;
         }
     }
     if matches!(kind, Kind::Copy | Kind::Move | Kind::NewDir) && request.target_dir.is_none() {
@@ -417,7 +429,10 @@ fn validate(
 
 /// Rename targets and new folder names are single segments, never paths. Rejecting the
 /// separators here covers both the shell path and the WebDAV `MOVE` destination.
-fn validate_entry_name(name: &str) -> Result<(), ApiError> {
+///
+/// A local target additionally refuses the Win32 restrictions (`:`, trailing dot/space,
+/// device names). `:` is legal on WebDAV, so it is only rejected when `webdav` is false.
+fn validate_entry_name(name: &str, webdav: bool) -> Result<(), ApiError> {
     let invalid = name.is_empty()
         || name == "."
         || name == ".."
@@ -425,6 +440,17 @@ fn validate_entry_name(name: &str) -> Result<(), ApiError> {
         || name.chars().any(char::is_control);
     if invalid {
         return Err(ApiError::new("INVALID_NAME", name.to_string()));
+    }
+    if !webdav {
+        let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+        const DEVICES: [&str; 22] = [
+            "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6",
+            "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7",
+            "LPT8", "LPT9",
+        ];
+        if name.ends_with([' ', '.']) || name.contains(':') || DEVICES.contains(&stem.as_str()) {
+            return Err(ApiError::new("INVALID_NAME", name.to_string()));
+        }
     }
     Ok(())
 }
@@ -788,6 +814,7 @@ fn perform(
     );
     let sink = Sink {
         op_id: request.op_id.clone(),
+        kind,
         phase: AtomicU8::new(0),
         current: AtomicU32::new(0),
         total: AtomicU32::new(total),
@@ -1016,6 +1043,7 @@ fn queue(
 #[implement(IFileOperationProgressSink)]
 struct Sink {
     op_id: String,
+    kind: Kind,
     phase: AtomicU8,
     current: AtomicU32,
     total: AtomicU32,
@@ -1050,6 +1078,17 @@ fn is_cancelled(hr: HRESULT) -> bool {
 
 impl Sink {
     /// Source index of the item the shell is reporting.
+    /// Source index for a callback. A NewDir request has one pseudo-source (the target
+    /// folder), while the shell reports the newly created item's path, which never
+    /// matches it; attributing the single requested item avoids a path-less failure and
+    /// lets the elevated retry replay it.
+    fn item_index(&self, path: &str) -> Option<u32> {
+        if self.kind == Kind::NewDir {
+            return (!self.source_index.is_empty()).then_some(0);
+        }
+        self.source_of(path)
+    }
+
     fn source_of(&self, path: &str) -> Option<u32> {
         let raw = path.to_lowercase();
         if let Some(index) = self.source_index.get(&raw) {
@@ -1097,6 +1136,18 @@ impl Sink {
     }
 
     fn enter_item(&self, phase: &'static str, name: &PCWSTR, item: Option<&IShellItem>) -> WinResult<()> {
+        let captured = item.and_then(item_path);
+        self.enter_item_at(phase, name, captured)
+    }
+
+    /// Variant for callbacks whose item has no `IShellItem` (NewItem reports only the
+    /// parent folder and the name).
+    fn enter_item_at(
+        &self,
+        phase: &'static str,
+        name: &PCWSTR,
+        captured: Option<String>,
+    ) -> WinResult<()> {
         self.check_cancel()?;
         self.phase.store(
             PHASES.iter().position(|p| *p == phase).unwrap_or(0) as u8,
@@ -1105,8 +1156,7 @@ impl Sink {
         self.current.fetch_add(1, Ordering::Relaxed);
         // Replace, never leave the previous item's path in place: `Post*Item` would then
         // attribute this item's success/failure and destination to the wrong source.
-        let captured = item.and_then(item_path).unwrap_or_default();
-        *self.current_path.lock().unwrap() = captured;
+        *self.current_path.lock().unwrap() = captured.unwrap_or_default();
         let label = if name.is_null() {
             // Deletes arrive without a name; the path we captured above supplies the caption.
             file_name(&self.current_path.lock().unwrap())
@@ -1124,7 +1174,7 @@ impl Sink {
             // Record the success before checking the cancel flag: an abort that arrives
             // while this callback runs must not hide an item that already landed.
             let path = self.current_path.lock().unwrap();
-            if let Some(index) = self.source_of(&path) {
+            if let Some(index) = self.item_index(&path) {
                 self.succeeded.lock().unwrap().push(index);
             }
         } else if !is_cancelled(hr) {
@@ -1133,7 +1183,7 @@ impl Sink {
             // failure after the flag was set still happened, and dropping it would hide an
             // item from the failure list, the elevated retry and the undo subset.
             let path = self.current_path.lock().unwrap();
-            if let Some(index) = self.source_of(&path) {
+            if let Some(index) = self.item_index(&path) {
                 self.failed_indices.lock().unwrap().push(index);
             }
             self.failures.record(&path, hr);
@@ -1150,7 +1200,7 @@ impl Sink {
             if let Some(path) = new.and_then(item_path) {
                 let index = {
                     let source = self.current_path.lock().unwrap();
-                    self.source_of(&source)
+                    self.item_index(&source)
                 };
                 if let Some(index) = index {
                     self.landed.lock().unwrap().push(LandedItem { index, path });
@@ -1266,10 +1316,15 @@ impl IFileOperationProgressSink_Impl for Sink_Impl {
         name: &PCWSTR,
     ) -> WinResult<()> {
         let label = unsafe { name.to_string() }.unwrap_or_default();
-        if let Some(base) = dir.as_ref().and_then(item_path) {
-            *self.current_path.lock().unwrap() = format!("{base}\\{label}");
-        }
-        self.enter_item("newdir", name, None)
+        // NewItem reports only the parent folder, so the requested path is built here.
+        // Passing it through `enter_item_at` keeps it: the plain `enter_item` would
+        // overwrite `current_path` with an empty string, and `PostNewItem` would lose
+        // both the failure path and the item it belongs to.
+        let created = dir
+            .as_ref()
+            .and_then(item_path)
+            .map(|base| format!("{base}\\{label}"));
+        self.enter_item_at("newdir", name, created)
     }
 
     fn PostNewItem(

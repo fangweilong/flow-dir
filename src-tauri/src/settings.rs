@@ -170,10 +170,10 @@ pub struct Settings {
     /// Sidebar (quick access + drives) visibility.
     pub sidebar_open: bool,
     /// Sidebar width in px while open; drag-resizable in the UI.
-    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
+    #[serde(deserialize_with = "deserialize_lenient_u32")]
     pub sidebar_width: u32,
     /// Preview panel width in px while open; drag-resizable in the UI.
-    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
+    #[serde(deserialize_with = "deserialize_lenient_u32")]
     pub preview_width: u32,
     /// Extra quick-access entries appended after the built-in ones.
     pub custom_places: Vec<QuickPlace>,
@@ -192,7 +192,7 @@ pub struct Settings {
     pub reclaim_memory: bool,
     /// Automatic update check interval in hours; `0` disables background checks and
     /// leaves only the manual button in Settings.
-    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
+    #[serde(deserialize_with = "deserialize_lenient_u32")]
     pub update_interval_hours: u32,
     /// System notification when a long operation finishes in the background.
     pub notify_ops: bool,
@@ -201,43 +201,43 @@ pub struct Settings {
     /// Single UI font family, assembled into a stack by the frontend.
     pub font_family: String,
     /// Base UI font size in px; drives the rem scale of the whole interface.
-    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
+    #[serde(deserialize_with = "deserialize_lenient_u32")]
     pub font_size: u32,
     /// Tab-strip font family; empty inherits `font_family`.
     pub tab_font_family: String,
     /// Tab-strip font size in px; drives the strip height and tab icons.
-    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
+    #[serde(deserialize_with = "deserialize_lenient_u32")]
     pub tab_font_size: u32,
     /// File-list font family; empty inherits `font_family`.
     pub list_font_family: String,
     /// File-list font size in px; drives rows, columns and icons.
-    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
+    #[serde(deserialize_with = "deserialize_lenient_u32")]
     pub list_font_size: u32,
     /// Navigation-bar font family; empty inherits `font_family`.
     pub nav_font_family: String,
     /// Navigation-bar font size in px; drives its controls.
-    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
+    #[serde(deserialize_with = "deserialize_lenient_u32")]
     pub nav_font_size: u32,
     /// File and drive list icon size in px (14–32).
-    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
+    #[serde(deserialize_with = "deserialize_lenient_u32")]
     pub icon_size: u32,
     /// File/folder icon style: system | flat | material | catppuccin.
     pub icon_theme: String,
     /// File-list name column width in px at the default font size; `0` fills the pane and
     /// leaves no gutter, any other value leaves the rest of the row blank.
-    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
+    #[serde(deserialize_with = "deserialize_lenient_u32")]
     pub list_name_width: u32,
     /// File-list size column width in px at the default font size; drag-resizable.
-    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
+    #[serde(deserialize_with = "deserialize_lenient_u32")]
     pub list_size_width: u32,
     /// File-list modified column width in px at the default font size; drag-resizable.
-    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
+    #[serde(deserialize_with = "deserialize_lenient_u32")]
     pub list_time_width: u32,
     /// Drive overview capacity column width in px at the default font size; drag-resizable.
-    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
+    #[serde(deserialize_with = "deserialize_lenient_u32")]
     pub drive_capacity_width: u32,
     /// Drive overview free-space column width in px at the default font size; drag-resizable.
-    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
+    #[serde(deserialize_with = "deserialize_lenient_u32")]
     pub drive_free_width: u32,
     /// File-list "size" column visibility.
     pub list_col_size: bool,
@@ -246,32 +246,32 @@ pub struct Settings {
     /// File-list "modified" column visibility.
     pub list_col_time: bool,
     /// File-list "type" column width in px at the default font size; drag-resizable.
-    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
+    #[serde(deserialize_with = "deserialize_lenient_u32")]
     pub list_type_width: u32,
     /// Undo/redo history depth, 1–100.
-    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
+    #[serde(deserialize_with = "deserialize_lenient_u32")]
     pub undo_limit: u32,
     /// Largest file the preview will read, in MB (1–4096).
-    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
+    #[serde(deserialize_with = "deserialize_lenient_u32")]
     pub preview_max_file_mb: u32,
     /// Largest width/height a rendered image or PDF page may use (256–16384).
-    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
+    #[serde(deserialize_with = "deserialize_lenient_u32")]
     pub preview_max_dimension: u32,
     /// How much of a text file is shown, in KB (1–4096).
-    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
+    #[serde(deserialize_with = "deserialize_lenient_u32")]
     pub preview_text_kb: u32,
     /// Reopened-tab stack depth (1–50); `Ctrl+Shift+T` walks it.
-    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
+    #[serde(deserialize_with = "deserialize_lenient_u32")]
     pub closed_tab_limit: u32,
     /// Restore the previous tab set on launch.
     pub restore_tabs_on_start: bool,
     /// Middle-click / Ctrl+click on a folder opens it in a background tab.
     pub new_tab_on_middle_click: bool,
     /// Duplicate-scan worker threads; 0 picks `min(4, cores / 2)`.
-    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
+    #[serde(deserialize_with = "deserialize_lenient_u32")]
     pub dup_concurrency: u32,
     /// Read-rate cap for duplicate scans in MB/s; 0 means unlimited.
-    #[serde(default, deserialize_with = "deserialize_lenient_u32")]
+    #[serde(deserialize_with = "deserialize_lenient_u32")]
     pub dup_max_mb_per_sec: u32,
     /// Directory names the duplicate scan never descends into.
     pub dup_exclude: Vec<String>,
@@ -703,8 +703,18 @@ fn normalize_webdav(list: Vec<WebdavConnection>) -> Vec<WebdavConnection> {
         // pasted with `user:password@host` must not persist the password in settings.toml
         // (or echo it back over `settings_load`). A string the parser cannot prove
         // credential-free is dropped with the connection: keeping it is a leak.
-        conn.url = crate::webdav::strip_userinfo(conn.url.trim().trim_end_matches('/'))
-            .unwrap_or_default();
+        conn.url = match crate::webdav::strip_userinfo(conn.url.trim().trim_end_matches('/')) {
+            Some(url) => url,
+            None => {
+                // The URL itself may contain a password, so it is never logged. A literal
+                // `@` in the first path segment has to be percent-encoded to pass this.
+                log::warn!(
+                    target: "flowdir::settings",
+                    "WebDAV connection dropped: URL could not be proven credential-free"
+                );
+                String::new()
+            }
+        };
         conn.username = conn.username.trim().to_string();
         if conn.url.is_empty() {
             continue;
@@ -1152,6 +1162,19 @@ impl From<FileSettings> for Settings {
 }
 
 pub fn load<R: Runtime>(app: &AppHandle<R>) -> Settings {
+    load_impl(app, true)
+}
+
+/// Same read as [`load`], but a transient failure does not latch [`load_failed`].
+///
+/// Background readers (the periodic update check) must not be able to turn one momentary
+/// sharing violation into a session-wide save lock: the startup load is the only caller
+/// whose failure means "the in-memory settings may not match the file".
+pub fn load_unlatched<R: Runtime>(app: &AppHandle<R>) -> Settings {
+    load_impl(app, false)
+}
+
+fn load_impl<R: Runtime>(app: &AppHandle<R>, latch: bool) -> Settings {
     let Ok(dir) = store::config_dir(app) else {
         return Settings::default();
     };
@@ -1180,7 +1203,7 @@ pub fn load<R: Runtime>(app: &AppHandle<R>) -> Settings {
             // snapshot. It is the best available config for this run, but the load still
             // counts as failed: setup must not apply integration switches from it, and the
             // UI must not mistake it for the file the user last saved.
-            if unreadable {
+            if unreadable && latch {
                 LOAD_FAILED.store(true, Ordering::Relaxed);
             }
             return *settings;
@@ -1204,7 +1227,9 @@ pub fn load<R: Runtime>(app: &AppHandle<R>) -> Settings {
     }
     let defaults = Settings::default().normalize();
     if unreadable {
-        LOAD_FAILED.store(true, Ordering::Relaxed);
+        if latch {
+            LOAD_FAILED.store(true, Ordering::Relaxed);
+        }
     } else if !path.exists() {
         // Materialize the commented template only when there is nothing to protect.
         let _ = save(app, &defaults);
@@ -1873,5 +1898,19 @@ webdav = [{ id = "nas", name = "NAS", url = "https://nas.example/dav", username 
         )
         .unwrap();
         assert_eq!(Settings::from(other).normalize().preview_text_kb, 16);
+    }
+
+    #[test]
+    fn missing_ipc_fields_use_settings_defaults() {
+        // A field-level `#[serde(default)]` overrides the container default with the
+        // field type's zero. That silently disabled background updates
+        // (`update_interval_hours = 0`) whenever a payload was incomplete.
+        let parsed: Settings = serde_json::from_str(r#"{"sidebarWidth": 500}"#).unwrap();
+        let defaults = Settings::default();
+        assert_eq!(parsed.sidebar_width, 500);
+        assert_eq!(parsed.update_interval_hours, defaults.update_interval_hours);
+        assert_eq!(parsed.preview_width, defaults.preview_width);
+        assert_eq!(parsed.undo_limit, defaults.undo_limit);
+        assert_eq!(parsed.closed_tab_limit, defaults.closed_tab_limit);
     }
 }

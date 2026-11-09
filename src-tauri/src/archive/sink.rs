@@ -172,6 +172,7 @@ pub struct Sink {
     failed_total: u32,
     /// Entries the sink saw and refused (unsafe name, link, encrypted member).
     skipped: u32,
+    merge_started: bool,
     merged: bool,
     buf: Vec<u8>,
 }
@@ -235,6 +236,7 @@ impl Sink {
             failures: Vec::new(),
             failed_total: 0,
             skipped: 0,
+            merge_started: false,
             merged: false,
             buf: vec![0u8; CHUNK],
         })
@@ -508,6 +510,9 @@ impl Sink {
     /// Moves the temporary tree into the destination, renaming collisions instead of
     /// overwriting anything that is already there.
     pub fn merge(&mut self) -> Result<(), ApiError> {
+        // Merge moves files out of the temporary tree into the destination, so a cancel
+        // from this point on cannot discard everything as the decode phase can.
+        self.merge_started = true;
         self.progress.phase = "merge";
         self.progress.send(None);
         let temp = self.temp.clone();
@@ -582,6 +587,12 @@ impl Sink {
 
     pub fn failed_total(&self) -> u32 {
         self.failed_total
+    }
+
+    /// Whether `merge` had started when the extraction was canceled. A cancel after this
+    /// point leaves the entries already moved into the destination behind.
+    pub fn merge_started(&self) -> bool {
+        self.merge_started
     }
 
     /// Entries processed so far, including the ones that were refused.

@@ -201,7 +201,14 @@ pub fn exists(settings: &Settings, path: &str) -> bool {
 pub fn unique_paths(settings: &Settings, paths: &[String], sources: &[String]) -> Vec<String> {
     let mut out = paths.to_vec();
     // Folder listings are fetched once per destination instead of once per candidate.
-    let mut listings: std::collections::HashMap<String, std::collections::HashSet<String>> =
+    // Each entry keeps the folded names (to stay conservative on case-insensitive
+    // servers) and the exact spelling (to tell an actual same-name file apart from a
+    // case-only rename on a case-sensitive server).
+    type Listing = (
+        std::collections::HashSet<String>,
+        std::collections::HashSet<String>,
+    );
+    let mut listings: std::collections::HashMap<String, Listing> =
         std::collections::HashMap::new();
     // Both sets are per destination: a name claimed in `A` does not block `B`, and a name
     // vacated by an earlier batch row is free even though the server still lists it.
@@ -217,20 +224,22 @@ pub fn unique_paths(settings: &Settings, paths: &[String], sources: &[String]) -
         let dir = virtual_parent(path);
         if !listings.contains_key(&dir) {
             let mut names = std::collections::HashSet::new();
+            let mut exact = std::collections::HashSet::new();
             if let (Some(dav), Some(parent)) = (parse(path), parse(&dir)) {
                 if let Ok(conn) = find(settings, &dav.connection) {
                     if let Ok(client) = DavClient::new(conn, None) {
                         if let Ok(entries) = client.list(&parent.path, &AtomicBool::new(false)) {
                             for entry in entries {
                                 names.insert(entry.name.to_lowercase());
+                                exact.insert(entry.name);
                             }
                         }
                     }
                 }
             }
-            listings.insert(dir.clone(), names);
+            listings.insert(dir.clone(), (names, exact));
         }
-        let taken = listings.get(&dir).expect("listing inserted above");
+        let (taken, taken_exact) = listings.get(&dir).expect("listing inserted above");
         let claimed = claimed.entry(dir.clone()).or_default();
         let released = released.entry(dir.clone()).or_default();
         let name = base_name(path).to_string();
@@ -246,12 +255,17 @@ pub fn unique_paths(settings: &Settings, paths: &[String], sources: &[String]) -
         let mut n = 0u32;
         loop {
             let key = candidate.to_lowercase();
-            let same_source = source.is_some_and(|s| {
-                virtual_parent(s) == dir
-                    && base_name(s).eq_ignore_ascii_case(candidate.as_str())
-            });
-            let free = !claimed.contains(&key) && (released.contains(&key) || !taken.contains(&key));
-            if same_source || free {
+            let exact_source = source
+                .is_some_and(|s| virtual_parent(s) == dir && base_name(s) == candidate.as_str());
+            // A case-only rename on a case-insensitive server reuses the source's name,
+            // but only when the listing has no *distinct* entry with the target's exact
+            // spelling. Without that check a case-sensitive server holding both `A` and
+            // `a` would treat the rename as conflict-free and target the existing `a`.
+            let free = !claimed.contains(&key)
+                && (exact_source
+                    || (released.contains(&key) && !taken_exact.contains(candidate.as_str()))
+                    || (!released.contains(&key) && !taken.contains(&key)));
+            if free {
                 claimed.insert(key);
                 break;
             }
@@ -274,7 +288,9 @@ fn suffixed_name(name: &str, n: u32) -> String {
 }
 
 fn base_name(path: &str) -> &str {
-    path.rsplit(['/', '\\'])
+    // `\` is a legal character in a remote name (see `normalize_rel`); only `/` is a
+    // separator here, so `a\b` stays one component instead of becoming `b`.
+    path.rsplit('/')
         .find(|part| !part.is_empty())
         .unwrap_or(path)
 }
@@ -948,14 +964,32 @@ impl DavClient {
         cancel: &AtomicBool,
     ) -> Result<(), ApiError> {
         let temp = temp_upload_rel(rel);
-        let uploaded = match self.upload_to(&temp, local, cancel) {
-            Ok(()) => self.move_to(&temp, rel, true),
-            Err(err) => Err(err),
-        };
-        if uploaded.is_err() {
+        if let Err(err) = self.upload_to(&temp, local, cancel) {
             let _ = self.delete(&temp);
+            return Err(err);
         }
-        uploaded
+        match self.move_to(&temp, rel, true) {
+            Ok(()) => Ok(()),
+            // Lightweight servers and proxy front-ends sometimes advertise MOVE but
+            // answer 405/501. The transfer/rename paths already degrade to a byte round
+            // trip; uploads must as well, or every upload fails after the body was
+            // transferred successfully. The fallback PUT replaces `rel` in place, so a
+            // failure midway can leave a truncated target — the price of a server that
+            // offers no atomic replace.
+            Err(err) if err.code == "BAD_VERB" => {
+                log::warn!(
+                    target: "flowdir::webdav",
+                    "MOVE unsupported; uploading {rel} directly"
+                );
+                let result = self.upload_to(rel, local, cancel);
+                let _ = self.delete(&temp);
+                result
+            }
+            Err(err) => {
+                let _ = self.delete(&temp);
+                Err(err)
+            }
+        }
     }
 
     /// Streams the body to one resource. Authentication is negotiated by rewinding and

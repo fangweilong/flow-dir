@@ -16,6 +16,10 @@ use windows::Win32::Security::Credentials::{
 
 use crate::error::ApiError;
 
+/// Serializes the read-modify-write in [`bind`] against a concurrent [`save`]; without it
+/// the bind can write the old password back over a password the user just changed.
+static CREDENTIAL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// One target per connection id. Changing the prefix orphans every stored password, so
 /// keep it stable across releases.
 fn target(id: &str) -> Vec<u16> {
@@ -36,6 +40,18 @@ fn wide(text: &str) -> Vec<u16> {
 /// secret: its purpose is to refuse the stored password when the connection's URL is later
 /// edited to point at another server, so credentials are never sent to a new host.
 pub fn save(
+    id: &str,
+    username: &str,
+    password: &str,
+    origin: Option<&str>,
+) -> Result<(), ApiError> {
+    let _guard = CREDENTIAL_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    save_locked(id, username, password, origin)
+}
+
+fn save_locked(
     id: &str,
     username: &str,
     password: &str,
@@ -133,10 +149,13 @@ pub fn load(id: &str) -> Option<String> {
 /// Binds an existing credential to `origin` without changing the password. Used once for
 /// entries written before the origin was recorded.
 pub fn bind(id: &str, origin: &str) -> Result<(), ApiError> {
+    let _guard = CREDENTIAL_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let Some(stored) = load_with_origin(id) else {
         return Ok(());
     };
-    save(
+    save_locked(
         id,
         stored.username.as_deref().unwrap_or(""),
         &stored.password,

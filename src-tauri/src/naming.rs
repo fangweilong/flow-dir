@@ -75,7 +75,22 @@ fn unique_one(
             return candidate;
         }
     }
-    path.to_string()
+    // Every sequential suffix is occupied (or reserved by this batch). Returning `path`
+    // here would hand the caller a taken target, so fall back to a time/counter token.
+    // The token changes every iteration, so this loop cannot return an occupied path.
+    let mut token = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos() as u64)
+        .unwrap_or(0);
+    loop {
+        let candidate = dir.join(format!("{stem}~{token:016x}{ext}"));
+        let candidate = candidate.to_string_lossy().into_owned();
+        if !is_taken(&candidate, released, claimed) {
+            claimed.insert(candidate.to_lowercase());
+            return candidate;
+        }
+        token = token.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    }
 }
 
 fn is_taken(

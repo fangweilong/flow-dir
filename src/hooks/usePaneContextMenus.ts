@@ -116,6 +116,8 @@ export function usePaneContextMenus({
     /** Folder the shell menu was opened in; navigating away invalidates the marker. */
     path: string
     before: Set<string>
+    /** When the shell "New" command ran; only entries modified after it are candidates. */
+    since: number
   } | null>(null)
 
   useEffect(() => {
@@ -139,11 +141,14 @@ export function usePaneContextMenus({
     const entries = listing.entries
     const created = entries.filter((entry) => !pendingNew.before.has(entry.name))
     if (!created.length) return
+    // Another process (build, download, sync) can add a file in the same window. A truly
+    // new item carries a modification time at (or just before, on coarse FAT clocks) the
+    // menu action; renaming anything older is worse than skipping the convenience prompt.
+    const fresh = created.filter((entry) => entry.mtime + 2_000 >= pendingNew.since)
+    if (!fresh.length) return
     setPendingNew(null)
-    // Another process (build, download, sync) can add a file in the same window. Renaming
-    // the wrong one is worse than skipping the convenience prompt.
-    if (created.length > 1) return
-    const [entry] = created
+    if (fresh.length > 1) return
+    const [entry] = fresh
     update(pendingNew.tabId, (data) => ({
       ...data,
       selected: new Set([entry.name]),
@@ -335,7 +340,7 @@ export function usePaneContextMenus({
           else if (outcome.action === 'findDuplicates') setFileTools({ mode: 'dup', root: dir })
           else if (outcome.action === 'compare') setCompareOpen(true)
           else if (outcome.action === 'newItem') {
-            setPendingNew({ paneId, tabId: tab.id, path: dir, before })
+            setPendingNew({ paneId, tabId: tab.id, path: dir, before, since: Date.now() })
             refreshPanes()
           } else if (outcome.invoked) refreshPanes()
         })

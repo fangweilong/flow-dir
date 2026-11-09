@@ -2,15 +2,20 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { MutableRefObject } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { takeLaunchRequest, trayRecent } from '../api'
-import type { LaunchRequest, SortState } from '../types'
-import { pathKey } from '../paths'
-import { uid } from '../workspace'
+import type { LaunchRequest, ListData, SortState } from '../types'
+import { nextRevealId, pathKey } from '../paths'
+import { samePath, uid } from '../workspace'
 import type { Workspace } from '../workspace'
+
+/** How long a launch request waits for its row before giving up (slow network shares). */
+const PENDING_SELECT_MS = 15_000
 
 export interface UseLaunchAndTrayOptions {
   ws: Workspace | null
   wsRef: MutableRefObject<Workspace | null>
   setWs: React.Dispatch<React.SetStateAction<Workspace | null>>
+  listData: Record<string, ListData>
+  update: (tabId: string, fn: (d: ListData) => ListData) => void
   newTab: (paneId: string) => void
   navigate: (tabId: string, path: string) => void
   startScan: (tabId: string, path: string, sort: SortState, hidden: boolean) => void
@@ -21,16 +26,25 @@ export function useLaunchAndTray({
   ws,
   wsRef,
   setWs,
+  listData,
+  update,
   newTab,
   navigate,
   startScan,
   setSearchOpen,
 }: UseLaunchAndTrayOptions) {
   const pendingSelect = useRef<{ tabId: string; name: string; path: string } | null>(null)
+  const pendingDeadline = useRef(0)
   // A ref alone cannot wake the consumer: opening a file from the folder already on
   // screen changes no list state, so the request needs its own render signal.
   const [pendingSelectTick, setPendingSelectTick] = useState(0)
   const launchApplied = useRef(false)
+
+  const waitForSelect = useCallback((tabId: string, name: string, path: string) => {
+    pendingSelect.current = { tabId, name, path }
+    pendingDeadline.current = Date.now() + PENDING_SELECT_MS
+    setPendingSelectTick((tick) => tick + 1)
+  }, [])
 
   const openRequest = useCallback(
     (req: LaunchRequest) => {
@@ -47,10 +61,7 @@ export function useLaunchAndTray({
       const select = (req.select ?? '').trim()
       if (req.newWindow) {
         const tabId = uid('t')
-        if (select) {
-          pendingSelect.current = { tabId, name: select, path }
-          setPendingSelectTick((tick) => tick + 1)
-        }
+        if (select) waitForSelect(tabId, select, path)
         setWs((prev) =>
           prev
             ? {
@@ -72,14 +83,11 @@ export function useLaunchAndTray({
       }
       const active = current.tabs[pane.activeTabId]
       if (active) {
-        if (select) {
-          pendingSelect.current = { tabId: active.id, name: select, path }
-          setPendingSelectTick((tick) => tick + 1)
-        }
+        if (select) waitForSelect(active.id, select, path)
         navigate(active.id, path)
       }
     },
-    [navigate, newTab, setWs, startScan, wsRef],
+    [navigate, newTab, setWs, startScan, waitForSelect, wsRef],
   )
 
   /** Last applied request sequence; the same launch can arrive twice (event + queue). */
@@ -149,6 +157,48 @@ export function useLaunchAndTray({
       window.removeEventListener('focus', drain)
     }
   }, [applyLaunch, ws, wsRef])
+
+  // "Open with FlowDir" and `flowdir <path>` ask for one row to be selected. The request
+  // is only usable once the folder has finished listing, so it waits here.
+  useEffect(() => {
+    const pending = pendingSelect.current
+    if (!pending) return
+    // The request names a folder and a row. If the tab was navigated elsewhere (the
+    // folder listing can take a while on a network share), the marker must not select a
+    // same-named row in the new folder.
+    const tab = ws?.tabs[pending.tabId]
+    if (!tab || !samePath(tab.path, pending.path)) {
+      pendingSelect.current = null
+      return
+    }
+    const data = listData[pending.tabId]
+    if (!data || data.loading) return
+    // Shell arguments keep the user's spelling; Windows names are case-insensitive.
+    const match = data.entries.find(
+      (entry) => entry.name.toLowerCase() === pending.name.toLowerCase(),
+    )
+    if (match) {
+      pendingSelect.current = null
+      const name = match.name
+      update(pending.tabId, (d) => ({
+        ...d,
+        selected: new Set([name]),
+        anchor: name,
+        reveal: { name, id: nextRevealId() },
+      }))
+      return
+    }
+    // A kept background refresh publishes its old rows with `loading` false until the
+    // final batch lands, so a miss here may be stale. Poll until the deadline instead of
+    // dropping the request on the first snapshot.
+    const remaining = pendingDeadline.current - Date.now()
+    if (remaining <= 0) {
+      pendingSelect.current = null
+      return
+    }
+    const timer = window.setTimeout(() => setPendingSelectTick((tick) => tick + 1), Math.min(remaining, 1000))
+    return () => window.clearTimeout(timer)
+  }, [listData, pendingSelectTick, update, ws])
 
   // Tray recent directories
   const recentDirs = useMemo(() => {

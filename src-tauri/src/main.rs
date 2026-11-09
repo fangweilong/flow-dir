@@ -566,6 +566,12 @@ fn layout_load(app: tauri::AppHandle) -> Option<serde_json::Value> {
     layout::load(&app).map(|file| file.workspace)
 }
 
+/// Mirrors [`settings_unreadable`]: the frontend skips layout autosaves while true.
+#[tauri::command]
+fn layout_unreadable() -> bool {
+    layout::load_failed()
+}
+
 #[tauri::command]
 fn layout_preserve(app: tauri::AppHandle) -> Result<String, ApiError> {
     layout::preserve(&app).map(|path| path.display().to_string())
@@ -2159,12 +2165,23 @@ fn main() {
         })
         .setup(|app| {
             store::migrate_legacy(app.handle());
-            update::cleanup_leftovers();
+            // A portable update helper deletes/moves `*.old.exe` and `*.new.exe` around the
+            // moment the previous instance exits. Running cleanup at startup could delete
+            // the image the helper still needs when a second instance is launched during
+            // that window, so give the helper time to finish first.
+            std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_secs(15));
+                update::cleanup_leftovers();
+            });
             archive::cleanup_cache();
             // The frontend asks for this once its workspace is restored, so a path from
-            // Explorer or the command line lands on a ready list.
-            let launch =
-                shell_integration::parse_launch(std::env::args().skip(1), None);
+            // Explorer or the command line lands on a ready list. `args_os` keeps a
+            // non-Unicode argument from panicking before the panic hook is installed;
+            // such paths cannot be represented by this String-based API anyway.
+            let launch = shell_integration::parse_launch(
+                std::env::args_os().skip(1).filter_map(|arg| arg.into_string().ok()),
+                None,
+            );
             app.state::<shell_integration::Integration>()
                 .set_launch(launch.clone());
             let saved = settings::load(app.handle());
@@ -2317,6 +2334,7 @@ fn main() {
             layout_save,
             layout_preserve,
             layout_load,
+            layout_unreadable,
             settings_load,
             settings_unreadable,
             settings_save,

@@ -147,10 +147,15 @@ pub fn start(
     // that name escapes the folder, which `protect` never sees because it runs on the
     // selected sources, not on the archive output path.
     if dest.components().any(|part| {
-        matches!(
-            part,
-            std::path::Component::ParentDir | std::path::Component::CurDir
-        )
+        match part {
+            std::path::Component::ParentDir | std::path::Component::CurDir => true,
+            // Under a verbatim (`\\?\`) prefix Rust does not resolve `.`/`..`; they arrive
+            // as ordinary components, so the enum-only check above misses them.
+            std::path::Component::Normal(name) => name
+                .to_str()
+                .is_some_and(|name| name == "." || name == ".."),
+            _ => false,
+        }
     }) {
         return Err(ApiError::new("INVALID_DEST", request.dest.clone()));
     }

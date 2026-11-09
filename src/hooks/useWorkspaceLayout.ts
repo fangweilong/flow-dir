@@ -32,6 +32,8 @@ export type ClosedTabEntry = {
 export interface UseWorkspaceLayoutOptions {
   settingsRef: MutableRefObject<Settings>
   listDataRef: MutableRefObject<Record<string, ListData>>
+  /** Home folder chosen by the settings bootstrap; the fallback for new panes. */
+  homeRef: MutableRefObject<string>
   setListData?: React.Dispatch<React.SetStateAction<Record<string, ListData>>>
   showToast: (msg: string) => void
   t: Translate
@@ -41,6 +43,7 @@ export interface UseWorkspaceLayoutOptions {
 export function useWorkspaceLayout({
   settingsRef,
   listDataRef,
+  homeRef,
   setListData,
   showToast,
   t,
@@ -50,7 +53,6 @@ export function useWorkspaceLayout({
   const [drag, setDrag] = useState<DragState | null>(null)
   const wsRef = useRef<Workspace | null>(null)
   const paneEls = useRef(new Map<string, HTMLDivElement>())
-  const homeRef = useRef('C:\\')
   const readyRef = useRef(false)
   const closedTabs = useRef<ClosedTabEntry[]>([])
 
@@ -65,7 +67,7 @@ export function useWorkspaceLayout({
 
   const activateTab = useCallback((paneId: string, tabId: string) => {
     setWs((prev) =>
-      prev
+      prev && prev.panes[paneId] && prev.tabs[tabId]
         ? {
             ...prev,
             activePaneId: paneId,
@@ -123,23 +125,24 @@ export function useWorkspaceLayout({
     if (!wsRef.current) return
     const path = ''
     const tabId = uid('t')
-    setWs((prev) =>
-      prev
-        ? {
-            ...prev,
-            panes: {
-              ...prev.panes,
-              [paneId]: {
-                ...prev.panes[paneId],
-                tabIds: [...prev.panes[paneId].tabIds, tabId],
-                activeTabId: tabId,
-              },
-            },
-            tabs: { ...prev.tabs, [tabId]: { id: tabId, path, history: [path], histIdx: 0 } },
-            activePaneId: paneId,
-          }
-        : prev,
-    )
+    setWs((prev) => {
+      // A menu or shortcut can outlive the pane it was opened from; appending to a removed
+      // pane would write a tab record no pane owns.
+      if (!prev || !prev.panes[paneId]) return prev
+      return {
+        ...prev,
+        panes: {
+          ...prev.panes,
+          [paneId]: {
+            ...prev.panes[paneId],
+            tabIds: [...prev.panes[paneId].tabIds, tabId],
+            activeTabId: tabId,
+          },
+        },
+        tabs: { ...prev.tabs, [tabId]: { id: tabId, path, history: [path], histIdx: 0 } },
+        activePaneId: paneId,
+      }
+    })
   }, [])
 
   /** Cancels in-flight scans and remembers the closed tabs; `closeOthers` needs the same. */
@@ -268,18 +271,17 @@ export function useWorkspaceLayout({
 
   const openTabAt = useCallback((paneId: string, path: string) => {
     const tabId = uid('t')
-    setWs((prev) =>
-      prev
-        ? {
-            ...prev,
-            tabs: { ...prev.tabs, [tabId]: { id: tabId, path, history: [path], histIdx: 0 } },
-            panes: {
-              ...prev.panes,
-              [paneId]: { ...prev.panes[paneId], tabIds: [...prev.panes[paneId].tabIds, tabId] },
-            },
-          }
-        : prev,
-    )
+    setWs((prev) => {
+      if (!prev || !prev.panes[paneId]) return prev
+      return {
+        ...prev,
+        tabs: { ...prev.tabs, [tabId]: { id: tabId, path, history: [path], histIdx: 0 } },
+        panes: {
+          ...prev.panes,
+          [paneId]: { ...prev.panes[paneId], tabIds: [...prev.panes[paneId].tabIds, tabId] },
+        },
+      }
+    })
   }, [])
 
   const closeOthers = useCallback((paneId: string, tabId: string) => {
@@ -358,51 +360,51 @@ export function useWorkspaceLayout({
     const source = current?.tabs[tabId]
     if (!current || !source) return
     const newId = uid('t')
-    setWs((prev) =>
-      prev
-        ? {
-            ...prev,
-            tabs: { ...prev.tabs, [newId]: { ...source, id: newId, pinned: false } },
-            panes: {
-              ...prev.panes,
-              [paneId]: {
-                ...prev.panes[paneId],
-                tabIds: [...prev.panes[paneId].tabIds, newId],
-                activeTabId: newId,
-              },
-            },
-          }
-        : prev,
-    )
+    setWs((prev) => {
+      if (!prev || !prev.panes[paneId]) return prev
+      return {
+        ...prev,
+        tabs: { ...prev.tabs, [newId]: { ...source, id: newId, pinned: false } },
+        panes: {
+          ...prev.panes,
+          [paneId]: {
+            ...prev.panes[paneId],
+            tabIds: [...prev.panes[paneId].tabIds, newId],
+            activeTabId: newId,
+          },
+        },
+      }
+    })
   }, [])
 
   const openInNewPane = useCallback((paneId: string, tabId: string) => {
     const current = wsRef.current
-    if (!current) return
+    if (!current || !current.panes[paneId]) return
     const tab = current.tabs[tabId]
     if (!tab) return
     const newPaneId = uid('p')
     const newTabId = uid('t')
-    setWs((prev) =>
-      prev
-        ? {
-            ...prev,
-            root: splitPane(prev.root, paneId, 'row', 'after', newPaneId),
-            panes: {
-              ...prev.panes,
-              [newPaneId]: {
-                id: newPaneId,
-                tabIds: [newTabId],
-                activeTabId: newTabId,
-                sort: DEFAULT_SORT,
-                hidden: settingsRef.current.showHidden,
-              },
-            },
-            tabs: { ...prev.tabs, [newTabId]: { id: newTabId, path: tab.path, history: [tab.path], histIdx: 0 } },
-            activePaneId: newPaneId,
-          }
-        : prev,
-    )
+    setWs((prev) => {
+      // The pane may have been closed while the menu was open; `splitPane` would leave the
+      // new pane's record unreachable from the root.
+      if (!prev || !prev.panes[paneId]) return prev
+      return {
+        ...prev,
+        root: splitPane(prev.root, paneId, 'row', 'after', newPaneId),
+        panes: {
+          ...prev.panes,
+          [newPaneId]: {
+            id: newPaneId,
+            tabIds: [newTabId],
+            activeTabId: newTabId,
+            sort: DEFAULT_SORT,
+            hidden: settingsRef.current.showHidden,
+          },
+        },
+        tabs: { ...prev.tabs, [newTabId]: { id: newTabId, path: tab.path, history: [tab.path], histIdx: 0 } },
+        activePaneId: newPaneId,
+      }
+    })
   }, [settingsRef])
 
   const hitTest = useCallback((x: number, y: number) => {
@@ -424,11 +426,12 @@ export function useWorkspaceLayout({
     (tabId: string, fromPaneId: string, target: { paneId: string; mode: DropMode }) => {
       const current = wsRef.current
       const fromPane = current?.panes[fromPaneId]
-      if (target.mode === 'center' && target.paneId === fromPaneId) return
       const dest = current?.panes[target.paneId]
+      // A pane can vanish while the pointer is held (its tab closed in another window or
+      // by a shortcut); never delete the list data of a tab that will not be moved.
+      if (!fromPane || !dest) return
+      if (target.mode === 'center' && target.paneId === fromPaneId) return
       const keepsRows =
-        !!fromPane &&
-        !!dest &&
         fromPane.sort.key === dest.sort.key &&
         fromPane.sort.dir === dest.sort.dir &&
         fromPane.hidden === dest.hidden
@@ -470,6 +473,9 @@ export function useWorkspaceLayout({
         const dir = target.mode === 'left' || target.mode === 'right' ? 'row' : 'col'
         const side = target.mode === 'left' || target.mode === 'top' ? 'before' : 'after'
         const base = prev.panes[target.paneId]
+        // Splitting at an id that is no longer in the root would create a pane record the
+        // renderer can never reach while `activePaneId` points at it.
+        if (!base) return prev
         const newPaneId = uid('p')
         const panes: Record<string, PaneState> = {
           ...prev.panes,

@@ -122,13 +122,19 @@ impl Log for Logger {
     fn log(&self, record: &Record) {
         // Format before locking: a panicking `Display` in a log argument must not leave
         // the mutex held while the panic hook tries to log the panic itself.
-        let line = format!(
-            "[{}] {:<5} {}: {}\n",
+        let mut line = format!(
+            "[{}] {:<5} {}: {}",
             timestamp(),
             record.level(),
             record.target(),
             record.args()
         );
+        // A file name or error detail containing CR/LF must not be able to forge a
+        // second log entry in the diagnostic bundle.
+        if line.contains(['\r', '\n']) {
+            line = line.replace(['\r', '\n'], " ");
+        }
+        line.push('\n');
         let mut state = state_lock(&self.state);
         if record.level() > state.level {
             return;

@@ -131,7 +131,19 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     }
     if path.exists() {
         let backup = path.with_file_name(format!("{name}.bak"));
-        let _ = std::fs::copy(path, backup);
+        // Copy to a temporary first: a power cut or a sharing violation halfway through
+        // `fs::copy` would otherwise leave a truncated backup, and `settings::load`
+        // relies on `.bak` when the primary file cannot be parsed.
+        let backup_tmp = path.with_file_name(format!(
+            ".{name}.bak.{}.{}.tmp",
+            std::process::id(),
+            TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        if std::fs::copy(path, &backup_tmp).is_ok() {
+            let _ = std::fs::rename(&backup_tmp, &backup);
+        } else {
+            let _ = std::fs::remove_file(&backup_tmp);
+        }
     }
     match std::fs::rename(&tmp, path) {
         Ok(()) => Ok(()),

@@ -224,7 +224,7 @@ pub fn request_elevated(
             confirm: current.protect_confirm.clone(),
         }
     };
-    let nonce = random_hex();
+    let nonce = random_hex()?;
     let pipe_name = format!(r"\\.\pipe\flowdir-elevated-{nonce}");
     let cancel_name = format!(r"flowdir-elevated-cancel-{nonce}");
     let cancel_event = create_event(&cancel_name)?;
@@ -250,16 +250,24 @@ pub fn request_elevated(
         .map_err(|_| ApiError::new("ELEVATED", "elevation thread panicked"))?
 }
 
-fn random_hex() -> String {
+fn random_hex() -> Result<String, ApiError> {
     let mut bytes = [0u8; 16];
-    unsafe {
-        let _ = windows::Win32::Security::Cryptography::BCryptGenRandom(
+    let generated = unsafe {
+        // The nonce hides the pipe/event names. A failed RNG used to leave it all zeros,
+        // which makes both names predictable to another process of this user.
+        windows::Win32::Security::Cryptography::BCryptGenRandom(
             None,
             &mut bytes,
             windows::Win32::Security::Cryptography::BCRYPT_USE_SYSTEM_PREFERRED_RNG,
-        );
+        )
+    };
+    if generated.is_err() {
+        return Err(ApiError::new(
+            "ELEVATED",
+            "secure random source unavailable",
+        ));
     }
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// `--elevated-op "<pipe>" --nonce "<nonce>" --cancel-event "<event>" --server-pid <pid>`
@@ -297,6 +305,9 @@ fn run_worker(
     // Set once the client passed the PID check: only then can a later read legitimately
     // receive a report. A rejected impostor must never get a second chance to answer.
     let trusted = std::cell::Cell::new(false);
+    // Survives the first read's timeout/cancel so the grace read can continue the same
+    // message instead of guessing that the pipe is back at a length header.
+    let mut read_state = ReadState::default();
 
     let result = (|| {
         // The helper may exit before it ever connects (credential-based elevation denies
@@ -316,7 +327,7 @@ fn run_worker(
         })
         .map_err(|err| ApiError::new("ELEVATED", format!("request: {err}")))?;
         write_message(pipe.0, event.0, process, &payload, &cancel, budget)?;
-        let bytes = read_message(pipe.0, event.0, process, &cancel, budget)?;
+        let bytes = read_message(pipe.0, event.0, process, &cancel, budget, &mut read_state)?;
         serde_json::from_slice(&bytes)
             .map_err(|err| ApiError::new("ELEVATED_NO_RESULT", err.to_string()))
     })();
@@ -352,6 +363,7 @@ fn run_worker(
                     Some(fork.0),
                     &grace_cancel,
                     grace_budget,
+                    &mut read_state,
                 )
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<ops::ElevatedReport>(&bytes).ok())
@@ -607,7 +619,9 @@ fn connect(
                         format!("ConnectNamedPipe: {}", code.0),
                     ));
                 }
-                wait_io(pipe, &mut overlap, event, process, cancel, budget).map(|_| ())
+                let mut drained = 0usize;
+                wait_io(pipe, &mut overlap, event, process, cancel, budget, &mut drained)
+                    .map(|_| ())
             }
         }
     }
@@ -617,10 +631,15 @@ fn connect(
 /// `overlap` and its buffer. `CancelIoEx` only marks the request: returning before the
 /// driver completes it would free `OVERLAPPED` and the I/O buffer underneath a pending
 /// write, so the completion is drained here even though the caller sees a cancellation.
-unsafe fn cancel_and_drain(handle: HANDLE, overlap: &mut OVERLAPPED) {
+///
+/// Returns the number of bytes the operation transferred before it was canceled. A read
+/// that completed concurrently with the cancellation has already consumed those bytes
+/// from the pipe; the caller must count them so a resumed read stays message-aligned.
+unsafe fn cancel_and_drain(handle: HANDLE, overlap: &mut OVERLAPPED) -> u32 {
     let _ = CancelIoEx(handle, Some(overlap));
     let mut bytes = 0u32;
     let _ = GetOverlappedResult(handle, overlap, &mut bytes, true);
+    bytes
 }
 
 /// Waits for an overlapped operation in short slices so cancellation and the overall
@@ -632,10 +651,11 @@ unsafe fn wait_io(
     process: Option<HANDLE>,
     cancel: &AtomicBool,
     budget: Instant,
+    drained: &mut usize,
 ) -> Result<u32, ApiError> {
     loop {
         if cancel.load(Ordering::Relaxed) {
-            cancel_and_drain(handle, overlap);
+            *drained += cancel_and_drain(handle, overlap) as usize;
             return Err(ApiError::new("ELEVATION_CANCELED", "canceled"));
         }
         let ready = match process {
@@ -651,7 +671,7 @@ unsafe fn wait_io(
             }
             // Index 1 is the helper handle: it exited without answering.
             exited if exited.0 == WAIT_OBJECT_0.0 + 1 => {
-                cancel_and_drain(handle, overlap);
+                *drained += cancel_and_drain(handle, overlap) as usize;
                 return Err(ApiError::new(
                     "ELEVATED_LAUNCH",
                     "the elevated helper exited before replying",
@@ -659,7 +679,7 @@ unsafe fn wait_io(
             }
             WAIT_TIMEOUT => {
                 if Instant::now() >= budget {
-                    cancel_and_drain(handle, overlap);
+                    *drained += cancel_and_drain(handle, overlap) as usize;
                     return Err(ApiError::new(
                         "ELEVATED_TIMEOUT",
                         "the elevated operation is still running",
@@ -708,7 +728,8 @@ fn write_all(
                     count
                 }
                 Err(_) if GetLastError() == ERROR_IO_PENDING => {
-                    wait_io(pipe, &mut overlap, event, process, cancel, budget)?
+                    let mut drained = 0usize;
+                    wait_io(pipe, &mut overlap, event, process, cancel, budget, &mut drained)?
                 }
                 Err(_) => {
                     let code = GetLastError();
@@ -727,22 +748,59 @@ fn write_all(
     Ok(())
 }
 
+/// A report that was only partially received when the first read timed out or was
+/// canceled. The grace read resumes at the exact byte offset instead of restarting from a
+/// fresh header: interpreting the remainder of a body as a length would fail the parse and
+/// lose the indices of items that already completed.
+#[derive(Default)]
+struct ReadState {
+    header: [u8; 4],
+    header_filled: usize,
+    len: Option<u32>,
+    body: Vec<u8>,
+    body_filled: usize,
+}
+
 fn read_message(
     pipe: HANDLE,
     event: HANDLE,
     process: Option<HANDLE>,
     cancel: &AtomicBool,
     budget: Instant,
+    state: &mut ReadState,
 ) -> Result<Vec<u8>, ApiError> {
-    let mut header = [0u8; 4];
-    read_exact(pipe, event, process, &mut header, cancel, budget)?;
-    let len = u32::from_le_bytes(header);
-    if len > MAX_MESSAGE {
-        return Err(ApiError::new("ELEVATED", "response too large"));
+    if state.len.is_none() {
+        read_exact(
+            pipe,
+            event,
+            process,
+            &mut state.header,
+            &mut state.header_filled,
+            cancel,
+            budget,
+        )?;
+        let len = u32::from_le_bytes(state.header);
+        if len > MAX_MESSAGE {
+            // The stream is not trustworthy; do not keep half a header for a later read.
+            *state = ReadState::default();
+            return Err(ApiError::new("ELEVATED", "response too large"));
+        }
+        state.len = Some(len);
+        state.body = vec![0u8; len as usize];
     }
-    let mut body = vec![0u8; len as usize];
-    read_exact(pipe, event, process, &mut body, cancel, budget)?;
-    Ok(body)
+    let ReadState {
+        body, body_filled, ..
+    } = state;
+    read_exact(
+        pipe,
+        event,
+        process,
+        body.as_mut_slice(),
+        body_filled,
+        cancel,
+        budget,
+    )?;
+    Ok(std::mem::take(body))
 }
 
 fn read_exact(
@@ -750,11 +808,11 @@ fn read_exact(
     event: HANDLE,
     process: Option<HANDLE>,
     out: &mut [u8],
+    filled: &mut usize,
     cancel: &AtomicBool,
     budget: Instant,
 ) -> Result<(), ApiError> {
-    let mut offset = 0;
-    while offset < out.len() {
+    while *filled < out.len() {
         if Instant::now() >= budget {
             return Err(ApiError::new(
                 "ELEVATED_TIMEOUT",
@@ -766,7 +824,7 @@ fn read_exact(
                 hEvent: event,
                 ..Default::default()
             };
-            let read = match ReadFile(pipe, Some(&mut out[offset..]), None, Some(&mut overlap)) {
+            let read = match ReadFile(pipe, Some(&mut out[*filled..]), None, Some(&mut overlap)) {
                 Ok(()) => {
                     let mut count = 0u32;
                     GetOverlappedResult(pipe, &overlap, &mut count, true)
@@ -774,7 +832,7 @@ fn read_exact(
                     count
                 }
                 Err(_) if GetLastError() == ERROR_IO_PENDING => {
-                    wait_io(pipe, &mut overlap, event, process, cancel, budget)?
+                    wait_io(pipe, &mut overlap, event, process, cancel, budget, filled)?
                 }
                 Err(_) => {
                     let code = GetLastError();
@@ -793,7 +851,7 @@ fn read_exact(
                     "helper closed the pipe without a report",
                 ));
             }
-            offset += read as usize;
+            *filled += read as usize;
         }
     }
     Ok(())

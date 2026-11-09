@@ -14,6 +14,10 @@ pub static LAYOUT_REJECTED: AtomicBool = AtomicBool::new(false);
 /// Set when the primary file existed but could not be read (as opposed to missing or
 /// corrupt). The backup is used, but the user should know the last snapshot was skipped.
 pub static LAYOUT_UNREADABLE: AtomicBool = AtomicBool::new(false);
+/// Sticky form of [`LAYOUT_UNREADABLE`] for the save guard. The reporting flag is cleared
+/// by `config_warnings`, but an autosave must stay blocked for the rest of the run:
+/// writing the fallback layout back would replace a file that was merely inaccessible.
+static LAYOUT_LOAD_FAILED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct WindowState {
@@ -50,6 +54,7 @@ pub fn load<R: Runtime>(app: &AppHandle<R>) -> Option<LayoutFile> {
             // A sharing violation is not "no layout": going straight to `None` would let
             // the next autosave replace a perfectly good file with the default layout.
             LAYOUT_UNREADABLE.store(true, Ordering::Relaxed);
+            LAYOUT_LOAD_FAILED.store(true, Ordering::Relaxed);
         }
         Read::Missing => return None,
     }
@@ -91,7 +96,22 @@ pub fn preserve<R: Runtime>(app: &AppHandle<R>) -> Result<std::path::PathBuf, Ap
     Ok(backup)
 }
 
+/// Whether `load` fell back to the backup because the primary file was unreadable.
+///
+/// Saves must stay disabled in that state: the workspace in memory came from the backup
+/// (or defaults), so writing it back would replace the file that was only momentarily
+/// locked with an older snapshot.
+pub fn load_failed() -> bool {
+    LAYOUT_LOAD_FAILED.load(Ordering::Relaxed)
+}
+
 pub fn save<R: Runtime>(app: &AppHandle<R>, workspace: Value) -> Result<(), ApiError> {
+    if load_failed() {
+        return Err(ApiError::new(
+            "CONFIG_UNREADABLE",
+            "layout.json could not be read; restart before saving",
+        ));
+    }
     let path = path_for(app)?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| ApiError::new("CONFIG_DIR", e.to_string()))?;

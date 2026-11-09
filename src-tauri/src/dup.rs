@@ -78,6 +78,9 @@ struct Candidate {
     path: PathBuf,
     size: u64,
     mtime: u64,
+    /// Hard-link count; 1 for a normal file. A group may use a linked file as the
+    /// reference for an independent copy, but only one link is shown as deletable.
+    links: u32,
 }
 
 struct ScanStats {
@@ -186,7 +189,7 @@ fn walk(
         .collect();
     // Shortest first, so a parent is always considered before a nested child regardless
     // of the order the caller supplied.
-    ordered.sort_by(|a, b| a.0.len().cmp(&b.0.len()));
+    ordered.sort_by_key(|a| a.0.len());
     let mut kept: Vec<(String, PathBuf)> = Vec::new();
     for (key, path) in ordered {
         if kept.iter().any(|(parent, _)| {
@@ -267,6 +270,7 @@ fn walk(
                 path,
                 size: meta.len(),
                 mtime: mtime_ms(&meta),
+                links: 1,
             });
         }
     }
@@ -449,21 +453,28 @@ pub fn start(
                     .flat_map(|indices| indices.iter().map(|&i| files[i].clone()))
                     .collect();
 
-                // Hard links share their bytes, so reporting them as duplicates would
-                // offer a delete that frees nothing.
+                // Hard links share their bytes, so they must not each be offered as a
+                // deletable duplicate. They still have to participate in hashing: a group
+                // of two links plus one independent copy would otherwise shrink to the
+                // single copy and be dropped as "not a duplicate", hiding a file whose
+                // deletion really does free space.
                 let mut linked = Vec::with_capacity(candidates.len());
-                for candidate in candidates {
+                for mut candidate in candidates {
                     // Opening every size collision can take as long as a phase on a slow
                     // share, so Pause and Cancel must be answered here too.
                     if job.wait_if_paused() {
                         break;
                     }
                     match link_count(&candidate.path) {
-                        Some(1) => linked.push(candidate),
+                        Some(links) => {
+                            if links > 1 {
+                                stats.skipped_hardlink += 1;
+                            }
+                            candidate.links = links;
+                            linked.push(candidate);
+                        }
                         // Unknown count: treat like a link, since deleting it may free
-                        // nothing and the user would be told otherwise. Report it as an
-                        // unreadable file instead of a real hard link.
-                        Some(_) => stats.skipped_hardlink += 1,
+                        // nothing and the user would be told otherwise.
                         None => stats.skipped_unreadable += 1,
                     }
                 }
@@ -489,7 +500,12 @@ pub fn start(
                 let quick_groups = group_results(&candidates, &quick);
                 // `parallel_map` turns a failed hash into `None`; without this count the
                 // file silently vanished from the result and the UI called the scan done.
-                stats.skipped_unreadable += quick.iter().filter(|hash| hash.is_none()).count() as u32;
+                // After a cancel the untouched slots are also `None`, so counting them
+                // would report every unprocessed file as unreadable.
+                if !job.stopped() {
+                    stats.skipped_unreadable +=
+                        quick.iter().filter(|hash| hash.is_none()).count() as u32;
+                }
                 let survivors: Vec<Candidate> = quick_groups
                     .values()
                     .flat_map(|indices| indices.iter().map(|&i| candidates[i].clone()))
@@ -508,19 +524,39 @@ pub fn start(
                     started,
                     |candidate| hash_file(&candidate.path, "sha256", &job, Some(&throttle), |_| {}),
                 );
-                stats.skipped_unreadable += full.iter().filter(|hash| hash.is_none()).count() as u32;
+                if !job.stopped() {
+                    stats.skipped_unreadable +=
+                        full.iter().filter(|hash| hash.is_none()).count() as u32;
+                }
                 for ((size, hash), indices) in group_results(&survivors, &full) {
-                    groups.push(DupGroup {                        size,
+                    let mut files: Vec<&Candidate> =
+                        indices.iter().map(|&i| &survivors[i]).collect();
+                    // A linked set is one logical file. Keep a single representative so an
+                    // independent copy still forms a group, but never list every link as
+                    // a duplicate the user could delete for no reclaimed space.
+                    let mut link_shown = false;
+                    files.retain(|candidate| {
+                        if candidate.links <= 1 {
+                            return true;
+                        }
+                        if link_shown {
+                            return false;
+                        }
+                        link_shown = true;
+                        true
+                    });
+                    if files.len() < 2 {
+                        continue;
+                    }
+                    groups.push(DupGroup {
+                        size,
                         hash,
-                        files: indices
-                            .iter()
-                            .map(|&i| {
-                                let candidate = &survivors[i];
-                                DupEntry {
-                                    path: candidate.path.display().to_string(),
-                                    size: candidate.size,
-                                    mtime: candidate.mtime,
-                                }
+                        files: files
+                            .into_iter()
+                            .map(|candidate| DupEntry {
+                                path: candidate.path.display().to_string(),
+                                size: candidate.size,
+                                mtime: candidate.mtime,
                             })
                             .collect(),
                     });
@@ -568,6 +604,7 @@ mod tests {
             path: PathBuf::from(path),
             size,
             mtime: 0,
+            links: 1,
         }
     }
 

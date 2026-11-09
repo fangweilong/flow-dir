@@ -312,10 +312,12 @@ export function sameVolume(a: string, b: string): boolean {
     return left !== '' && left === connection(b)
   }
   const root = (path: string): string => {
-    const drive = /^[a-zA-Z]:/.exec(path)
+    // Windows treats `/` as a separator; a command-line target may keep that spelling.
+    const norm = path.replace(/\//g, '\\')
+    const drive = /^[a-zA-Z]:/.exec(norm)
     if (drive) return drive[0].toLowerCase()
-    if (path.startsWith('\\\\')) {
-      const parts = path.slice(2).split('\\')
+    if (norm.startsWith('\\\\')) {
+      const parts = norm.slice(2).split('\\')
       return `\\\\${(parts[0] ?? '').toLowerCase()}\\${(parts[1] ?? '').toLowerCase()}`
     }
     return ''
