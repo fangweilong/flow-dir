@@ -104,6 +104,11 @@ export function PaneStatusBar({
                 })}
               </span>
             )}
+            {folderSize.done && folderSize.skipped > 0 && (
+              <span className="text-muted" title={t('list.sizeSkippedHint')}>
+                {t('list.sizeSkipped', { count: folderSize.skipped })}
+              </span>
+            )}
           </span>
         )}
       </div>

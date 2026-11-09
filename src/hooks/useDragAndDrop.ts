@@ -153,14 +153,21 @@ export function useDragAndDrop({
     (sources: string[], target: DropTarget, forced: 'copy' | 'move' | null) => {
       const targetDir = target.dir
       const destination = pathKey(targetDir)
-      const items = sources.filter(
+      let items = sources.filter(
         (source) =>
           pathKey(source) !== destination &&
           pathKey(parentPath(source)) !== destination &&
           !underPath(targetDir, source),
       )
       if (!items.length) return
-      const dirs = Array.from(new Set([targetDir, ...items.map(parentPath)]))
+      // Archive members have no filesystem path; extraction runs through a local-only
+      // command. Dropping them on a WebDAV pane would fail mid-batch, so reject those
+      // items explicitly and still transfer the real files.
+      if (isWebdavPath(targetDir) && items.some(isArchiveMember)) {
+        showToast(t('toast.archiveToWebdav'))
+        items = items.filter((item) => !isArchiveMember(item))
+        if (!items.length) return
+      }      const dirs = Array.from(new Set([targetDir, ...items.map(parentPath)]))
       const after = () => {
         for (const dir of dirs) {
           invalidateTree(dir)

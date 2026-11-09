@@ -41,7 +41,7 @@ type Props = {
   onClose: () => void
   onToast: (text: string) => void
   /** Runs the confirmed steps in order and resolves when the queue has drained. */
-  onSync: (actions: SyncAction[]) => Promise<void>
+  onSync: (actions: SyncAction[]) => Promise<boolean>
 }
 
 export function ComparePanel({
@@ -437,7 +437,9 @@ export function ComparePanel({
     // compared with the session generation.
     const runSeq = sessionSeq.current
     try {
-      await onSync(plan.actions)
+      // A failed copy/delete step already reported itself; keep the plan and preview so
+      // the user can retry, instead of clearing them and announcing a completed sync.
+      if (!(await onSync(plan.actions))) return
       setPreviewOpen(false)
       setPlan(null)
       // The preview can be dismissed mid-run and the roots changed; the new session owns

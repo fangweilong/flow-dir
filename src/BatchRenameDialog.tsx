@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { NumberField } from './components/NumberField'
 import { makeT } from './i18n'
-import { baseName, joinPath } from './paths'
+import { baseName, invalidFileName, joinPath } from './paths'
 import { pathsExist, uniquePaths } from './api'
 import type { Lang } from './types'
 
@@ -19,29 +19,8 @@ type Mode = 'replace' | 'sequence'
 /** How a name already present on disk is handled. `ask` blocks until the user picks one. */
 type ConflictPolicy = 'ask' | 'skip' | 'number'
 
-const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i
-const ILLEGAL = /[\u0000-\u001f<>:"/\\|?*]/
-
-function splitName(name: string): { stem: string; ext: string } {
-  const dot = name.lastIndexOf('.')
+function splitName(name: string): { stem: string; ext: string } {  const dot = name.lastIndexOf('.')
   return dot > 0 ? { stem: name.slice(0, dot), ext: name.slice(dot) } : { stem: name, ext: '' }
-}
-
-function invalidName(name: string): boolean {
-  // Windows reserves a device name when the segment before the *first* dot matches, so
-  // `con.tar.gz` is as blocked as `con`; the archive writer resolves the stem the same way.
-  const stem = name.split('.')[0]
-  return (
-    !name ||
-    // The backend measures the same limit in UTF-16 code units (`encode_utf16`), which is
-    // what JS `length` counts, so a 256-unit name would fail after the preview said "ok".
-    name.length > 255 ||
-    ILLEGAL.test(name) ||
-    /[ .]$/.test(name) ||
-    name === '.' ||
-    name === '..' ||
-    RESERVED.test(stem)
-  )
 }
 
 /**
@@ -94,7 +73,7 @@ export function BatchRenameDialog({ dir, names, lang, onConfirm, onClose }: Prop
     const rows = new Set<number>()
     const seen = new Map<string, number>()
     plan.forEach((pair, index) => {
-      if (invalidName(pair.to)) rows.add(index)
+      if (invalidFileName(pair.to)) rows.add(index)
       const key = pair.to.toLowerCase()
       const first = seen.get(key)
       if (first !== undefined) {
@@ -131,10 +110,15 @@ export function BatchRenameDialog({ dir, names, lang, onConfirm, onClose }: Prop
       setProbed(true)
       return
     }
-    const selected = new Set(names.map((name) => name.toLowerCase()))
-    const renamedAway = new Set(
-      plan.filter((pair) => pair.from !== pair.to).map((pair) => pair.from.toLowerCase()),
-    )
+    // Rows execute in plan order, so a name is free only when the row that currently
+    // holds it runs earlier and actually moves away. Treating every selected row as
+    // already freed made `a→a2` + `a2→a22` preview as conflict-free while `a→a2` still
+    // saw the old `a2` on disk.
+    const sourceIndex = new Map<string, number>()
+    plan.forEach((pair, index) => {
+      const key = pair.from.toLowerCase()
+      if (!sourceIndex.has(key)) sourceIndex.set(key, index)
+    })
     void pathsExist(changedTargets.map((item) => joinPath(dir, item.pair.to))).then((flags) => {
       if (stale) return
       const hit = new Set<number>()
@@ -143,7 +127,12 @@ export function BatchRenameDialog({ dir, names, lang, onConfirm, onClose }: Prop
         const { index } = changedTargets[i]
         const target = plan[index].to.toLowerCase()
         const source = plan[index].from.toLowerCase()
-        const freeByMove = selected.has(target) && renamedAway.has(target) && target !== source
+        const owner = sourceIndex.get(target)
+        const freeByMove =
+          owner !== undefined &&
+          owner < index &&
+          plan[owner].from !== plan[owner].to &&
+          target !== source
         if (!freeByMove) hit.add(index)
       })
       setConflicts(hit)

@@ -734,8 +734,17 @@ fn normalize_webdav(list: Vec<WebdavConnection>) -> Vec<WebdavConnection> {
 /// Drops `user[:password]@` from the URL authority while keeping scheme, host and path.
 fn strip_url_userinfo(url: &str) -> String {
     let Some(scheme_end) = url.find("://") else {
-        return url.to_string();
+        // Without a scheme the whole string may be `user:password@host`; persisting it
+        // would put the credential in settings.toml. The connection is unusable anyway,
+        // so the caller drops it.
+        return String::new();
     };
+    // `user:password@https://host` is not a valid URL: the credentials sit before the
+    // scheme marker rather than in the authority, so the `@` search below would miss
+    // them and echo the password back through settings_load.
+    if url[..scheme_end].contains('@') {
+        return String::new();
+    }
     let rest = &url[scheme_end + 3..];
     let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let Some(at) = rest[..authority_end].rfind('@') else {
@@ -1186,7 +1195,16 @@ pub fn load<R: Runtime>(app: &AppHandle<R>) -> Settings {
         Parse::Missing => {}
     }
     match parse_file(&dir.join("settings.toml.bak")) {
-        Parse::Ok(settings) => return *settings,
+        Parse::Ok(settings) => {
+            // The primary file exists but could not be read, so the backup is a stale
+            // snapshot. It is the best available config for this run, but the load still
+            // counts as failed: setup must not apply integration switches from it, and the
+            // UI must not mistake it for the file the user last saved.
+            if unreadable {
+                LOAD_FAILED.store(true, Ordering::Relaxed);
+            }
+            return *settings;
+        }
         Parse::Failed => unreadable = true,
         _ => {}
     }

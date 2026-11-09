@@ -82,6 +82,14 @@ export function PreviewPanel({
   const [hiResUrl, setHiResUrl] = useState<string | null>(null)
 
   useEffect(() => {
+    // View modes belong to the file that was open: keeping "hex"/"source" across a
+    // selection change could hide a binary file's metadata behind an empty hex view.
+    setHtmlViewMode('preview')
+    setBinaryMode('meta')
+    setTextViewMode('text')
+  }, [path])
+
+  useEffect(() => {
     setHiResUrl(null)
     const raster = info?.kind === 'image' || info?.kind === 'pdf' || info?.kind === 'video'
     if (!expanded || !raster || !path) return

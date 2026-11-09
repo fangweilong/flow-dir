@@ -146,10 +146,11 @@ export function SearchOverlay({
    */
   const [permutation, setPermutation] = useState<number[] | null>(null)
   useEffect(() => {
-    if (!items.length || loading) {
-      setPermutation(null)
-      return
-    }
+    // The permutation indexes the previous `items`; a replacement list of the same length
+    // would be shown in the old order until the new sort resolves (and Enter would open
+    // the wrong row). Fall back to the local collator immediately.
+    setPermutation(null)
+    if (!items.length || loading) return
     let stale = false
     const timer = window.setTimeout(() => {
       void sortOrder(

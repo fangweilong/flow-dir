@@ -118,9 +118,11 @@ pub fn virtual_parent(path: &str) -> String {
 fn normalize_rel(raw: &str) -> String {
     // The virtual path stores names exactly as the listing decoded them, so percent
     // decoding here would turn a literal `%2F` in a file name into a path separator.
-    let normalized = raw.replace('\\', "/");
+    // A backslash is likewise a legal character in a remote (POSIX) name: folding it
+    // into `/` would make `a\b` address `a/b`, so a delete or rename could hit a
+    // different object than the one the listing showed.
     let mut parts: Vec<&str> = Vec::new();
-    for part in normalized.split('/') {
+    for part in raw.split('/') {
         if part.is_empty() || part == "." {
             continue;
         }
@@ -351,7 +353,14 @@ pub fn ensure_local(
 /// Verifies a connection and its credentials; used by the settings page's "test" button.
 pub fn test(conn: &WebdavConnection, password: Option<&str>) -> Result<(), ApiError> {
     let client = DavClient::new(conn, password)?;
-    client.stat("")?;
+    // A 404 means the host answered but the configured root is wrong. Reporting success
+    // would leave a saved connection whose every listing is NOT_FOUND.
+    let stat = client
+        .stat("")?
+        .ok_or_else(|| ApiError::new("NOT_FOUND", client.url_for("")))?;
+    if !stat.is_dir {
+        return Err(ApiError::new("NOT_FOUND", client.url_for("")));
+    }
     Ok(())
 }
 
@@ -980,18 +989,23 @@ impl DavClient {
         let bytes = response.read_all(MAX_XML_BYTES, cancel)?;
         let rows = parse_multistatus(&bytes)?;
         let self_path = normalize_url_path(&self.endpoint.object(rel));
-        // A 207 body that marks the request target itself as 404 means the folder is gone;
-        // reporting an empty listing would look like a successful, empty folder.
-        if rows
-            .iter()
-            .any(|row| row.missing && normalize_url_path(&row.href_path) == self_path)
-        {
-            return Err(ApiError::new("NOT_FOUND", self.rel_url(rel)));
-        }
         let mut entries = Vec::new();
         let mut truncated = false;
+        let mut saw_self = false;
         for row in rows {
-            if row.missing || normalize_url_path(&row.href_path) == self_path {
+            let href_path = normalize_url_path(&row.href_path);
+            if href_path == self_path {
+                if row.missing {
+                    return Err(ApiError::new("NOT_FOUND", self.rel_url(rel)));
+                }
+                // A Depth-1 PROPFIND always reports the collection itself, even when it
+                // is empty. Its absence means this body is not a trustworthy listing
+                // (proxy error page, broken server): reporting "empty" would let a Move
+                // delete a non-empty source after copying nothing.
+                saw_self = true;
+                continue;
+            }
+            if row.missing {
                 continue;
             }
             let name = match row.display_name {
@@ -1010,6 +1024,12 @@ impl DavClient {
             let attrs = if row.is_dir { ATTR_DIRECTORY } else { 0 };
             let id = fnv_u64(&format!("{}:{}:{}", row.href_path, row.size, row.mtime));
             entries.push(Entry::new(name, row.size, row.mtime, attrs, id));
+        }
+        // The cap can stop the walk before the self row appears; that listing is already
+        // marked truncated and callers refuse destructive use, so only a complete walk
+        // must prove it saw the collection itself.
+        if !saw_self && !truncated {
+            return Err(ApiError::new("WEBDAV_PROTOCOL", self.rel_url(rel)));
         }
         Ok((entries, truncated))
     }
@@ -1240,7 +1260,11 @@ fn pick_scheme(challenge: &str) -> Option<WINHTTP_CREDS_AUTHSCHEME> {
 fn status_error(status: u32, verb: &str, rel: &str) -> ApiError {
     let code = match status {
         401 => "WEBDAV_AUTH",
-        403 | 423 => "ACCESS_DENIED",
+        // A remote 403 must not look like a local ACL denial: the UI offers an elevated
+        // retry for `ACCESS_DENIED`, and the elevated helper rejects every WebDAV path.
+        // A 423 is a server-side lock, not a permission problem either.
+        403 => "WEBDAV_DENIED",
+        423 => "WEBDAV_LOCKED",
         404 => "NOT_FOUND",
         405 | 501 => "BAD_VERB",
         409 | 412 => "EXISTS",

@@ -126,27 +126,53 @@ unsafe fn restore_items(paths: &[String]) -> Result<RestoreReport, ApiError> {
         // collected first and a second pass restores exactly the newest item; restoring
         // whichever item happened to come first brought back an arbitrary version.
         let mut newest = vec![0u64; wanted.len()];
+        // A stamp the shell did not expose is unknown, not zero: the second pass then
+        // falls back to the first match instead of rejecting every item.
+        let mut stamp_unknown = vec![false; wanted.len()];
+        // An item whose original path could not be read may be a wanted item; it must not
+        // turn into a "no longer in the bin" verdict.
+        let mut unidentified = false;
         for_each_recycled(&folder, |item| {
             let Some(original) = original_path(&folder, item) else {
+                unidentified = true;
                 return true;
             };
             let Some(index) = wanted.iter().position(|path| *path == path_key(&original)) else {
                 return true;
             };
-            newest[index] = newest[index].max(deleted_stamp(&folder, item).unwrap_or(0));
+            match deleted_stamp(&folder, item) {
+                Some(stamp) => newest[index] = newest[index].max(stamp),
+                None => stamp_unknown[index] = true,
+            }
             true
         })?;
 
         let mut handled = vec![false; wanted.len()];
+        // Set when the newest copy could not be identified on the second pass, so the
+        // path stays retryable instead of being reported as gone.
+        let mut unreadable = vec![false; wanted.len()];
         for_each_recycled(&folder, |item| {
             let Some(original) = original_path(&folder, item) else {
+                unidentified = true;
                 return true;
             };
             let Some(index) = wanted.iter().position(|path| *path == path_key(&original)) else {
                 return true;
             };
-            if handled[index] || deleted_stamp(&folder, item).unwrap_or(0) != newest[index] {
+            if handled[index] {
                 return true;
+            }
+            if !stamp_unknown[index] {
+                match deleted_stamp(&folder, item) {
+                    Some(stamp) if stamp == newest[index] => {}
+                    Some(_) => return true,
+                    // The first pass saw a stamp, so this is not provably the newest copy.
+                    // Restoring it could bring back an older version.
+                    None => {
+                        unreadable[index] = true;
+                        return true;
+                    }
+                }
             }
             handled[index] = true;
             match restore_item(&folder, item) {
@@ -165,7 +191,15 @@ unsafe fn restore_items(paths: &[String]) -> Result<RestoreReport, ApiError> {
         })?;
 
         for (index, path) in paths.iter().enumerate() {
-            if !handled[index] {
+            if handled[index] {
+                continue;
+            }
+            // Only an item we positively failed to find is gone. An unreadable bin entry
+            // (or a stamp that vanished between the passes) may still hold the file, so
+            // report it as retryable: the undo entry stays until the bin is readable.
+            if unidentified || unreadable[index] {
+                report.failed.push(path.clone());
+            } else {
                 report.missing.push(path.clone());
             }
         }

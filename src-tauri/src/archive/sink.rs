@@ -399,7 +399,17 @@ impl Sink {
         F: FnOnce(&mut Guarded<'_>) -> Result<(), ApiError>,
     {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| self.abort_io(path, &e))?;
+            if let Err(err) = fs::create_dir_all(parent) {
+                let error = self.abort_io(path, &err);
+                // Same policy as `write`: a full disk makes every later entry fail and
+                // aborts, while a name conflict only skips this member. Aborting here
+                // discarded every other member of a rar/iso extraction.
+                if error.code == "NOT_ENOUGH_SPACE" {
+                    return Err(error);
+                }
+                self.skip_current(&error);
+                return Ok(());
+            }
         }
         let file = match File::create(path) {
             Ok(file) => file,

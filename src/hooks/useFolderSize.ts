@@ -33,6 +33,7 @@ export function useFolderSize() {
         files: 0,
         dirs: 0,
         bytes: 0,
+        skipped: 0,
         done: false,
         aborted: false,
         error: null,

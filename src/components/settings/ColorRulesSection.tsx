@@ -66,7 +66,9 @@ export function ColorRulesSection({ settings, onChange, t, visible }: Props) {
     const next = rules.slice()
     ;[next[index], next[target]] = [next[target], next[index]]
     onChange({ ...settings, colorRules: next })
+    // The editor tracks an array index, so it must follow the rule it was opened on.
     if (editing === index) setEditing(target)
+    else if (editing === target) setEditing(index)
   }
 
   if (!visible) return null
@@ -143,6 +145,7 @@ export function ColorRulesSection({ settings, onChange, t, visible }: Props) {
                 type="button"
                 onClick={() => {
                   if (editing === index) reset()
+                  else if (editing !== null && index < editing) setEditing(editing - 1)
                   onChange({
                     ...settings,
                     colorRules: settings.colorRules.filter((_, i) => i !== index),

@@ -64,7 +64,9 @@ export const isWebdavPath = (path: string) =>
 
 /** `webdav://id/a/b` → connection `id` and `['a','b']`; `.`/`..` are resolved. */
 export function webdavParts(path: string): { id: string; segments: string[] } {
-  const rest = path.slice(WEBDAV_SCHEME.length).replace(/\\/g, '/')
+  // Only `/` separates remote path segments. A backslash is a legal character in a
+  // remote name, so treating it as a separator would address a different object.
+  const rest = path.slice(WEBDAV_SCHEME.length)
   const [rawId, ...tail] = rest.split('/')
   const segments: string[] = []
   for (const part of tail.join('/').split('/')) {
@@ -148,6 +150,31 @@ export const joinPath = (dir: string, name: string) => {
 
 /** Shell-namespace location (recycle bin, control panel) rather than a filesystem path. */
 export const isShellPath = (path: string) => path.startsWith('shell:') || path.startsWith('::')
+
+const RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i
+const ILLEGAL_NAME = /[\u0000-\u001f<>:"/\\|?*]/
+
+/**
+ * True for a name Windows cannot create as a single path segment. Shared by the dialogs
+ * that let the user type a file/folder/archive name so a `..\..\x` spelling can never
+ * escape the folder they picked.
+ */
+export function invalidFileName(name: string): boolean {
+  // Windows reserves a device name when the segment before the *first* dot matches, so
+  // `con.tar.gz` is as blocked as `con`; the archive writer resolves the stem the same way.
+  const stem = name.split('.')[0]
+  return (
+    !name ||
+    // The backend measures the same limit in UTF-16 code units (`encode_utf16`), which is
+    // what JS `length` counts, so a 256-unit name would fail after the preview said "ok".
+    name.length > 255 ||
+    ILLEGAL_NAME.test(name) ||
+    /[ .]$/.test(name) ||
+    name === '.' ||
+    name === '..' ||
+    RESERVED_NAME.test(stem)
+  )
+}
 
 /** Full path of a row: shell items carry their own parsing name, filesystem rows join. */
 export const entryPath = (dir: string, entry: { name: string; href?: string }) =>

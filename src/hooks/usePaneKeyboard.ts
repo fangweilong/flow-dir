@@ -125,9 +125,10 @@ export function usePaneKeyboard({
         anchor: entry.name,
         selected: new Set([entry.name]),
       }))
-      virtualizer.scrollToIndex(hit, { align: 'auto' })
+      // `virtualizer.count` is rows, not entries; grid views pack `columns` tiles per row.
+      virtualizer.scrollToIndex(Math.floor(hit / columns), { align: 'auto' })
     },
-    [clearTypeAhead, tab, typed, update, view, virtualizer],
+    [clearTypeAhead, columns, tab, typed, update, view, virtualizer],
   )
 
   const selectRow = useCallback(

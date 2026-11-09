@@ -188,6 +188,9 @@ export function useAppSettings({
       if (warnings.includes('LAYOUT_REJECTED')) {
         toast(makeT(merged.language)('toast.layoutRejected'))
       }
+      if (warnings.includes('LAYOUT_UNREADABLE')) {
+        toast(makeT(merged.language)('toast.layoutUnreadable'))
+      }
       setSettings(merged)
       // `previewOpen` is applied by `usePreviewController`'s own effect from `settings`.
       // Writing it through `setPreviewOpen` here used a controller that still held

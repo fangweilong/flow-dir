@@ -90,6 +90,9 @@ struct Progress {
     /// Entries the walk could not read (deny-ACL folder, vanished path). Reported with the
     /// final message instead of aborting the whole archive.
     failed: Vec<crate::ops::OpFailure>,
+    /// Uncapped skip count: `failed` stops at the display limit, so its length cannot be
+    /// used for the final `failedCount`.
+    failed_total: u32,
 }
 
 impl Progress {
@@ -102,7 +105,7 @@ impl Progress {
             name: self.current.clone(),
             work: self.bytes,
             work_total: self.bytes_total,
-            failed_count: self.failed.len() as u32,
+            failed_count: self.failed_total,
             failed: if done { self.failed.clone() } else { Vec::new() },
             succeeded: Vec::new(),
             failed_indices: Vec::new(),
@@ -140,6 +143,17 @@ pub fn start(
         }
     }
     let dest = PathBuf::from(&request.dest);
+    // The dialog joins a single name to the folder it showed; a `..`/`.` component means
+    // that name escapes the folder, which `protect` never sees because it runs on the
+    // selected sources, not on the archive output path.
+    if dest.components().any(|part| {
+        matches!(
+            part,
+            std::path::Component::ParentDir | std::path::Component::CurDir
+        )
+    }) {
+        return Err(ApiError::new("INVALID_DEST", request.dest.clone()));
+    }
     let parent = dest
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -195,7 +209,7 @@ fn run(
     );
     let tmp = temporary(&dest);
     let result: Result<Progress, ApiError> = (|| {
-        let mut skipped = Vec::new();
+        let mut skipped = Skips::default();
         let sources = collect(&request.paths, &dest, &tmp, &cancel, &mut skipped)?;
         let bytes_total = sources.iter().map(|source| source.size).sum();
         let mut progress = Progress {
@@ -207,7 +221,8 @@ fn run(
             bytes_total,
             current: None,
             last: Instant::now(),
-            failed: skipped,
+            failed: skipped.items,
+            failed_total: skipped.total,
         };
         write_archive(format, &tmp, &sources, level, request.password.as_deref(), &mut progress, &cancel)?;
         publish(&tmp, &dest, &request.dest)?;
@@ -313,6 +328,27 @@ fn temporary(dest: &Path) -> PathBuf {
     dest.with_file_name(name)
 }
 
+/// Skip log for the walk. The detail list is capped for display; `total` keeps the real
+/// count so the final `failedCount` is not truncated with it.
+#[derive(Default)]
+struct Skips {
+    items: Vec<crate::ops::OpFailure>,
+    total: u32,
+}
+
+impl Skips {
+    fn push(&mut self, path: String, code: &str, detail: &str) {
+        self.total = self.total.saturating_add(1);
+        if self.items.len() < 200 {
+            self.items.push(crate::ops::OpFailure {
+                path,
+                code: code.to_string(),
+                detail: detail.to_string(),
+            });
+        }
+    }
+}
+
 /// Walks the selection once. Names are relative to the parent of each selected item, so a
 /// selected folder lands under its own name and selected files land at the archive root.
 fn collect(
@@ -320,11 +356,11 @@ fn collect(
     dest: &Path,
     tmp: &Path,
     cancel: &AtomicBool,
-    skipped: &mut Vec<crate::ops::OpFailure>,
+    skipped: &mut Skips,
 ) -> Result<Vec<Source>, ApiError> {
     /// One unreadable child must not fail the whole archive: record it and keep walking,
     /// the same way extraction reports per-entry failures.
-    fn record(skipped: &mut Vec<crate::ops::OpFailure>, path: &Path, err: std::io::Error) {
+    fn record(skipped: &mut Skips, path: &Path, err: std::io::Error) {
         let text = path.display().to_string();
         let error = ApiError::from_io(&text, &err);
         log::warn!(target: "flowdir::archive", "compress skip {text}: {}", error.code);
@@ -333,20 +369,14 @@ fn collect(
 
     /// A reparse point that cannot be archived is skipped like an unreadable child; doing
     /// it silently would make the archive quietly incomplete.
-    fn record_link(skipped: &mut Vec<crate::ops::OpFailure>, path: &Path) {
+    fn record_link(skipped: &mut Skips, path: &Path) {
         let text = path.display().to_string();
         log::warn!(target: "flowdir::archive", "compress skip link {text}");
         push_skip(skipped, text, "SYMLINK", "SYMLINK");
     }
 
-    fn push_skip(skipped: &mut Vec<crate::ops::OpFailure>, text: String, code: &str, detail: &str) {
-        if skipped.len() < 200 {
-            skipped.push(crate::ops::OpFailure {
-                path: text,
-                code: code.to_string(),
-                detail: detail.to_string(),
-            });
-        }
+    fn push_skip(skipped: &mut Skips, text: String, code: &str, detail: &str) {
+        skipped.push(text, code, detail);
     }
     // Compared as lowercased text: both sides are absolute and this runs once per child,
     // where a `canonicalize` syscall per entry would dominate the walk.
@@ -829,6 +859,7 @@ mod tests {
             current: None,
             last: Instant::now(),
             failed: Vec::new(),
+            failed_total: 0,
         };
         let cancel = AtomicBool::new(false);
         let data = b"abcdef".as_slice();

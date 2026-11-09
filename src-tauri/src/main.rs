@@ -432,6 +432,9 @@ async fn path_is_dir(
                 .flatten()
                 .is_some_and(|stat| stat.is_dir);
         }
+        if shellfs::is_shell_path(&path) {
+            return shellfs::is_dir(&path);
+        }
         let expanded = fs::expand_path(&path);
         let p = std::path::Path::new(&expanded);
         if p.is_dir() {
@@ -1347,6 +1350,18 @@ async fn preview_external(
             webdav::ensure_local(&root, &settings, &path, None)?
                 .to_string_lossy()
                 .into_owned()
+        } else if let Some((archive_path, inner_path)) = archive::resolve_archive_path(&path) {
+            // The requested file only exists inside the archive; handing the archive path
+            // itself to the external viewer would open the wrong file.
+            if inner_path.is_empty() {
+                path
+            } else if archive::is_inner_dir(&archive_path, &inner_path)? {
+                return Err(ApiError::new("IS_DIR", "archive folder has no external preview"));
+            } else {
+                archive::extract_cached(&archive_path, &inner_path, None)?
+                    .to_string_lossy()
+                    .into_owned()
+            }
         } else {
             path
         };
@@ -1432,17 +1447,25 @@ async fn everything_status() -> search::EverythingStatus {
 }
 
 #[tauri::command]
-fn shell_properties(app: tauri::AppHandle, path: String) -> Result<(), ApiError> {
+async fn shell_properties(app: tauri::AppHandle, path: String) -> Result<(), ApiError> {
+    // `HWND` is not `Send`; the raw handle is what the blocking worker needs.
     let hwnd = app
         .get_webview_window("main")
-        .and_then(|window| window.hwnd().ok());
-    shell_menu::properties(hwnd.map(|h| h.0 as isize), &path)
+        .and_then(|window| window.hwnd().ok())
+        .map(|h| h.0 as isize);
+    // The property sheet is modal and an SMB item can stall while the shell resolves it;
+    // never hold the IPC thread while it runs.
+    tauri::async_runtime::spawn_blocking(move || shell_menu::properties(hwnd, &path))
+    .await
+    .map_err(|e| ApiError::new("THREAD", e.to_string()))?
 }
 
 /// Invokes the shell's `Eject` verb; media removal itself is asynchronous.
 #[tauri::command]
-fn drive_eject(root: String) -> Result<(), ApiError> {
-    shell_menu::eject(root)
+async fn drive_eject(root: String) -> Result<(), ApiError> {
+    tauri::async_runtime::spawn_blocking(move || shell_menu::eject(root))
+        .await
+        .map_err(|e| ApiError::new("THREAD", e.to_string()))?
 }
 
 /// Puts recycled files back at their original paths (Ctrl+Z after a delete).
@@ -1599,6 +1622,15 @@ fn uac_enabled() -> bool {
 /// instance waits for this PID, so a restart never trips the single-instance mutex.
 #[tauri::command]
 async fn restart_privilege(app: tauri::AppHandle, elevated: bool) -> Result<(), ApiError> {
+    // `privilege::restart` shuts the process down after 250 ms; a running copy/extract
+    // would be silently canceled and could leave half-written targets behind. The tray
+    // quit path already refuses in this case.
+    if !app.state::<ops::OpState>().active().is_empty() {
+        return Err(ApiError::new(
+            "BUSY",
+            "operations are running; finish or cancel them first",
+        ));
+    }
     tauri::async_runtime::spawn_blocking(move || privilege::restart(&app, elevated))
         .await
         .map_err(|e| ApiError::new("THREAD", e.to_string()))?
@@ -1612,6 +1644,9 @@ fn config_warnings() -> Vec<&'static str> {
     }
     if layout::LAYOUT_REJECTED.swap(false, std::sync::atomic::Ordering::Relaxed) {
         warnings.push("LAYOUT_REJECTED");
+    }
+    if layout::LAYOUT_UNREADABLE.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        warnings.push("LAYOUT_UNREADABLE");
     }
     warnings
 }
@@ -1860,7 +1895,14 @@ async fn open_with(path: String) -> Result<(), ApiError> {
 }
 
 #[tauri::command]
-fn explorer_open(path: String) -> Result<(), ApiError> {
+async fn explorer_open(path: String) -> Result<(), ApiError> {
+    // `is_dir` on a disconnected share and process creation can both wait on the network.
+    tauri::async_runtime::spawn_blocking(move || explorer_open_blocking(path))
+        .await
+        .map_err(|e| ApiError::new("THREAD", e.to_string()))?
+}
+
+fn explorer_open_blocking(path: String) -> Result<(), ApiError> {
     if !std::path::Path::new(&path).is_dir() {
         return Err(ApiError::new("NOT_DIR", path));
     }
@@ -1871,7 +1913,13 @@ fn explorer_open(path: String) -> Result<(), ApiError> {
         .map_err(|e| ApiError::from_io(&path, &e))
 }
 #[tauri::command]
-fn open_terminal(path: String) -> Result<(), ApiError> {
+async fn open_terminal(path: String) -> Result<(), ApiError> {
+    tauri::async_runtime::spawn_blocking(move || open_terminal_blocking(path))
+        .await
+        .map_err(|e| ApiError::new("THREAD", e.to_string()))?
+}
+
+fn open_terminal_blocking(path: String) -> Result<(), ApiError> {
     if !std::path::Path::new(&path).is_dir() {
         return Err(ApiError::new("NOT_DIR", path));
     }

@@ -523,7 +523,7 @@ export default function App() {
       const current = wsRef.current
       if (!current) return
       const target = ev.target instanceof Element ? ev.target.closest<HTMLElement>('[data-pane-id]') : null
-      if (!target && overlayOpen) return
+      if (overlayOpen) return
       const pane = current.panes[target?.dataset.paneId ?? current.activePaneId]
       const tab = pane ? current.tabs[pane.activeTabId] : undefined
       if (tab) historyMove(tab.id, ev.button === 3 ? -1 : 1)

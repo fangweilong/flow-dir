@@ -233,6 +233,15 @@ export function useFileActionHandlers({
           )
           const copyRest = (extra: string[]) => {
             const archives = archived.concat(extra)
+            if (archives.length && isWebdavPath(tab.path)) {
+              // Archive members are not filesystem paths and extraction is local-only.
+              // Say so instead of letting the batch fail on the first member; the other
+              // clipboard entries still transfer.
+              showToast(t('toast.archiveToWebdav'))
+              const rest = clip.paths.filter((path) => !archives.includes(path))
+              if (rest.length) runOp(clip.cut ? 'move' : 'copy', rest, { targetDir: tab.path })
+              return
+            }
             if (archives.length && !isInsideArchive(tab.path)) {
               void archiveExtractItems(archives, tab.path)
                 .then((extracted) => {

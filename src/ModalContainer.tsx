@@ -76,7 +76,7 @@ export interface ModalContainerProps {
   runOp: (kind: OpKind, sources: string[], options?: RunOpOptions) => void
   extractArchive: (archive: string, dest: string, password?: string) => void
   runCompress: (paths: string[], dest: string, format: CompressFormat, level: number, password: string | null) => void
-  runSyncActions: (actions: SyncAction[]) => Promise<void>
+  runSyncActions: (actions: SyncAction[]) => Promise<boolean>
   openInApp: (path: string) => void
   pathsFor: (paneId: string, names: string[]) => string[]
   openFolders: string[]

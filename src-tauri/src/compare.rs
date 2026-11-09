@@ -367,10 +367,7 @@ fn walk_files(
                 }
             };
             let (hidden, link) = hidden_or_link(&meta);
-            if (hidden && !options.include_hidden) || link || excluded(options, &name) {
-                continue;
-            }
-            *scanned = scanned.saturating_add(1);
+            let filtered = (hidden && !options.include_hidden) || link || excluded(options, &name);
             let child_rel = if rel.is_empty() {
                 name.clone()
             } else {
@@ -378,10 +375,23 @@ fn walk_files(
             };
             let is_dir = meta.is_dir();
             if is_dir {
+                // A filtered directory contributes no files, and `read_side` pairs it as
+                // compared=false at its own level; not descending keeps the recursive
+                // counts aligned with the rows the level view shows.
+                if filtered {
+                    continue;
+                }
+                *scanned = scanned.saturating_add(1);
                 stack.push((entry.path(), child_rel));
             } else {
+                // Filtered files stay in the map so they pair with their counterpart
+                // instead of making it look like a one-sided file. Dropping them here
+                // disagreed with `read_side`, which keeps them with `compared=false`.
+                if !filtered {
+                    *scanned = scanned.saturating_add(1);
+                }
                 let item = meta_of(&meta, false);
-                let compared = file_ok(options, &name, &item);
+                let compared = !filtered && file_ok(options, &name, &item);
                 out.insert(child_rel.to_lowercase(), (item, compared));
             }
         }

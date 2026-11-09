@@ -60,6 +60,26 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
   }, [x, y])
 
   useEffect(() => {
+    // A menu taller than the viewport would clip its last entries with no way to reach
+    // them; keep it inside the window and scroll internally instead.
+    const reclamp = () => {
+      const el = ref.current
+      if (!el) return
+      const rect = el.getBoundingClientRect()
+      setPos((current) => ({
+        x: Math.max(4, Math.min(current.x, window.innerWidth - rect.width - 4)),
+        y: Math.max(4, Math.min(current.y, window.innerHeight - rect.height - 4)),
+      }))
+    }
+    window.addEventListener('resize', reclamp)
+    window.addEventListener('scroll', reclamp, true)
+    return () => {
+      window.removeEventListener('resize', reclamp)
+      window.removeEventListener('scroll', reclamp, true)
+    }
+  }, [])
+
+  useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
       if (ev.key === 'Escape') {
         ev.preventDefault()
@@ -100,7 +120,7 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
       data-context-menu
       role="menu"
       tabIndex={-1}
-      className="fixed z-[60] min-w-[11.5rem] rounded-lg border border-line bg-surface py-1 shadow-xl"
+      className="fixed z-[60] max-h-[calc(100vh-8px)] min-w-[11.5rem] overflow-y-auto rounded-lg border border-line bg-surface py-1 shadow-xl"
       style={{ left: pos.x, top: pos.y }}
       onContextMenu={(ev) => ev.preventDefault()}
     >

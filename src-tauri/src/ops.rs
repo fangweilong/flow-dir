@@ -348,6 +348,30 @@ fn validate(
     if request.sources.is_empty() {
         return Err(ApiError::new("EMPTY", "no source paths"));
     }
+    // Both checks run before `protect::check`: a NUL truncates the path inside Win32
+    // (`SHCreateItemFromParsingName` takes a `PCWSTR`) while `protect::key` compares the
+    // full spelling, so `C:\Windows\0\..\x` would be checked as `C:\x` but delete
+    // `C:\Windows`. A relative path resolves against the process CWD, which no rule
+    // covers, and has no legitimate source in this app.
+    for path in request
+        .sources
+        .iter()
+        .chain(request.target_dir.iter())
+    {
+        validate_operation_path(path)?;
+    }
+    // One `newName` applies to every source, so a multi-source copy/move would send all
+    // of them to the same target: the shell silently overwrites the earlier copies and
+    // the undo record maps several sources onto one landing path.
+    if matches!(kind, Kind::Copy | Kind::Move)
+        && request.new_name.is_some()
+        && request.sources.len() > 1
+    {
+        return Err(ApiError::new(
+            "BAD_ARGS",
+            "newName requires a single source",
+        ));
+    }
     if matches!(kind, Kind::Delete | Kind::Move | Kind::Rename) {
         protect::check(
             &request.sources,
@@ -405,6 +429,29 @@ fn validate_entry_name(name: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Operation paths must be absolute filesystem paths, WebDAV addresses or shell
+/// namespaces. `protect::key` only understands the first form; letting the other two
+/// spellings through here is what keeps protection from depending on how a path was
+/// typed.
+fn validate_operation_path(path: &str) -> Result<(), ApiError> {
+    if path.is_empty() || path.contains('\0') {
+        return Err(ApiError::new("INVALID_PATH", path.to_string()));
+    }
+    if crate::webdav::is_webdav(path) || path.starts_with("shell:") || path.starts_with("::") {
+        return Ok(());
+    }
+    let bytes = path.as_bytes();
+    let absolute = path.starts_with(r"\\")
+        || (bytes.len() > 2
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'\\' | b'/'));
+    if !absolute {
+        return Err(ApiError::new("INVALID_PATH", path.to_string()));
+    }
+    Ok(())
+}
+
 fn involves_webdav(request: &Request) -> bool {
     request.sources.iter().any(|path| crate::webdav::is_webdav(path))
         || request
@@ -412,7 +459,6 @@ fn involves_webdav(request: &Request) -> bool {
             .as_deref()
             .is_some_and(crate::webdav::is_webdav)
 }
-
 /// Runs an operation to completion on the calling thread. This is the body of the
 /// elevated helper: it has no `AppHandle`, no window and no Channel back to a webview,
 /// so progress is discarded and only the final result matters.
@@ -1617,7 +1663,7 @@ mod tests {
         assert_eq!(outcome.failed.len(), 1);
         assert!(outcome.failed[0].path.ends_with("locked.txt"));
         assert_eq!(
-            outcome.failed[0].code, "SHARE_UNAVAILABLE",
+            outcome.failed[0].code, "FILE_IN_USE",
             "detail: {}",
             outcome.failed[0].detail
         );

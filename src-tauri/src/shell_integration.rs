@@ -262,14 +262,17 @@ fn apply_hotkey(app: &AppHandle, enabled: bool, combo: &str) -> Result<(), Strin
     if slot.as_ref().map(|handle| handle.combo.as_str()) == desired.as_deref() {
         return Ok(());
     }
-    if let Some(handle) = slot.take() {
-        stop_hotkey(handle);
-    }
     let Some(combo) = desired else {
+        // Disabling the feature: there is no replacement to register first.
+        if let Some(handle) = slot.take() {
+            stop_hotkey(handle);
+        }
         return Ok(());
     };
     let (modifiers, vk) = parse_hotkey(&combo).ok_or_else(|| "HOTKEY_INVALID".to_string())?;
 
+    // Register the new combination before releasing the old one. Stopping first left the
+    // feature disabled when the new chord was taken by another program.
     let (tx, rx) = mpsc::channel();
     let thread_app = app.clone();
     let thread = std::thread::Builder::new()
@@ -291,6 +294,9 @@ fn apply_hotkey(app: &AppHandle, enabled: bool, combo: &str) -> Result<(), Strin
 
     match rx.recv_timeout(Duration::from_secs(5)) {
         Ok(Ok(thread_id)) => {
+            if let Some(previous) = slot.take() {
+                stop_hotkey(previous);
+            }
             *slot = Some(Hotkey {
                 combo,
                 thread_id,

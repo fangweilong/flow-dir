@@ -299,7 +299,10 @@ export function useDirectoryScanner({
       )
       if (!tab) return
       const source = listDataRef.current[tab.id]?.entries ?? []
-      if (!source.length) {
+      // While a scan is in flight, later batches replace `entries`, so the local reorder
+      // below would be discarded and the header would show an order the rows do not
+      // follow. Restart the scan with the new sort instead; `keep` avoids a flash.
+      if (!source.length || scanning.current.has(tab.id)) {
         startScan(tab.id, tab.path, sort, pane.hidden, true)
         return
       }

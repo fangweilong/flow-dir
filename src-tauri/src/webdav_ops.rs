@@ -285,20 +285,24 @@ fn delete_sources(
         check_cancel(cancel)?;
         let index = index as u32;
         runner.label(base_name(source));
-        let result = if webdav::is_webdav(source) {
-            let dav = webdav::parse(source)
-                .ok_or_else(|| ApiError::new("WEBDAV_CONN", source.clone()))?;
-            let client = runner.client(&dav.connection)?;
-            if dav.path.trim_matches('/').is_empty() {
-                // The connection root is the WebDAV equivalent of a volume root; it is
-                // never a delete target even though `protect` skips virtual addresses.
-                Err(ApiError::new("PROTECTED", source.clone()))
-            } else {
+        // A bad connection id or a credential lookup failure fails this item only: the
+        // alternatives are aborting the whole batch after some deletes already landed,
+        // or reporting success for items that were never attempted.
+        let result = (|| -> Result<(), ApiError> {
+            if webdav::is_webdav(source) {
+                let dav = webdav::parse(source)
+                    .ok_or_else(|| ApiError::new("WEBDAV_CONN", source.clone()))?;
+                if dav.path.trim_matches('/').is_empty() {
+                    // The connection root is the WebDAV equivalent of a volume root; it is
+                    // never a delete target even though `protect` skips virtual addresses.
+                    return Err(ApiError::new("PROTECTED", source.clone()));
+                }
+                let client = runner.client(&dav.connection)?;
                 client.delete(&dav.path)
+            } else {
+                delete_local(Path::new(source))
             }
-        } else {
-            delete_local(Path::new(source))
-        };
+        })();
         match result {
             Ok(()) => runner.item_ok(index),
             Err(err) if err.code == "CANCELED" => return Err(err),
@@ -328,6 +332,12 @@ fn rename_sources(
             if webdav::is_webdav(source) {
                 let dav = webdav::parse(source)
                     .ok_or_else(|| ApiError::new("WEBDAV_CONN", source.clone()))?;
+                // Renaming the connection root would MOVE the whole collection into one
+                // of its own children. Delete/Move guard this via `guard_remote_root`;
+                // rename has no other caller-side check.
+                if dav.path.trim_matches('/').is_empty() {
+                    return Err(ApiError::new("PROTECTED", source.clone()));
+                }
                 let client = runner.client(&dav.connection)?;
                 let target = rel_join(rel_parent(&dav.path), name);
                 // MOVE with Overwrite: F rejects an existing target with 412 instead of
@@ -403,15 +413,18 @@ fn transfer_sources(
     for (index, source) in request.sources.iter().enumerate() {
         check_cancel(cancel)?;
         let index = index as u32;
-        // The top-level name is joined to the destination too; a remote displayname such
-        // as `C:evil` would otherwise replace the local base path.
-        let name = if target_remote {
-            safe_remote_name(base_name(source))?
-        } else {
-            safe_local_name(base_name(source))?
-        };
-        runner.label(name);
+        runner.label(base_name(source));
         let result = (|| -> Result<(), ApiError> {
+            // The top-level name is joined to the destination too; a remote displayname
+            // such as `C:evil` would otherwise replace the local base path. Derive it
+            // here rather than before the loop: a name the target rejects must fail only
+            // its own item instead of aborting every remaining source.
+            let name = if target_remote {
+                safe_remote_name(base_name(source))?
+            } else {
+                safe_local_name(base_name(source))?
+            };
+            runner.label(name);
             if target_remote {
                 let dav = webdav::parse(target_dir)
                     .ok_or_else(|| ApiError::new("WEBDAV_CONN", target_dir.to_string()))?;
@@ -1041,7 +1054,13 @@ fn guard_remote_root(dav_path: &str, kind: Kind, source: &str) -> Result<(), Api
 }
 
 fn guard_into_self_remote(src: &str, dest: &str) -> Result<(), ApiError> {
-    if dest == src || dest.starts_with(&format!("{}/", src.trim_end_matches('/'))) {
+    let src = src.trim_matches('/');
+    let dest = dest.trim_matches('/');
+    // The connection root contains every other object, so any same-connection
+    // destination lies inside it. Without the empty check the prefix below becomes "/"
+    // and never matches the root-relative `dest`, letting a copy/move root into itself
+    // through both guards.
+    if src.is_empty() || dest == src || dest.starts_with(&format!("{src}/")) {
         return Err(ApiError::new(
             "INVALID_DEST",
             format!("webdav:/{src} -> webdav:/{dest}"),

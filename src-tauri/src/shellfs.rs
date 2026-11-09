@@ -73,6 +73,29 @@ pub fn filesystem_path(path: &str) -> Option<String> {
     }
 }
 
+/// Whether a parsing name resolves to a shell folder.
+///
+/// Namespace-only locations (`shell:RecycleBinFolder`, `::{CLSID}`) have no filesystem
+/// path, so `Path::is_dir` can never recognize them; the address bar still needs to accept
+/// them as navigation targets.
+pub fn is_dir(path: &str) -> bool {
+    let _com = ComGuard::new();
+    unsafe {
+        let mut raw: *mut ITEMIDLIST = std::ptr::null_mut();
+        if SHParseDisplayName(&HSTRING::from(path), None::<&IBindCtx>, &mut raw, 0, None).is_err()
+            || raw.is_null()
+        {
+            return false;
+        }
+        let pidl = Pidl(raw);
+        let Ok(item) = SHCreateItemFromIDList::<IShellItem>(pidl.0) else {
+            return false;
+        };
+        item.GetAttributes(SFGAO_FOLDER)
+            .is_ok_and(|attrs| attrs.0 & SFGAO_FOLDER.0 != 0)
+    }
+}
+
 struct ComGuard(bool);
 
 impl ComGuard {
@@ -143,6 +166,9 @@ pub fn enumerate(path: &str, show_hidden: bool, cancel: &AtomicBool) -> Result<S
                 if fetched > 0 && !child.is_null() {
                     CoTaskMemFree(Some(child as *const c_void));
                 }
+                // An enumeration error leaves unknown items unread; the outcome must not
+                // claim the listing is complete.
+                truncated = true;
                 break;
             }
             if fetched == 0 {

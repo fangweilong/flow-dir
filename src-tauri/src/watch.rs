@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Mutex;
 
-use notify::event::ModifyKind;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Runtime};
@@ -79,7 +78,7 @@ pub fn set<R: Runtime>(
     // The key never changes for the lifetime of this watcher; canonicalising it per event
     // delayed every notification during a build.
     let git_key = crate::pathkey::path_key(&path);
-    let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+    let built = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
         let event = match result {
             Ok(event) => event,
             Err(err) => {
@@ -116,19 +115,28 @@ pub fn set<R: Runtime>(
         } else {
             handle.emit("flowdir:dir-changed", payload)
         };
-    })
-    .map_err(|e| ApiError::new("WATCH", e.to_string()))?;
+    });
 
     // Watcher construction and `watch()` can block on a dead SMB share; only the map
     // insert is serialized, so one broken pane cannot freeze every other pane.
-    let installed = watcher.watch(folder, RecursiveMode::NonRecursive);
-    // A pane showing a repository subfolder still needs to see `git add`/`git commit`
-    // outside the app; both touch only metadata above the folder.
-    if installed.is_ok() {
-        if let Some(dir) = &git_dir {
-            let _ = watcher.watch(dir, RecursiveMode::NonRecursive);
+    let (watcher, installed) = match built {
+        Ok(mut watcher) => {
+            let installed = watcher.watch(folder, RecursiveMode::NonRecursive);
+            // A pane showing a repository subfolder still needs to see `git add`/`git
+            // commit` outside the app; both touch only metadata above the folder.
+            if installed.is_ok() {
+                if let Some(dir) = &git_dir {
+                    let _ = watcher.watch(dir, RecursiveMode::NonRecursive);
+                }
+            }
+            (Some(watcher), installed)
         }
-    }
+        // A construction failure must take the same cleanup path as a failed `watch()`.
+        // Returning early left the previous folder's watcher installed: the pane was
+        // unwatched while the stale watcher kept reporting changes for a path it no
+        // longer displayed.
+        Err(err) => (None, Err(err)),
+    };
 
     // Check and insert under the same lock pair (latest → map, the order `clear` uses):
     // releasing `latest` first let a newer `set` be overwritten by this stale watcher.
@@ -153,7 +161,7 @@ pub fn set<R: Runtime>(
         );
         return Err(ApiError::new("WATCH", err.to_string()));
     }
-    map.insert(pane_id, watcher);
+    map.insert(pane_id, watcher.expect("a watcher exists when watch() succeeded"));
     Ok(())
 }
 
@@ -170,19 +178,12 @@ pub fn clear(watchers: &Watchers, pane_id: &str) {
     watchers.map.lock().unwrap().remove(pane_id);
 }
 
-/// A change that can add, remove or rename a top-level row. Everything else rewrites an
-/// existing entry only, so the pane keeps its rows instead of re-enumerating the folder.
-///
-/// Windows reports in-place writes and attribute updates as `Modify(Any)`; creations,
-/// deletions and the temp-file rename used by atomic saves arrive as `Create`, `Remove`
-/// and `Modify(Name)`.
+/// A change that requires re-enumerating the folder. Besides creations, deletions and
+/// renames, this includes in-place writes: Windows reports them as `Modify(Any)`, and the
+/// row's Size and Modified columns are stale until the folder is read again. Reads never
+/// change either column and are still ignored.
 fn is_structural(kind: EventKind) -> bool {
-    !matches!(
-        kind,
-        EventKind::Modify(ModifyKind::Data(_))
-            | EventKind::Modify(ModifyKind::Any)
-            | EventKind::Access(_)
-    )
+    !matches!(kind, EventKind::Access(_))
 }
 
 /// Nearest ancestor carrying git metadata, resolving the `.git` file used by linked
@@ -215,12 +216,12 @@ fn metadata_dir(dir: &FsPath) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notify::event::{CreateKind, DataChange, MetadataKind, RenameMode, RemoveKind};
+    use notify::event::{CreateKind, DataChange, MetadataKind, ModifyKind, RenameMode, RemoveKind};
 
     #[test]
-    fn only_name_changes_are_structural() {
-        assert!(!is_structural(EventKind::Modify(ModifyKind::Any)));
-        assert!(!is_structural(EventKind::Modify(ModifyKind::Data(
+    fn content_and_name_changes_are_structural() {
+        assert!(is_structural(EventKind::Modify(ModifyKind::Any)));
+        assert!(is_structural(EventKind::Modify(ModifyKind::Data(
             DataChange::Content
         ))));
         assert!(!is_structural(EventKind::Access(

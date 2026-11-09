@@ -497,7 +497,7 @@ export function useFileOperations({
 
   const runSyncActions = useCallback(
     (actions: SyncAction[]) => {
-      const { promise, resolve } = Promise.withResolvers<void>()
+      const { promise, resolve } = Promise.withResolvers<boolean>()
       const copies = new Map<string, string[]>()
       const deletes: string[] = []
       for (const action of actions) {
@@ -517,18 +517,21 @@ export function useFileOperations({
             overwrite: true,
             // A failed copy must stop the plan before the delete step: removing the
             // "extra" files after an incomplete copy leaves the destination worse than
-            // either half of the sync alone.
-            onDone: (ok) => (ok ? runNext() : resolve()),
+            // either half of the sync alone. Report the failure so the panel keeps its
+            // plan visible instead of announcing a completed sync.
+            onDone: (ok) => (ok ? runNext() : resolve(false)),
           }),
         )
       }
       if (deletes.length) {
-        steps.push(() => runOp('delete', deletes, { onDone: () => resolve() }))
+        steps.push(() =>
+          runOp('delete', deletes, { onDone: (ok) => (ok ? runNext() : resolve(false)) }),
+        )
       }
       let index = 0
       function runNext() {
         if (index >= steps.length) {
-          resolve()
+          resolve(true)
           return
         }
         steps[index++]()

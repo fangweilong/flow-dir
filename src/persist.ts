@@ -239,7 +239,9 @@ export function toSnapshot(ws: Workspace): Snapshot {
 function isNode(value: unknown, panes: Record<string, unknown>): value is Node {
   if (!value || typeof value !== 'object') return false
   const node = value as Record<string, unknown>
-  if (node.t === 'pane') return typeof node.id === 'string' && node.id in panes
+  // `in` also accepts inherited keys (`constructor`, `toString`, `__proto__`), which a
+  // hand-edited layout.json can use to pass validation without a matching own record.
+  if (node.t === 'pane') return typeof node.id === 'string' && Object.hasOwn(panes, node.id)
   if (node.t === 'split') {
     return (
       typeof node.id === 'string' &&
@@ -283,8 +285,8 @@ export function fromSnapshot(value: unknown): Workspace | null {
     // throw out of the bootstrap and leave the window empty with no recovery path.
     if (!pane || typeof pane !== 'object') return null
     if (!Array.isArray(pane.tabIds) || !pane.tabIds.length) return null
-    if (!pane.tabIds.every((id) => id in tabMap)) return null
-    if (!(pane.activeTabId in tabMap)) return null
+    if (!pane.tabIds.every((id) => Object.hasOwn(tabMap, id))) return null
+    if (!Object.hasOwn(tabMap, pane.activeTabId)) return null
     // The active tab must belong to this pane, otherwise the filter below can drop the
     // record and leave the pane with no active tab.
     if (!pane.tabIds.includes(pane.activeTabId)) return null
@@ -320,7 +322,7 @@ export function fromSnapshot(value: unknown): Workspace | null {
     Object.entries(tabMap).filter(([id]) => referenced.has(id)),
   )
   const activePaneId =
-    typeof snapshot.activePaneId === 'string' && snapshot.activePaneId in paneMap
+    typeof snapshot.activePaneId === 'string' && Object.hasOwn(paneMap, snapshot.activePaneId)
       ? snapshot.activePaneId
       : Object.keys(paneMap)[0]
 

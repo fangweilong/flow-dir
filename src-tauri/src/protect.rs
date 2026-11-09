@@ -13,7 +13,12 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 use windows::core::PCWSTR;
-use windows::Win32::Storage::FileSystem::GetLongPathNameW;
+use windows::Win32::Foundation::CloseHandle;
+use windows::Win32::Storage::FileSystem::{
+    CreateFileW, GetFinalPathNameByHandleW, GetLongPathNameW, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GETFINALPATHNAMEBYHANDLE_FLAGS,
+    OPEN_EXISTING,
+};
 
 use crate::error::ApiError;
 use crate::fs::expand_path;
@@ -44,7 +49,11 @@ pub fn check(
 ) -> Result<(), ApiError> {
     let block: Vec<String> = protection.block.iter().filter_map(|raw| rule_key(raw)).collect();
     let confirm: Vec<String> = protection.confirm.iter().filter_map(|raw| rule_key(raw)).collect();
-    let confirmed: HashSet<String> = confirmed.iter().filter_map(|raw| key(raw)).collect();
+    let confirmed: HashSet<String> = confirmed
+        .iter()
+        .map(|raw| final_path(raw).unwrap_or_else(|| raw.clone()))
+        .filter_map(|path| key(&path))
+        .collect();
     let mut refused = Vec::new();
     let mut pending = Vec::new();
 
@@ -67,9 +76,16 @@ pub fn check(
             None
         };
         let candidate = resolved.as_deref().unwrap_or(source);
+        // Compare the object the OS will actually act on. A junction, symlink, mapped
+        // drive, `subst` drive or UNC admin share (`\\localhost\C$\…`) all reach the same
+        // directory under a spelling the lexical key cannot match against a rule.
+        // The check and the shell operation are separate calls, so this closes the
+        // alias-based bypass but cannot rule out a reparse point being swapped in
+        // between (TOCTOU); the shell's own protected-path refusal is the second layer.
+        let final_path = final_path(candidate).unwrap_or_else(|| candidate.to_string());
         // Fail closed: a spelling that does not resolve to a filesystem location cannot be
         // proven safe, and silently skipping it was a bypass (relative paths, `...`).
-        let Some(source_key) = key(candidate) else {
+        let Some(source_key) = key(&final_path) else {
             refused.push(source.clone());
             continue;
         };
@@ -78,7 +94,10 @@ pub fn check(
         } else if confirm.iter().any(|rule| covers(&source_key, rule))
             && !confirmed.contains(&source_key)
         {
-            pending.push(source.clone());
+            // Send the resolved spelling back: `key` cannot normalise a shell alias such
+            // as `shell:Startup`, so a confirmation carrying the raw alias would never
+            // match on retry.
+            pending.push(final_path);
         }
     }
 
@@ -124,12 +143,15 @@ pub fn key(raw: &str) -> Option<String> {
     }
     let text = trimmed.replace('/', "\\");
     // Long-path and device prefixes carry no meaning for comparison, and `\\?\UNC\`
-    // must become an ordinary UNC path before the share-root check sees it.
-    let text = if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+    // must become an ordinary UNC path before the share-root check sees it. Win32
+    // accepts the `UNC` segment in any case; a case-sensitive strip left
+    // `\\?\unc\server\share` unrecognised, so both the rules and the share-root refusal
+    // were skipped.
+    let text = if let Some(rest) = strip_ascii_prefix(&text, r"\\?\UNC\") {
         format!(r"\\{rest}")
-    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+    } else if let Some(rest) = strip_ascii_prefix(&text, r"\\?\") {
         rest.to_string()
-    } else if let Some(rest) = text.strip_prefix(r"\\.\") {
+    } else if let Some(rest) = strip_ascii_prefix(&text, r"\\.\") {
         rest.to_string()
     } else {
         text
@@ -215,6 +237,58 @@ fn resolve_short_name(path: &str) -> Option<String> {
             return Some(String::from_utf16_lossy(&buf[..needed]));
         }
         // The first call reports the required size (without the terminator).
+        buf = vec![0u16; needed + 1];
+    }
+}
+
+/// Case-insensitive ASCII prefix removal (`\\?\unc\` is as valid as `\\?\UNC\`).
+fn strip_ascii_prefix<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = text.get(..prefix.len())?;
+    if !head.eq_ignore_ascii_case(prefix) {
+        return None;
+    }
+    text.get(prefix.len()..)
+}
+
+/// Resolves a path to the object the filesystem will act on, following reparse points and
+/// normalising mapped/`subst` drives and UNC aliases. `None` when the path does not exist
+/// or cannot be opened; the caller then keeps the lexical key.
+fn final_path(raw: &str) -> Option<String> {
+    if raw.contains('\0') {
+        return None;
+    }
+    let wide: Vec<u16> = raw.encode_utf16().chain([0]).collect();
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            // No read/write access is needed for the name; `BACKUP_SEMANTICS` opens
+            // directories. Following the default (no OPEN_REPARSE_POINT) resolves the
+            // junction/symlink to its target, which is what the operation will touch.
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )
+    }
+    .ok()?;
+    let mut buf = vec![0u16; 512];
+    loop {
+        let len = unsafe {
+            GetFinalPathNameByHandleW(handle, &mut buf, GETFINALPATHNAMEBYHANDLE_FLAGS(0))
+        };
+        if len == 0 {
+            let _ = unsafe { CloseHandle(handle) };
+            return None;
+        }
+        let needed = len as usize;
+        if needed < buf.len() {
+            let text = String::from_utf16_lossy(&buf[..needed]);
+            let _ = unsafe { CloseHandle(handle) };
+            return Some(text);
+        }
+        // The return value is the required size when the buffer was too small.
         buf = vec![0u16; needed + 1];
     }
 }

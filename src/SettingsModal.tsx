@@ -194,6 +194,9 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
 
   useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
+      // Escape during an IME composition cancels the candidate list; closing the whole
+      // panel would discard the settings being edited.
+      if (ev.isComposing) return
       if (ev.key === 'Escape') onClose()
     }
     window.addEventListener('keydown', onKey)

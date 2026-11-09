@@ -11,6 +11,9 @@ pub const VERSION: u32 = 1;
 
 /// Set when the primary layout file was unusable, so the frontend can tell the user.
 pub static LAYOUT_REJECTED: AtomicBool = AtomicBool::new(false);
+/// Set when the primary file existed but could not be read (as opposed to missing or
+/// corrupt). The backup is used, but the user should know the last snapshot was skipped.
+pub static LAYOUT_UNREADABLE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct WindowState {
@@ -43,6 +46,11 @@ pub fn load<R: Runtime>(app: &AppHandle<R>) -> Option<LayoutFile> {
         Read::Invalid => {
             LAYOUT_REJECTED.store(true, Ordering::Relaxed);
         }
+        Read::Unreadable => {
+            // A sharing violation is not "no layout": going straight to `None` would let
+            // the next autosave replace a perfectly good file with the default layout.
+            LAYOUT_UNREADABLE.store(true, Ordering::Relaxed);
+        }
         Read::Missing => return None,
     }
     let backup = path.with_file_name("layout.json.bak");
@@ -56,11 +64,15 @@ enum Read {
     Ok(LayoutFile),
     Invalid,
     Missing,
+    /// The file exists but could not be opened or read (locking, sharing violation).
+    Unreadable,
 }
 
 fn read(path: &std::path::Path) -> Read {
-    let Ok(bytes) = std::fs::read(path) else {
-        return Read::Missing;
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Read::Missing,
+        Err(_) => return Read::Unreadable,
     };
     serde_json::from_slice::<LayoutFile>(&bytes)
         .ok()

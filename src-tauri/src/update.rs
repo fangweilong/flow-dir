@@ -378,6 +378,7 @@ fn install_inner<R: Runtime>(app: &AppHandle<R>) -> Result<(), ApiError> {
 
     let exe = std::env::current_exe().map_err(|e| ApiError::new("UPDATE_IO", e.to_string()))?;
     let mut staged: Option<PathBuf> = None;
+    let mut envs: Vec<(&str, PathBuf)> = vec![(ENV_EXE, exe.clone())];
     let body = match flavor {
         Flavor::Portable => {
             // Re-hash right before staging so a file swapped after the download (TOCTOU)
@@ -388,9 +389,10 @@ fn install_inner<R: Runtime>(app: &AppHandle<R>) -> Result<(), ApiError> {
             // executable behind if the shutdown were interrupted.
             let path = stage_portable(&exe, &downloaded)?;
             let _ = fs::remove_file(&downloaded);
-            let body = portable_body(&exe, &path);
+            envs.push((ENV_OLD, exe.with_extension("old.exe")));
+            envs.push((ENV_STAGED, path.clone()));
             staged = Some(path);
-            body
+            portable_body()
         }
         Flavor::Installer => {
             verify_file(&downloaded, asset)?;
@@ -398,14 +400,14 @@ fn install_inner<R: Runtime>(app: &AppHandle<R>) -> Result<(), ApiError> {
             // update "complete" while nothing changed. `start /wait` propagates the exit
             // code, so skip the relaunch line when it is non-zero. `goto` (not `exit /b`)
             // keeps the helper's own `del "%~f0"` cleanup reachable.
+            envs.push((ENV_SETUP, downloaded));
             format!(
-                "start \"\" /wait \"{}\" /S\r\nif errorlevel 1 goto installed\r\nstart \"\" \"{}\"\r\n:installed",
-                batch_path(&downloaded),
-                batch_path(&exe)
+                "start \"\" /wait \"%{ENV_SETUP}%\" /S\r\nif errorlevel 1 goto installed\r\nstart \"\" \"%{ENV_EXE}%\"\r\n:installed"
             )
         }
     };
-    if let Err(err) = spawn_helper(&body) {
+    let env_refs: Vec<(&str, &Path)> = envs.iter().map(|(key, path)| (*key, path.as_path())).collect();
+    if let Err(err) = spawn_helper(&body, &env_refs) {
         // The live image is untouched; only the staged copy has to go.
         if let Some(staged) = staged {
             let _ = fs::remove_file(staged);
@@ -808,19 +810,25 @@ fn stage_portable(exe: &Path, downloaded: &Path) -> Result<PathBuf, ApiError> {
     Ok(staged)
 }
 
+/// Environment variables that carry the paths into the helper. The batch body must stay
+/// pure ASCII: `cmd.exe` decodes a `.cmd` file with the console/OEM code page, so a UTF-8
+/// script containing `C:\Users\张三\…` becomes mojibake and every `move`/`start` fails.
+/// `Command::env` passes Unicode through `CreateProcessW`, and `%VAR%` expansion is
+/// Unicode inside cmd, so the paths survive regardless of the active code page.
+const ENV_EXE: &str = "FLOWDIR_UPDATE_EXE";
+const ENV_OLD: &str = "FLOWDIR_UPDATE_OLD";
+const ENV_STAGED: &str = "FLOWDIR_UPDATE_STAGED";
+const ENV_SETUP: &str = "FLOWDIR_UPDATE_SETUP";
+
 /// Body of the relaunch helper for a portable update: move the current image aside, move the
 /// staged copy into its place, and start it. Every `move` is checked, because the running
 /// image may still be locked for a moment after the PID disappears; the previous image is
 /// restored in that case and always remains launchable.
-fn portable_body(exe: &Path, staged: &Path) -> String {
-    let old = exe.with_extension("old.exe");
-    let exe = batch_path(exe);
-    let old = batch_path(&old);
-    let staged = batch_path(staged);
+fn portable_body() -> String {
     // CRLF matters here: `goto` searches forward for the label and a bare LF can hide it
     // from the command processor.
     format!(
-        "if exist \"{old}\" del /f /q \"{old}\"\r\nmove /Y \"{exe}\" \"{old}\"\r\nif errorlevel 1 goto launch\r\nmove /Y \"{staged}\" \"{exe}\"\r\nif errorlevel 1 move /Y \"{old}\" \"{exe}\"\r\n:launch\r\nstart \"\" \"{exe}\""
+        "if exist \"%{ENV_OLD}%\" del /f /q \"%{ENV_OLD}%\"\r\nmove /Y \"%{ENV_EXE}%\" \"%{ENV_OLD}%\"\r\nif errorlevel 1 goto launch\r\nmove /Y \"%{ENV_STAGED}%\" \"%{ENV_EXE}%\"\r\nif errorlevel 1 move /Y \"%{ENV_OLD}%\" \"%{ENV_EXE}%\"\r\n:launch\r\nstart \"\" \"%{ENV_EXE}%\""
     )
 }
 
@@ -831,7 +839,7 @@ fn portable_body(exe: &Path, staged: &Path) -> String {
 /// characters, so a released name like `FlowDir_0.6.20_x64_portable.exe` never yields a
 /// line ending in `.exe` and the helper would start the new image while this process is
 /// still alive, only for the single-instance plugin to forward and exit.
-fn spawn_helper(body: &str) -> Result<(), ApiError> {
+fn spawn_helper(body: &str, envs: &[(&str, &Path)]) -> Result<(), ApiError> {
     let pid = std::process::id();
     let script = std::env::temp_dir().join(format!("flowdir-update-{pid}.cmd"));
     let text = format!(
@@ -840,19 +848,16 @@ fn spawn_helper(body: &str) -> Result<(), ApiError> {
     fs::write(&script, text).map_err(|e| ApiError::new("UPDATE_IO", e.to_string()))?;
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    std::process::Command::new("cmd")
-        .args(["/C", &script.to_string_lossy()])
+    let mut command = std::process::Command::new("cmd");
+    command.args(["/C", &script.to_string_lossy()]);
+    for (key, value) in envs {
+        command.env(key, value.as_os_str());
+    }
+    command
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| ApiError::new("UPDATE_LAUNCH", e.to_string()))?;
     Ok(())
-}
-
-/// Renders a path for a line in the generated batch file. The path is quoted, so only `%`
-/// still carries meaning there: an install folder such as `D:\50%off\` would otherwise be
-/// rewritten by the command processor and the relaunch target would not exist.
-fn batch_path(path: &Path) -> String {
-    path.display().to_string().replace('%', "%%")
 }
 
 fn wide(value: &str) -> Vec<u16> {
@@ -1153,19 +1158,20 @@ mod tests {
         fs::write(&staged, b"stale-bytes").unwrap();
         let staged = stage_portable(&exe, &downloaded).unwrap();
         assert_eq!(fs::read(&staged).unwrap(), b"new");
-        let body = portable_body(&exe, &staged);
-        assert!(body.starts_with("if exist \""));
-        assert!(body.contains("move /Y \""));
+        let body = portable_body();
+        assert!(body.starts_with(&format!("if exist \"%{ENV_OLD}%\"")));
+        assert!(body.contains(&format!("move /Y \"%{ENV_EXE}%\"")));
         assert!(body.contains(":launch"));
-        assert!(body.ends_with(&format!("start \"\" \"{}\"", batch_path(&exe))));
+        assert!(body.ends_with(&format!("start \"\" \"%{ENV_EXE}%\"")));
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn batch_path_keeps_percent_literal() {
-        let path = Path::new(r"D:\50%off\FlowDir.exe");
-        assert_eq!(batch_path(path), r"D:\50%%off\FlowDir.exe");
-        assert_eq!(batch_path(Path::new(r"C:\Tools\FlowDir.exe")), r"C:\Tools\FlowDir.exe");
+    fn helper_script_stays_ascii_for_non_ascii_paths() {
+        // `cmd.exe` decodes a .cmd file with the OEM code page; embedding the Unicode
+        // install path in the script body garbles it. Every path must arrive through the
+        // environment, so the body is pure ASCII.
+        assert!(portable_body().is_ascii());
     }
 
     #[test]

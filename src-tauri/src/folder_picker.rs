@@ -15,16 +15,27 @@ use windows::Win32::UI::Shell::{
 };
 
 /// Returns the chosen directory, or `None` when the user cancels.
+///
+/// Always runs on a fresh thread: a pooled worker may already be initialized as MTA by an
+/// earlier task, and `CoInitializeEx(STA)` then fails with `RPC_E_CHANGED_MODE`. That
+/// would make the picker silently behave like a cancel.
 pub fn pick(owner: HWND, title: &str, initial: &str) -> Option<String> {
-    unsafe {
+    let raw = owner.0 as isize;
+    let title = title.to_string();
+    let initial = initial.to_string();
+    std::thread::spawn(move || unsafe {
         let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
         if hr.is_err() {
             return None;
         }
-        let result = pick_inner(owner, title, initial);
+        let owner = HWND(raw as *mut core::ffi::c_void);
+        let result = pick_inner(owner, &title, &initial);
         CoUninitialize();
         result
-    }
+    })
+    .join()
+    .ok()
+    .flatten()
 }
 
 unsafe fn pick_inner(owner: HWND, title: &str, initial: &str) -> Option<String> {

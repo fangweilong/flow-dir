@@ -53,8 +53,20 @@ export function useGlobalShortcuts({
     const onKey = (event: KeyboardEvent) => {
       // A pane-level handler already claimed this chord (F5/F6), so do not run it twice.
       if (event.defaultPrevented) return
-      // Claimed before the overlay and text-input guards: F5 is WebView2's reload
-      // accelerator and must stay swallowed even while an overlay is open.
+      // WebView2's reload accelerators are swallowed regardless of how `refresh` is
+      // bound and even while an overlay owns the window: a full page reload drops the
+      // undo/redo stacks, progress channels and modal state. F5/Ctrl+R only *trigger*
+      // refresh when they are the bound chord.
+      const browserReload =
+        event.key === 'F5' ||
+        (event.ctrlKey && !event.altKey && !event.metaKey && (event.key === 'r' || event.key === 'R'))
+      if (browserReload) {
+        event.preventDefault()
+        if (refreshActive && !overlayOpen && matchBinding(event, keys.refresh)) refreshActive()
+        return
+      }
+      // Claimed before the overlay and text-input guards: a refresh rebound away from
+      // F5 must still work while a modal is open.
       if (refreshActive && matchBinding(event, keys.refresh)) {
         event.preventDefault()
         if (!overlayOpen) refreshActive()

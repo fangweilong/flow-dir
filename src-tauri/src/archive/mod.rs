@@ -165,7 +165,10 @@ pub fn enumerate_virtual(
     use std::collections::HashMap;
     use std::hash::{Hash, Hasher};
 
-    let (entries, truncated) = backends::list_with_truncated(&archive_path.to_string_lossy(), 500_000)?;
+    // Browsing must see every member. The preview variant stops a tar walk after 64 MiB
+    // and would report a complete-looking folder missing everything past that point.
+    let (entries, truncated) =
+        backends::list_unbounded_with_truncated(&archive_path.to_string_lossy(), 500_000)?;
     let default_mtime = archive_path
         .metadata()
         .ok()

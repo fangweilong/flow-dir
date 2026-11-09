@@ -174,16 +174,52 @@ fn extract_7z(path: &str, sink: &mut Sink, password: Option<&str>) -> Result<(),
             Ok(rel) => rel,
             Err(err) => {
                 sink.skip(&file.name, &err.code);
-                return Ok(true);
+                // A solid archive stores members back-to-back; leaving this member's
+                // bytes unread makes the decoder interpret them as the next member.
+                return match std::io::copy(read, &mut std::io::sink()) {
+                    Ok(_) => Ok(true),
+                    Err(err) => {
+                        abort = Some(ApiError::new("ARCHIVE", err.to_string()));
+                        Ok(false)
+                    }
+                };
             }
         };
         match sink.accept(&rel, file.is_directory, false) {
-            Ok(Take::Skip | Take::Dir) => Ok(true),
-            Ok(Take::File(target)) => match sink.write(&target, read, file.size) {
-                Ok(()) => Ok(true),
-                Err(err) => {
-                    abort = Some(err);
-                    Ok(false)
+            Ok(Take::Skip) => {
+                if file.is_directory {
+                    return Ok(true);
+                }
+                // Skipped file: consume it so the next member starts at its own offset.
+                match std::io::copy(read, &mut std::io::sink()) {
+                    Ok(_) => Ok(true),
+                    Err(err) => {
+                        abort = Some(ApiError::new("ARCHIVE", err.to_string()));
+                        Ok(false)
+                    }
+                }
+            }
+            Ok(Take::Dir) => Ok(true),
+            Ok(Take::File(target)) => {
+                let result = sink.write(&target, read, file.size);
+                // `write` may return Ok after skipping part of the member (create
+                // failure, write error, corrupt stream). Draining the remainder keeps a
+                // solid 7z stream aligned for every later member.
+                let drained = if result.is_ok() {
+                    std::io::copy(read, &mut std::io::sink())
+                } else {
+                    Ok(0)
+                };
+                match (result, drained) {
+                    (Ok(()), Ok(_)) => Ok(true),
+                    (Ok(()), Err(err)) => {
+                        abort = Some(ApiError::new("ARCHIVE", err.to_string()));
+                        Ok(false)
+                    }
+                    (Err(err), _) => {
+                        abort = Some(err);
+                        Ok(false)
+                    }
                 }
             },
             Err(err) => {
@@ -831,7 +867,7 @@ fn list_with_truncated_impl(
         let root = isomage::detect_and_parse_filesystem(&mut file, name_of(path))
             .map_err(|err| ApiError::new("ARCHIVE", err.to_string()))?;
         let mut entries = Vec::new();
-        let truncated = push_iso_entries(&root, "", limit, &mut entries);
+        let truncated = push_iso_entries(&root, "", limit, 0, &mut entries);
         return Ok((entries, truncated));
     }
     if format.is_tar() {
@@ -957,8 +993,14 @@ fn push_iso_entries(
     node: &isomage::TreeNode,
     prefix: &str,
     limit: usize,
+    depth: usize,
     out: &mut Vec<ArchiveEntry>,
 ) -> bool {
+    // The extraction side already caps traversal depth; browsing needs the same guard or
+    // a crafted image can exhaust the stack.
+    if depth >= MAX_ISO_DEPTH {
+        return true;
+    }
     for child in &node.children {
         if out.len() >= limit {
             return true;
@@ -977,7 +1019,7 @@ fn push_iso_entries(
                 mtime: 0,
             });
         }
-        if child.is_directory && push_iso_entries(child, &raw, limit, out) {
+        if child.is_directory && push_iso_entries(child, &raw, limit, depth + 1, out) {
             return true;
         }
     }
@@ -1241,7 +1283,16 @@ pub fn extract_single(
                         return Ok(false);
                     }
                 }
-                Ok(true)
+                // Solid 7z members are stored back-to-back. Skipping one without
+                // consuming its bytes makes the decoder treat the remainder as the next
+                // member (wrong file contents, or a CRC failure on every later entry).
+                match std::io::copy(read, &mut std::io::sink()) {
+                    Ok(_) => Ok(true),
+                    Err(err) => {
+                        copy_err = Some(ApiError::new("ARCHIVE", err.to_string()));
+                        Ok(false)
+                    }
+                }
             });
             if let Some(err) = copy_err {
                 return Err(err);
@@ -1250,6 +1301,20 @@ pub fn extract_single(
                 return Ok(());
             }
             Err(ApiError::new("NOT_FOUND", inner))
+        }
+        format if matches!(format, Format::Gz | Format::Bz2 | Format::Xz | Format::Zst) => {
+            // A bare compressed stream holds exactly one member, named after the archive
+            // without its compression suffix. The listing shows that pseudo entry, so
+            // opening or dragging it must work too.
+            let expected = format::output_name(name_of(archive));
+            if !expected.eq_ignore_ascii_case(inner_norm) {
+                return Err(ApiError::new("NOT_FOUND", inner));
+            }
+            let mut src = reader(archive, format)?;
+            let mut out = create_out(dest, limit)?;
+            std::io::copy(&mut src, &mut out).map_err(|e| write_failed(dest, &e))?;
+            out.flush().map_err(|e| write_failed(dest, &e))?;
+            Ok(())
         }
         format if format.is_tar() => {
             let mut tar = tar::Archive::new(reader(archive, format)?);

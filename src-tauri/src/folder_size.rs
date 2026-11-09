@@ -25,6 +25,10 @@ pub struct FolderSizeProgress {
     pub files: u64,
     pub dirs: u64,
     pub bytes: u64,
+    /// Entries or directories that could not be read. The result is otherwise complete;
+    /// the UI reports the count so a permission-denied subtree is not mistaken for an
+    /// empty one.
+    pub skipped: u64,
     pub done: bool,
     pub aborted: bool,
     pub error: Option<ApiError>,
@@ -62,15 +66,27 @@ pub fn start(
                 aborted = true;
                 break;
             }
-            let Ok(reader) = std::fs::read_dir(&dir) else {
-                continue;
+            let reader = match std::fs::read_dir(&dir) {
+                Ok(reader) => reader,
+                Err(_) => {
+                    progress.skipped += 1;
+                    continue;
+                }
             };
-            for entry in reader.flatten() {
+            for entry in reader {
                 if job.stopped() {
                     aborted = true;
                     break 'walk;
                 }
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(_) => {
+                        progress.skipped += 1;
+                        continue;
+                    }
+                };
                 let Ok(meta) = entry.metadata() else {
+                    progress.skipped += 1;
                     continue;
                 };
                 let attrs = meta.file_attributes();

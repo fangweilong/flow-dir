@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { COMPRESS_EXTENSIONS, COMPRESS_FORMATS, type CompressFormat } from './api'
 import { makeT } from './i18n'
+import { invalidFileName } from './paths'
 import type { Lang } from './types'
 
 export type CompressValues = {
@@ -63,9 +64,13 @@ export function CompressDialog({ title, dir, name, format, lang, onSubmit, onClo
   const levels = STORE_FORMATS.includes(pick)
     ? LEVELS
     : LEVELS.filter((item) => item.level > 0)
+  const invalid = invalidFileName(value.trim())
   const submit = () => {
     const trimmed = value.trim()
-    if (!trimmed) return
+    // The backend joins this name to the picked folder, so a `..\..\x` spelling would
+    // write the archive outside it. Windows-illegal characters would fail after closing
+    // the dialog, which loses the user's other choices.
+    if (!trimmed || invalidFileName(trimmed)) return
     onSubmit({ format: pick, level, password: encrypted && password ? password : null, name: trimmed })
   }
 
@@ -147,6 +152,11 @@ export function CompressDialog({ title, dir, name, format, lang, onSubmit, onClo
             }}
             className={control}
           />
+          {invalid && (
+            <span className="col-span-2 -mt-1 text-[0.65625rem] text-red-500">
+              {t('compress.invalidName')}
+            </span>
+          )}
         </div>
         <div className="truncate pt-2 text-[0.65625rem] text-muted" title={dir}>
           {dir}
@@ -162,7 +172,7 @@ export function CompressDialog({ title, dir, name, format, lang, onSubmit, onClo
           <button
             type="button"
             onClick={submit}
-            disabled={!value.trim()}
+            disabled={!value.trim() || invalid}
             className="rounded-md bg-accent-strong px-3 py-1 text-[0.71875rem] font-medium text-white hover:bg-accent disabled:opacity-50"
           >
             {t('compress.apply')}

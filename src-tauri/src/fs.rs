@@ -200,7 +200,19 @@ fn scan(
                 );
                 return scan_fallback(path, show_hidden, dirs_only, limit, cancel, progress);
             }
-            return Err(ApiError::from_windows(path, code));
+            if entries.is_empty() {
+                return Err(ApiError::from_windows(path, code));
+            }
+            // Rows already read are real. Dropping them would report the whole folder as
+            // unreadable after the user saw a growing list; mark the listing incomplete
+            // instead so the UI can say it was cut short.
+            log::warn!(
+                target: "flowdir::fs",
+                "FileIdBothDirectoryInfo failed for {path} after {} entries ({code:#010x}); returning a partial listing",
+                entries.len()
+            );
+            truncated = true;
+            break 'scan;
         }
 
         let base = buffer.as_ptr().cast::<u8>();
@@ -311,13 +323,22 @@ fn scan_fallback(
     let dir = std::fs::read_dir(path).map_err(|e| ApiError::from_io(path, &e))?;
     let mut entries: Vec<Entry> = Vec::new();
     let mut truncated = false;
+    // An entry that cannot be read or stat'ed is left out of the rows. It still makes
+    // the listing incomplete; reporting a complete folder here would hide the omission.
+    let mut incomplete = false;
     let mut seen = 0usize;
     for entry in dir {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        let Ok(entry) = entry else { continue };
-        let Ok(meta) = entry.metadata() else { continue };
+        let Ok(entry) = entry else {
+            incomplete = true;
+            continue;
+        };
+        let Ok(meta) = entry.metadata() else {
+            incomplete = true;
+            continue;
+        };
         let attrs = meta.file_attributes();
         let is_dir = attrs & ATTR_DIRECTORY != 0;
         if dirs_only && !is_dir {
@@ -348,7 +369,10 @@ fn scan_fallback(
         }
     }
     progress(entries.len());
-    Ok(ScanOutcome { entries, truncated })
+    Ok(ScanOutcome {
+        entries,
+        truncated: truncated || incomplete,
+    })
 }
 
 pub fn sort_entries(entries: &mut [Entry], key: &str, dir: &str) {

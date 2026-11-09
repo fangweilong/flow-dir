@@ -206,6 +206,8 @@ export type FolderSizeProgress = {
   files: number
   dirs: number
   bytes: number
+  /** Entries/directories that could not be read; the total is otherwise complete. */
+  skipped: number
   done: boolean
   aborted: boolean
   error: ApiError | null
