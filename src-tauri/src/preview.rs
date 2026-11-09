@@ -1400,16 +1400,21 @@ fn render_pdf(path: &str, width: u32) -> Result<Vec<u8>, ApiError> {
         .map_err(|e| ApiError::new("PDF", e.to_string()))?;
     // Width alone leaves a tall page free to render at any height; derive the height from
     // the page's own aspect ratio and cap it so the bitmap stays inside MAX_RENDER_BYTES.
-    if let Ok(size) = page.Size() {
-        if size.Width > 0.0 {
-            let height = (f64::from(width) * f64::from(size.Height) / f64::from(size.Width)).ceil();
-            let max_height = (MAX_RENDER_BYTES / (width as usize * 4)).max(1) as f64;
-            let height = height.clamp(1.0, max_height).min(f64::from(u32::MAX));
-            options
-                .SetDestinationHeight(height as u32)
-                .map_err(|e| ApiError::new("PDF", e.to_string()))?;
-        }
+    // Without a size there is no bounded height to ask for, so refuse the page instead of
+    // letting the renderer pick an unbounded destination.
+    let page_size = page
+        .Size()
+        .map_err(|e| ApiError::new("PDF", e.to_string()))?;
+    if page_size.Width <= 0.0 || page_size.Height <= 0.0 {
+        return Err(ApiError::new("PDF", "invalid page size"));
     }
+    let height =
+        (f64::from(width) * f64::from(page_size.Height) / f64::from(page_size.Width)).ceil();
+    let max_height = (MAX_RENDER_BYTES / (width as usize * 4)).max(1) as f64;
+    let height = height.clamp(1.0, max_height).min(f64::from(u32::MAX));
+    options
+        .SetDestinationHeight(height as u32)
+        .map_err(|e| ApiError::new("PDF", e.to_string()))?;
     page.RenderWithOptionsToStreamAsync(&stream, &options)
         .and_then(|op| op.join())
         .map_err(|e| ApiError::new("PDF", e.to_string()))?;

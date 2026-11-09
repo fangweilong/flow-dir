@@ -1,13 +1,16 @@
 //! Repository status for the file list (`git_status`).
 //!
 //! Shells out to the installed `git` binary instead of linking a second object model:
-//! one porcelain run per folder is cheap, honours the user's config (fsmonitor,
-//! large-repo settings, submodules) and needs no extra dependency.
+//! one porcelain run per folder is cheap, honours the user's large-repo and submodule
+//! settings and needs no extra dependency. Repository-local config can name programs git
+//! executes (fsmonitor hooks, clean/smudge filters); those are neutralised on every call
+//! because the listed folder may hold a repository extracted from an untrusted archive.
 //!
 //! Listing never blocks on it: the command runs off the UI thread and the list paints
 //! first, badges arrive afterwards.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::io::Read;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -188,7 +191,8 @@ fn root_data(git: &Path, root: &str) -> Option<RootData> {
             }
         }
     }
-    let mut command = status_command(git, Path::new(root), "all");
+    let overrides = untrusted_config(git, Path::new(root), STATUS_TIMEOUT)?;
+    let mut command = status_command(git, Path::new(root), "all", &overrides);
     let output = output_with_timeout(&mut command, STATUS_TIMEOUT)?;
     if !output.status.success() {
         return None;
@@ -196,7 +200,7 @@ fn root_data(git: &Path, root: &str) -> Option<RootData> {
     // `None` means a descendant kept the pipe open past the drain window: the porcelain
     // text is unknown, not empty, so this folder must not claim to be clean.
     let stdout = output.stdout?;
-    let tracked = Arc::new(tracked_paths(git, root));
+    let tracked = Arc::new(tracked_paths(git, root, &overrides));
     let data = RootData {
         at: Instant::now(),
         output: Arc::new(stdout),
@@ -219,11 +223,12 @@ fn root_data(git: &Path, root: &str) -> Option<RootData> {
     Some(data)
 }
 
-fn tracked_paths(git: &Path, root: &str) -> Vec<String> {
+fn tracked_paths(git: &Path, root: &str, overrides: &[OsString]) -> Vec<String> {
     let mut command = Command::new(git);
     command
         .arg("-C")
         .arg(root)
+        .args(overrides)
         .args(["ls-files", "-z"])
         .creation_flags(CREATE_NO_WINDOW);
     let Some(output) = output_with_timeout(&mut command, STATUS_TIMEOUT) else {
@@ -359,12 +364,101 @@ fn child_repos(dir: &str) -> Vec<String> {
     repos
 }
 
+/// Repository-local config can name programs that git executes while reading the index:
+/// `core.fsmonitor` and `filter.<driver>.clean/smudge/process`. A work tree extracted from
+/// an untrusted archive would otherwise run them merely by being listed in the app, so
+/// every index read starts with those entries neutralised.
+///
+/// The driver names are not fixed, hence the read of the local config (with includes
+/// resolved). `None` means the config could not be read reliably; the caller then skips
+/// git entirely rather than risk running an unguarded index read.
+///
+/// A repository that legitimately configures its filters locally (for example
+/// `git lfs install --local`) gets its filters neutralised too: status then compares raw
+/// bytes and may mark those files modified. That cosmetic loss is the price of never
+/// executing a program named by the listed folder.
+fn untrusted_config(git: &Path, dir: &Path, timeout: Duration) -> Option<Vec<OsString>> {
+    let mut names = config_names(git, dir, "--local", timeout)?;
+    // `--local` does not include `config.worktree`: when the repository enables
+    // `extensions.worktreeConfig`, git reads that file too, so a filter hidden there would
+    // execute during status. With the extension disabled this call lists the local
+    // entries again, which only costs a duplicate lookup.
+    if let Some(worktree) = config_names(git, dir, "--worktree", timeout) {
+        names.extend(worktree);
+    }
+    Some(config_overrides(&names))
+}
+
+/// Keys of one config scope, with includes resolved. `None` when the scope could not be
+/// read or a key is not valid UTF-8; the caller then refuses to run git.
+fn config_names(git: &Path, dir: &Path, scope: &str, timeout: Duration) -> Option<Vec<String>> {
+    let mut command = Command::new(git);
+    command
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "config",
+            scope,
+            "--includes",
+            "--null",
+            "--name-only",
+            "--list",
+        ])
+        .creation_flags(CREATE_NO_WINDOW);
+    let output = output_with_timeout(&mut command, timeout)?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = output.stdout?;
+    stdout
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .map(|name| std::str::from_utf8(name).ok().map(str::to_string))
+        .collect::<Option<Vec<String>>>()
+}
+
+/// `-c` overrides used by [`untrusted_config`]. Kept separate from the git call so the
+/// key matching is testable without a repository.
+fn config_overrides(names: &[String]) -> Vec<OsString> {
+    let mut overrides: Vec<OsString> = vec!["-c".into(), "core.fsmonitor=false".into()];
+    for name in names {
+        let Some((driver, key)) = name.rsplit_once('.') else {
+            continue;
+        };
+        if !driver
+            .get(.."filter.".len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("filter."))
+        {
+            continue;
+        }
+        if !matches!(
+            key.to_ascii_lowercase().as_str(),
+            "clean" | "smudge" | "process"
+        ) {
+            continue;
+        }
+        // Emptying the command leaves the driver defined but inert; `required=false` keeps
+        // a repository-declared `required` from turning the empty command into a failure.
+        overrides.push("-c".into());
+        overrides.push(format!("{name}=").into());
+        overrides.push("-c".into());
+        overrides.push(format!("{driver}.required=false").into());
+    }
+    overrides
+}
+
 /// One porcelain status with the branch header; the untracked mode trades detail for speed.
-fn status_command(git: &Path, dir: &Path, untracked: &str) -> Command {
+fn status_command(
+    git: &Path,
+    dir: &Path,
+    untracked: &str,
+    overrides: &[OsString],
+) -> Command {
     let mut command = Command::new(git);
     command
         .arg("--no-optional-locks")
         .args(["-c", "core.quotepath=false"])
+        .args(overrides)
         .arg("-C")
         .arg(dir)
         .args(["status", "--porcelain=v1", "-z", "--branch"])
@@ -471,7 +565,10 @@ fn repo_state(git: &Path, dir: &Path) -> GitRepo {
             .unwrap_or_default(),
         ..GitRepo::default()
     };
-    let mut command = status_command(git, dir, "normal");
+    let Some(overrides) = untrusted_config(git, dir, CHILD_TIMEOUT) else {
+        return state;
+    };
+    let mut command = status_command(git, dir, "normal", &overrides);
     let Some(output) = output_with_timeout(&mut command, CHILD_TIMEOUT) else {
         return state;
     };
@@ -1021,6 +1118,119 @@ mod tests {
         assert!(repos[0].checked && !repos[0].dirty && !repos[0].conflict);
         assert_eq!(repos[1].name, "dirty");
         assert!(repos[1].checked && repos[1].dirty);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn config_overrides_neutralise_repository_drivers() {
+        let overrides: Vec<String> = config_overrides(&[
+            "filter.lfs.clean".into(),
+            "filter.lfs.process".into(),
+            "filter.evil.smudge".into(),
+            "filter.evil.required".into(),
+            "core.fsmonitor".into(),
+            "user.name".into(),
+        ])
+        .into_iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+        assert_eq!(overrides[0], "-c");
+        assert_eq!(overrides[1], "core.fsmonitor=false");
+        assert!(overrides.contains(&"filter.lfs.clean=".to_string()));
+        assert!(overrides.contains(&"filter.lfs.process=".to_string()));
+        assert!(overrides.contains(&"filter.evil.smudge=".to_string()));
+        assert!(overrides.contains(&"filter.evil.required=false".to_string()));
+        assert!(!overrides.iter().any(|arg| arg == "filter.evil.required="));
+        assert!(!overrides.iter().any(|arg| arg == "user.name="));
+    }
+
+    /// A repository extracted from an untrusted archive may name a program in its config;
+    /// listing the folder must not run it.
+    #[test]
+    fn repository_configured_programs_are_not_executed() {
+        let Some(git) = git_binary() else {
+            return;
+        };
+        let root = std::env::temp_dir().join(format!("flowdir-git-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let init = Command::new(git)
+            .arg("-C")
+            .arg(&root)
+            .args(["init", "-q"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .unwrap();
+        assert!(init.status.success());
+
+        let marker = root.join("marker.txt");
+        let hook = root.join("hook.sh");
+        let target = marker.to_string_lossy().replace('\\', "/");
+        std::fs::write(&hook, format!("#!/bin/sh\necho ran > '{target}'\nexit 1\n")).unwrap();
+        let hook_arg = hook.to_string_lossy().into_owned();
+        let config = Command::new(git)
+            .arg("-C")
+            .arg(&root)
+            .args(["config", "core.fsmonitor", &hook_arg])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .unwrap();
+        assert!(config.status.success());
+
+        let overrides = untrusted_config(git, &root, STATUS_TIMEOUT).expect("local config is readable");
+        let mut command = status_command(git, &root, "all", &overrides);
+        let _ = output_with_timeout(&mut command, STATUS_TIMEOUT);
+        assert!(
+            !marker.exists(),
+            "repository-configured fsmonitor hook must not run"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `--local` alone misses `config.worktree`; a filter hidden there still runs during
+    /// status when the repository enables `extensions.worktreeConfig`.
+    #[test]
+    fn worktree_config_drivers_are_neutralised() {
+        let Some(git) = git_binary() else {
+            return;
+        };
+        let root = std::env::temp_dir().join(format!("flowdir-git-wt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let init = Command::new(git)
+            .arg("-C")
+            .arg(&root)
+            .args(["init", "-q"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .unwrap();
+        assert!(init.status.success());
+        let enable = Command::new(git)
+            .arg("-C")
+            .arg(&root)
+            .args(["config", "extensions.worktreeConfig", "true"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .unwrap();
+        if !enable.status.success() {
+            // git too old to support worktree config; nothing to verify here.
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        std::fs::write(
+            root.join(".git").join("config.worktree"),
+            "[filter \"evil\"]\n\tclean = C:/nothing\n",
+        )
+        .unwrap();
+
+        let overrides = untrusted_config(git, &root, STATUS_TIMEOUT).expect("config is readable");
+        let overrides: Vec<String> = overrides
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(overrides.contains(&"filter.evil.clean=".to_string()));
 
         let _ = std::fs::remove_dir_all(&root);
     }

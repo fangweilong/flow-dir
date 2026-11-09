@@ -1251,10 +1251,32 @@ async fn export_text(dir: String, name: String, content: String) -> Result<Strin
         }
         let clean: String = name
             .chars()
-            .map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c })
+            .map(|c| {
+                if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+                    || c.is_control()
+                {
+                    '_'
+                } else {
+                    c
+                }
+            })
             .collect();
         if clean.trim().is_empty() || clean == "." || clean == ".." {
             return Err(ApiError::new("INVALID_NAME", "empty export name"));
+        }
+        // Win32 strips a trailing dot/space and reserves device names in every directory;
+        // writing to `CON` would target the console device instead of a file.
+        let stem = clean
+            .split('.')
+            .next()
+            .unwrap_or(&clean)
+            .to_ascii_uppercase();
+        const RESERVED: [&str; 22] = [
+            "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+            "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        ];
+        if clean.ends_with([' ', '.']) || RESERVED.contains(&stem.as_str()) {
+            return Err(ApiError::new("INVALID_NAME", clean));
         }
         let path = dir_path.join(&clean);
         // Write beside the target and rename: an interrupted export must not leave a

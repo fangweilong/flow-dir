@@ -379,6 +379,7 @@ fn install_inner<R: Runtime>(app: &AppHandle<R>) -> Result<(), ApiError> {
     download(app, &slug, asset, &downloaded)?;
 
     let exe = std::env::current_exe().map_err(|e| ApiError::new("UPDATE_IO", e.to_string()))?;
+    let pid = std::process::id();
     let mut staged: Option<PathBuf> = None;
     let mut envs: Vec<(&str, PathBuf)> = vec![(ENV_EXE, exe.clone())];
     let body = match flavor {
@@ -394,25 +395,16 @@ fn install_inner<R: Runtime>(app: &AppHandle<R>) -> Result<(), ApiError> {
             envs.push((ENV_OLD, exe.with_extension("old.exe")));
             envs.push((ENV_STAGED, path.clone()));
             staged = Some(path);
-            portable_body()
+            portable_body(pid)
         }
         Flavor::Installer => {
             verify_file(&downloaded, asset)?;
-            // The setup runs from `%TEMP%`, which any process of this user can write, and
-            // UAC is only requested when the helper reaches `start`. Re-hashing inside the
-            // helper collapses that TOCTOU window to the gap between `certutil` and
-            // `start`. A same-user attacker already has code execution, so this is
-            // hardening, not a complete boundary: closing it fully needs an elevated
-            // verifier that hashes and then launches the setup itself.
+            // The setup runs after this process exits. Both the digest check and the
+            // launch stay inside the helper, and the helper is an inline PowerShell
+            // command: `%TEMP%` is writable by every process of this user, so a script
+            // file stored there could be replaced before the helper read it.
             envs.push((ENV_SETUP, downloaded));
-            let digest = asset.sha256.to_ascii_uppercase();
-            format!(
-                "certutil -hashfile \"%{ENV_SETUP}%\" SHA256 | find /I \"{digest}\" >nul\r\n\
-                 if errorlevel 1 goto launch\r\n\
-                 start \"\" /wait \"%{ENV_SETUP}%\" /S\r\n\
-                 :launch\r\n\
-                 start \"\" \"%{ENV_EXE}%\""
-            )
+            installer_body(pid, &asset.sha256)
         }
     };
     let env_refs: Vec<(&str, &Path)> = envs.iter().map(|(key, path)| (*key, path.as_path())).collect();
@@ -819,46 +811,77 @@ fn stage_portable(exe: &Path, downloaded: &Path) -> Result<PathBuf, ApiError> {
     Ok(staged)
 }
 
-/// Environment variables that carry the paths into the helper. The batch body must stay
-/// pure ASCII: `cmd.exe` decodes a `.cmd` file with the console/OEM code page, so a UTF-8
-/// script containing `C:\Users\张三\…` becomes mojibake and every `move`/`start` fails.
-/// `Command::env` passes Unicode through `CreateProcessW`, and `%VAR%` expansion is
-/// Unicode inside cmd, so the paths survive regardless of the active code page.
+/// Environment variables that carry the paths into the helper. The helper body stays pure
+/// ASCII: embedding a path such as `C:\Users\张三\…` in the command line would make the
+/// script's behaviour depend on how the interpreter decodes non-ASCII arguments. The
+/// values themselves pass through `CreateProcessW` as Unicode, so they survive unchanged.
 const ENV_EXE: &str = "FLOWDIR_UPDATE_EXE";
 const ENV_OLD: &str = "FLOWDIR_UPDATE_OLD";
 const ENV_STAGED: &str = "FLOWDIR_UPDATE_STAGED";
 const ENV_SETUP: &str = "FLOWDIR_UPDATE_SETUP";
 
-/// Body of the relaunch helper for a portable update: move the current image aside, move the
-/// staged copy into its place, and start it. Every `move` is checked, because the running
-/// image may still be locked for a moment after the PID disappears; the previous image is
-/// restored in that case and always remains launchable.
-fn portable_body() -> String {
-    // CRLF matters here: `goto` searches forward for the label and a bare LF can hide it
-    // from the command processor.
+/// Body of the relaunch helper for a portable update: wait for this process to exit, move
+/// the current image aside, move the staged copy into its place, and start it. Every move
+/// is checked, because the running image may still be locked for a moment after the PID
+/// disappears; the previous image is restored in that case.
+///
+/// The body is passed inline to PowerShell instead of being written to a `.cmd` file:
+/// `%TEMP%` is writable by every process of this user, so a script file there could be
+/// replaced between writing and reading it.
+fn portable_body(pid: u32) -> String {
     format!(
-        "if exist \"%{ENV_OLD}%\" del /f /q \"%{ENV_OLD}%\"\r\nmove /Y \"%{ENV_EXE}%\" \"%{ENV_OLD}%\"\r\nif errorlevel 1 goto launch\r\nmove /Y \"%{ENV_STAGED}%\" \"%{ENV_EXE}%\"\r\nif errorlevel 1 move /Y \"%{ENV_OLD}%\" \"%{ENV_EXE}%\"\r\n:launch\r\nstart \"\" \"%{ENV_EXE}%\""
+        "Wait-Process -Id {pid} -Timeout 900 -ErrorAction SilentlyContinue; \
+         if (Test-Path -LiteralPath $env:{ENV_OLD}) {{ Remove-Item -LiteralPath $env:{ENV_OLD} -Force -ErrorAction SilentlyContinue }}; \
+         $ok = $false; \
+         try {{ \
+             Move-Item -LiteralPath $env:{ENV_EXE} -Destination $env:{ENV_OLD} -Force -ErrorAction Stop; \
+             Move-Item -LiteralPath $env:{ENV_STAGED} -Destination $env:{ENV_EXE} -Force -ErrorAction Stop; \
+             $ok = $true \
+         }} catch {{ }}; \
+         if (-not $ok -and (Test-Path -LiteralPath $env:{ENV_OLD})) {{ \
+             Move-Item -LiteralPath $env:{ENV_OLD} -Destination $env:{ENV_EXE} -Force -ErrorAction SilentlyContinue }}; \
+         Start-Process -FilePath $env:{ENV_EXE}"
     )
 }
 
-/// Writes a small batch helper that polls for this PID and only then starts the new
+/// Body of the relaunch helper for an installer update: wait for this process to exit,
+/// re-check the downloaded setup's digest, run it silently, then relaunch the app.
+fn installer_body(pid: u32, digest: &str) -> String {
+    format!(
+        "Wait-Process -Id {pid} -Timeout 900 -ErrorAction SilentlyContinue; \
+         $verified = $false; \
+         try {{ $verified = (Get-FileHash -LiteralPath $env:{ENV_SETUP} -Algorithm SHA256).Hash -eq '{digest}' }} catch {{ }}; \
+         if ($verified) {{ \
+             try {{ Start-Process -Verb RunAs -Wait -FilePath $env:{ENV_SETUP} -ArgumentList '/S' }} catch {{ }} \
+         }}; \
+         Start-Process -FilePath $env:{ENV_EXE}"
+    )
+}
+
+/// Starts a detached helper that waits for this PID and only then starts the new
 /// executable (or runs the installer), avoiding a race with the single-instance plugin.
 ///
-/// The probe has to match the PID column: `tasklist` truncates the image name to 24
-/// characters, so a released name like `FlowDir_0.6.20_x64_portable.exe` never yields a
-/// line ending in `.exe` and the helper would start the new image while this process is
-/// still alive, only for the single-instance plugin to forward and exit.
-fn spawn_helper(body: &str, envs: &[(&str, &Path)]) -> Result<(), ApiError> {
-    let pid = std::process::id();
-    let script = std::env::temp_dir().join(format!("flowdir-update-{pid}.cmd"));
-    let text = format!(
-        "@echo off\r\nsetlocal\r\n:wait\r\ntasklist /FI \"PID eq {pid}\" /NH | find /I \"{pid}\" >nul\r\nif not errorlevel 1 (\r\nping -n 2 127.0.0.1 >nul\r\ngoto wait\r\n)\r\n{body}\r\ndel \"%~f0\"\r\n",
-    );
-    fs::write(&script, text).map_err(|e| ApiError::new("UPDATE_IO", e.to_string()))?;
+/// The script is passed as an inline PowerShell command rather than a temporary file:
+/// `%TEMP%` is writable by every process of this user, so anything stored there can be
+/// replaced before it is interpreted. The interpreter is addressed by its absolute
+/// system path for the same reason.
+fn spawn_helper(script: &str, envs: &[(&str, &Path)]) -> Result<(), ApiError> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let mut command = std::process::Command::new("cmd");
-    command.args(["/C", &script.to_string_lossy()]);
+    let powershell = std::env::var_os("SystemRoot")
+        .map(|root| PathBuf::from(root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe"))
+        .unwrap_or_else(|| PathBuf::from("powershell.exe"));
+    let mut command = std::process::Command::new(powershell);
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-WindowStyle",
+        "Hidden",
+        "-Command",
+        script,
+    ]);
     for (key, value) in envs {
         command.env(key, value.as_os_str());
     }
@@ -1107,9 +1130,58 @@ fn parse_version(version: &str) -> (Vec<u64>, Option<&str>) {
     (parts, pre)
 }
 
+/// Compares two alphanumeric pre-release identifiers. Identifiers that share a prefix and
+/// end in digits (`rc9` / `rc10`, `beta2` / `beta10`) compare by that number, which is what
+/// release tags mean; everything else stays lexicographic.
+fn compare_identifier(left: &str, right: &str) -> std::cmp::Ordering {
+    fn split(value: &str) -> (&str, &str) {
+        let prefix = value.trim_end_matches(|c: char| c.is_ascii_digit());
+        (prefix, &value[prefix.len()..])
+    }
+    let (left_prefix, left_number) = split(left);
+    let (right_prefix, right_number) = split(right);
+    if !left_number.is_empty() && !right_number.is_empty() && left_prefix == right_prefix {
+        let left_number = left_number.trim_start_matches('0');
+        let right_number = right_number.trim_start_matches('0');
+        // Compare without parsing: a longer digit run is a larger number, which avoids
+        // overflow on a pathologically long identifier.
+        return left_number
+            .len()
+            .cmp(&right_number.len())
+            .then_with(|| left_number.cmp(right_number));
+    }
+    left.cmp(right)
+}
+
+/// Semver-style comparison of two pre-release strings. Numeric identifiers compare
+/// numerically, so `rc.10` is newer than `rc.9`; alphanumeric ones use
+/// [`compare_identifier`] so the `rc10` / `rc9` spelling is ordered the same way.
+fn compare_prerelease(left: &str, right: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let mut left = left.split('.');
+    let mut right = right.split('.');
+    loop {
+        match (left.next(), right.next()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(a), Some(b)) => {
+                let ordering = match (a.parse::<u64>(), b.parse::<u64>()) {
+                    (Ok(a), Ok(b)) => a.cmp(&b),
+                    (Ok(_), Err(_)) => Ordering::Less,
+                    (Err(_), Ok(_)) => Ordering::Greater,
+                    (Err(_), Err(_)) => compare_identifier(a, b),
+                };
+                if ordering != Ordering::Equal {
+                    return ordering;
+                }
+            }
+        }
+    }
+}
+
 /// True when `latest` supersedes `current`. Release versions win over a pre-release of the
-/// same core; pre-release identifiers are compared lexically, which is enough until we
-/// actually publish one.
+/// same core.
 fn is_newer(latest: &str, current: &str) -> bool {
     let (a, a_pre) = parse_version(latest);
     let (b, b_pre) = parse_version(current);
@@ -1123,7 +1195,9 @@ fn is_newer(latest: &str, current: &str) -> bool {
     match (a_pre, b_pre) {
         (None, Some(_)) => true,
         (Some(_), None) => false,
-        (Some(left), Some(right)) => left > right,
+        (Some(left), Some(right)) => {
+            compare_prerelease(left, right) == std::cmp::Ordering::Greater
+        }
         (None, None) => false,
     }
 }
@@ -1167,20 +1241,21 @@ mod tests {
         fs::write(&staged, b"stale-bytes").unwrap();
         let staged = stage_portable(&exe, &downloaded).unwrap();
         assert_eq!(fs::read(&staged).unwrap(), b"new");
-        let body = portable_body();
-        assert!(body.starts_with(&format!("if exist \"%{ENV_OLD}%\"")));
-        assert!(body.contains(&format!("move /Y \"%{ENV_EXE}%\"")));
-        assert!(body.contains(":launch"));
-        assert!(body.ends_with(&format!("start \"\" \"%{ENV_EXE}%\"")));
+        let body = portable_body(4242);
+        assert!(body.contains("Wait-Process -Id 4242"));
+        assert!(body.contains(&format!("$env:{ENV_OLD}")));
+        assert!(body.contains(&format!("$env:{ENV_STAGED}")));
+        assert!(body.ends_with(&format!("Start-Process -FilePath $env:{ENV_EXE}")));
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn helper_script_stays_ascii_for_non_ascii_paths() {
-        // `cmd.exe` decodes a .cmd file with the OEM code page; embedding the Unicode
-        // install path in the script body garbles it. Every path must arrive through the
-        // environment, so the body is pure ASCII.
-        assert!(portable_body().is_ascii());
+        // Paths must arrive through the environment so the script body stays pure ASCII;
+        // an install path containing CJK characters would otherwise depend on the console
+        // code page of the interpreter.
+        assert!(portable_body(1).is_ascii());
+        assert!(installer_body(1, "AB12").is_ascii());
     }
 
     #[test]
@@ -1192,6 +1267,12 @@ mod tests {
         assert!(!is_newer("0.1.0", "0.1.1"));
         assert!(!is_newer("0.1.0-rc1", "0.1.0"));
         assert!(is_newer("0.1.0", "0.1.0-rc1"));
+        // Numeric identifiers compare numerically, not as text.
+        assert!(is_newer("0.1.0-rc10", "0.1.0-rc9"));
+        assert!(!is_newer("0.1.0-rc9", "0.1.0-rc10"));
+        assert!(is_newer("0.1.0-rc.2", "0.1.0-rc.1"));
+        assert!(is_newer("0.1.0-rc.1.1", "0.1.0-rc.1"));
+        assert!(is_newer("0.1.0-rc.1.0", "0.1.0-rc.1"));
     }
 
     #[test]

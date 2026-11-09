@@ -205,13 +205,17 @@ export function useUndoReplay({
           const exists = await pathsExist(candidates)
           entry.request = {
             ...entry.request,
-            sources: entry.items.map((item, index) =>
-              exists[index * 2]
-                ? candidates[index * 2]
-                : exists[index * 2 + 1]
-                  ? candidates[index * 2 + 1]
-                  : item.from,
-            ),
+            sources: entry.items.map((item, index) => {
+              const original = candidates[index * 2]
+              const actual = candidates[index * 2 + 1]
+              // A successful rename moved `actual` back onto `original`; when both exist
+              // the rename failed and `original` now belongs to a different file, so the
+              // redo must replay the path that still holds the restored item.
+              if (exists[index * 2 + 1] && pathKey(actual) !== pathKey(original)) return actual
+              if (exists[index * 2]) return original
+              if (exists[index * 2 + 1]) return actual
+              return item.from
+            }),
           }
           if (!restored.every(Boolean)) {
             const failed = [...renames.values()].reduce((sum, group) => sum + group.paths.length, 0)

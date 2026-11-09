@@ -55,6 +55,24 @@ fn skips_reparse_dir(path: &Path, meta: &std::fs::Metadata) -> bool {
     false
 }
 
+/// Refuses a pre-existing directory symlink/reparse point at a download target. A junction
+/// planted in the destination folder would otherwise redirect `create_dir_all` and the
+/// recursive writes outside it; the archive sink applies the same rule when it merges
+/// extracted entries. A reparse *file* (OneDrive placeholder, file symlink) is allowed:
+/// the final rename replaces that entry itself instead of following it.
+fn reject_reparse_dir_target(path: &Path) -> Result<(), ApiError> {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+    if meta.is_dir() && (meta.file_type().is_symlink() || is_reparse(&meta)) {
+        return Err(ApiError::new(
+            "UNSAFE_PATH",
+            path.to_string_lossy().into_owned(),
+        ));
+    }
+    Ok(())
+}
+
 const MAX_REPORTED_FAILURES: usize = 200;
 const PROGRESS_INTERVAL_MS: u128 = 120;
 
@@ -284,7 +302,7 @@ fn delete_sources(
     for (index, source) in request.sources.iter().enumerate() {
         check_cancel(cancel)?;
         let index = index as u32;
-        runner.label(base_name(source));
+        runner.label(source_base_name(source));
         // A bad connection id or a credential lookup failure fails this item only: the
         // alternatives are aborting the whole batch after some deletes already landed,
         // or reporting success for items that were never attempted.
@@ -420,16 +438,17 @@ fn transfer_sources(
     for (index, source) in request.sources.iter().enumerate() {
         check_cancel(cancel)?;
         let index = index as u32;
-        runner.label(base_name(source));
+        runner.label(source_base_name(source));
         let result = (|| -> Result<(), ApiError> {
             // The top-level name is joined to the destination too; a remote displayname
             // such as `C:evil` would otherwise replace the local base path. Derive it
             // here rather than before the loop: a name the target rejects must fail only
             // its own item instead of aborting every remaining source.
+            let base = source_base_name(source);
             let name = if target_remote {
-                safe_remote_name(base_name(source))?
+                safe_remote_name(base)?
             } else {
-                safe_local_name(base_name(source))?
+                safe_local_name(base)?
             };
             runner.label(name);
             if target_remote {
@@ -891,6 +910,9 @@ fn download_tree(
             check_cancel(cancel)?;
             let name = safe_local_name(&entry.name)?;
             let child = local.join(name);
+            // A pre-existing junction with the entry's name would redirect this write
+            // outside the chosen destination; refuse it instead of following it.
+            reject_reparse_dir_target(&child)?;
             bytes += download_tree(
                 client,
                 &rel_join(rel, name),
@@ -1162,6 +1184,23 @@ fn base_name(path: &str) -> &str {
         .unwrap_or(path)
 }
 
+fn local_base_name(path: &str) -> &str {
+    path.trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path)
+}
+
+/// Base name of a source that may be either a WebDAV address or a local Windows path.
+/// The separators differ: `\` is legal in a remote name but separates local components.
+fn source_base_name(path: &str) -> &str {
+    if webdav::is_webdav(path) {
+        base_name(path)
+    } else {
+        local_base_name(path)
+    }
+}
+
 fn temp_path() -> PathBuf {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     std::env::temp_dir().join(format!(
@@ -1196,5 +1235,16 @@ mod tests {
             assert!(safe_local_name(name).is_err(), "{name:?}");
         }
         assert!(safe_local_name("console.txt").is_ok());
+    }
+
+    /// A local source keeps its drive and separators out of the joined name; a remote name
+    /// may legally contain `\`, which must stay part of that one component.
+    #[test]
+    fn source_base_names_follow_their_path_kind() {
+        assert_eq!(source_base_name(r"C:\Users\me\report.txt"), "report.txt");
+        assert_eq!(source_base_name(r"D:\data\folder"), "folder");
+        assert_eq!(source_base_name("webdav://nas/docs/report.txt"), "report.txt");
+        assert_eq!(source_base_name("webdav://nas/docs/a\\b"), "a\\b");
+        assert_eq!(local_base_name(r"C:\data\a\b.txt"), "b.txt");
     }
 }
