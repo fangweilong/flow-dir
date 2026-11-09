@@ -12,6 +12,7 @@ import type { ListData } from '../types'
 import type { Translate } from '../i18n'
 import { errorKey } from '../i18n'
 import type { Workspace } from '../workspace'
+import { samePath } from '../workspace'
 import { baseName, entryPath, hasArchiveAncestor, isArchiveMember, isInsideArchive, isWebdavPath, joinPath } from '../paths'
 
 const errorCode = (err: unknown): string =>
@@ -136,11 +137,15 @@ export function useFileActionHandlers({
   )
 
   const startRename = useCallback(
-    (paneId: string, name: string) => {
+    (paneId: string, name: string, tabId?: string) => {
       const current = wsRef.current
       if (!current) return
       const pane = current.panes[paneId]
-      const tab = pane ? current.tabs[pane.activeTabId] : undefined
+      // Callers that produced the name from an asynchronous listing pass its tab: the
+      // pane's active tab may have changed in between, and the prompt would then target a
+      // same-named entry in a different folder.
+      if (!pane || (tabId && !pane.tabIds.includes(tabId))) return
+      const tab = current.tabs[tabId ?? pane.activeTabId]
       if (!tab?.path) return
       setPrompt({
         paneId,
@@ -191,21 +196,21 @@ export function useFileActionHandlers({
             // keeps the default name instead of leaving nothing behind.
             onDone: (ok) => {
               if (!ok) return
+              // `startRename` resolves the pane's *current* tab; if the user navigated
+              // while the folder was being created, that is a different directory and the
+              // prompt would rename a same-named item there. Navigation keeps the tab id,
+              // so the path must be compared as well — and the selection marker must not
+              // be applied to the new directory either.
+              const live = wsRef.current
+              const livePane = live?.panes[paneId]
+              const liveTab = livePane ? live.tabs[livePane.activeTabId] : undefined
+              if (liveTab?.id !== tab.id || !samePath(liveTab.path, tab.path)) return
               update(tab.id, (data) => ({
                 ...data,
                 selected: new Set([name]),
                 anchor: name,
               }))
-              // `startRename` resolves the pane's *current* tab; if the user navigated
-              // while the folder was being created, that is a different directory and the
-              // prompt would rename a same-named item there. Navigation keeps the tab id,
-              // so the path must be compared as well.
-              const live = wsRef.current
-              const livePane = live?.panes[paneId]
-              const liveTab = livePane ? live.tabs[livePane.activeTabId] : undefined
-              if (liveTab?.id === tab.id && liveTab.path === tab.path) {
-                startRename(paneId, name)
-              }
+              startRename(paneId, name)
             },
           })
         })

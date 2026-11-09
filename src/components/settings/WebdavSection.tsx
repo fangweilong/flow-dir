@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { webdavHasPassword, webdavSetPassword, webdavTest } from '../../api'
 import type { Translate } from '../../i18n'
 import type { Settings, WebdavConnection } from '../../persist'
@@ -44,6 +44,9 @@ export function WebdavSection({ settings, onChange, t, visible }: WebdavSectionP
   const [savedPassword, setSavedPassword] = useState(false)
   const [status, setStatus] = useState<Status | null>(null)
   const [testing, setTesting] = useState(false)
+  // A probe answers asynchronously; a newer probe (or closing the editor) must win, and
+  // the reply must never be shown next to a URL the user has since edited.
+  const testSeq = useRef(0)
 
   // Whether a password exists is backend state, not part of the settings document.
   useEffect(() => {
@@ -81,7 +84,16 @@ export function WebdavSection({ settings, onChange, t, visible }: WebdavSectionP
   }
 
   const close = () => {
+    testSeq.current += 1
     setDraft(null)
+    setStatus(null)
+    setTesting(false)
+  }
+
+  /** Edits one field and drops a probe result that described the previous value. */
+  const edit = (patch: Partial<Draft>) => {
+    setDraft((prev) => (prev ? { ...prev, ...patch } : prev))
+    testSeq.current += 1
     setStatus(null)
     setTesting(false)
   }
@@ -115,7 +127,7 @@ export function WebdavSection({ settings, onChange, t, visible }: WebdavSectionP
       finish()
       return
     }
-    void webdavSetPassword(connection.id, connection.username, draft.password)
+    void webdavSetPassword(connection.id, connection.username, draft.password, connection.url)
       .then(finish)
       .catch((err: unknown) =>
         setStatus({ tone: 'error', text: ipcErrorText(err) }),
@@ -148,10 +160,17 @@ export function WebdavSection({ settings, onChange, t, visible }: WebdavSectionP
     }
     setTesting(true)
     setStatus(null)
+    const seq = ++testSeq.current
     void webdavTest(connection, draft.password || undefined)
-      .then(() => setStatus({ tone: 'ok', text: t('settings.webdavTestOk') }))
-      .catch((err: unknown) => setStatus({ tone: 'error', text: ipcErrorText(err) }))
-      .finally(() => setTesting(false))
+      .then(() => {
+        if (testSeq.current === seq) setStatus({ tone: 'ok', text: t('settings.webdavTestOk') })
+      })
+      .catch((err: unknown) => {
+        if (testSeq.current === seq) setStatus({ tone: 'error', text: ipcErrorText(err) })
+      })
+      .finally(() => {
+        if (testSeq.current === seq) setTesting(false)
+      })
   }
 
   const remove = (conn: WebdavConnection) => {
@@ -218,7 +237,7 @@ export function WebdavSection({ settings, onChange, t, visible }: WebdavSectionP
             <Field label={t('settings.webdavName')}>
               <input
                 value={draft.name}
-                onChange={(ev) => setDraft({ ...draft, name: ev.target.value })}
+                onChange={(ev) => edit({ name: ev.target.value })}
                 placeholder={t('settings.webdavNamePh')}
                 className={INPUT}
               />
@@ -226,7 +245,7 @@ export function WebdavSection({ settings, onChange, t, visible }: WebdavSectionP
             <Field label={t('settings.webdavUrl')}>
               <input
                 value={draft.url}
-                onChange={(ev) => setDraft({ ...draft, url: ev.target.value })}
+                onChange={(ev) => edit({ url: ev.target.value })}
                 placeholder={t('settings.webdavUrlPh')}
                 spellCheck={false}
                 className={INPUT}
@@ -241,7 +260,7 @@ export function WebdavSection({ settings, onChange, t, visible }: WebdavSectionP
               <Field label={t('settings.webdavUsername')}>
                 <input
                   value={draft.username}
-                  onChange={(ev) => setDraft({ ...draft, username: ev.target.value })}
+                  onChange={(ev) => edit({ username: ev.target.value })}
                   placeholder={t('settings.webdavUsernamePh')}
                   spellCheck={false}
                   className={INPUT}
@@ -250,7 +269,7 @@ export function WebdavSection({ settings, onChange, t, visible }: WebdavSectionP
               <Field label={t('settings.webdavRoot')}>
                 <input
                   value={draft.root}
-                  onChange={(ev) => setDraft({ ...draft, root: ev.target.value })}
+                  onChange={(ev) => edit({ root: ev.target.value })}
                   placeholder={t('settings.webdavRootPh')}
                   spellCheck={false}
                   className={INPUT}
@@ -264,7 +283,7 @@ export function WebdavSection({ settings, onChange, t, visible }: WebdavSectionP
                 <input
                   type="password"
                   value={draft.password}
-                  onChange={(ev) => setDraft({ ...draft, password: ev.target.value })}
+                  onChange={(ev) => edit({ password: ev.target.value })}
                   placeholder={
                     editingExisting && savedPassword
                       ? t('settings.webdavPasswordKeep')
@@ -295,7 +314,7 @@ export function WebdavSection({ settings, onChange, t, visible }: WebdavSectionP
               <input
                 type="checkbox"
                 checked={draft.insecureTls}
-                onChange={(ev) => setDraft({ ...draft, insecureTls: ev.target.checked })}
+                onChange={(ev) => edit({ insecureTls: ev.target.checked })}
                 className="h-3 w-3 accent-[var(--accent-strong)]"
               />
               {t('settings.webdavInsecure')}

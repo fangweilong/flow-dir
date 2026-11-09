@@ -10,6 +10,7 @@ import {
   setAppTheme,
   settingsLoad,
   settingsSave,
+  settingsUnreadable,
   updateCheck,
 } from '../api'
 import type { Drive, Place, UpdateStatus } from '../types'
@@ -66,6 +67,9 @@ export function useAppSettings({
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS)
   const settingsSaveTimer = useRef<number | null>(null)
   const pendingSettings = useRef<Settings | null>(null)
+  // A load that could not read the real file must not be written back: the snapshot is
+  // defaults (or a stale backup), so a save would replace every field the user had.
+  const settingsLocked = useRef(false)
   const lastSaveError = useRef(0)
   const [updateAvailable, setUpdateAvailable] = useState<string | null>(null)
   const notifiedUpdate = useRef<string | null>(null)
@@ -131,6 +135,7 @@ export function useAppSettings({
     // Until the bootstrap load resolves, `settings` is still DEFAULT_SETTINGS; saving a
     // change now would write those defaults over every field already on disk.
     if (!optionsRef.current.readyRef.current) return
+    if (settingsLocked.current) return
     pendingSettings.current = next
     if (settingsSaveTimer.current !== null) window.clearTimeout(settingsSaveTimer.current)
     settingsSaveTimer.current = window.setTimeout(() => {
@@ -150,6 +155,7 @@ export function useAppSettings({
     }
     const snapshot = pendingSettings.current
     pendingSettings.current = null
+    if (settingsLocked.current) return
     if (snapshot) {
       void settingsSave(snapshot).then(reportIntegrationWarnings).catch(reportSaveError)
     }
@@ -173,15 +179,29 @@ export function useAppSettings({
         setSidebarWidth: updateSidebarWidth,
         setPreviewWidth: updatePreviewWidth,
       } = optionsRef.current
+      // The unreadable flag is read after `settings_load` on purpose: the two IPCs must
+      // describe the same load, and the flag is set while that call reads the file.
+      const loaded = settingsLoad()
+        .then(async (value) => ({
+          value,
+          unreadable: await settingsUnreadable().catch(() => false),
+        }))
+        .catch(() => ({ value: DEFAULT_SETTINGS, unreadable: false }))
       const [savedSettings, placeList, driveListResult, saved, warnings] = await Promise.all([
-        settingsLoad().catch(() => DEFAULT_SETTINGS),
+        loaded,
         quickAccess().catch(() => [] as Place[]),
         drives().catch(() => [] as Drive[]),
         layoutLoad().catch(() => null),
         configWarnings().catch(() => [] as string[]),
       ])
       if (cancelled) return
-      const merged = { ...DEFAULT_SETTINGS, ...savedSettings }
+      const merged = { ...DEFAULT_SETTINGS, ...savedSettings.value }
+      if (savedSettings.unreadable) {
+        // Keep the window usable but never write this run: `settings_load` returned
+        // defaults/backup because the real file was inaccessible.
+        settingsLocked.current = true
+        toast(makeT(merged.language)('toast.settingsUnreadable'), 12_000)
+      }
       if (warnings.includes('SETTINGS_REJECTED')) {
         toast(makeT(merged.language)('toast.settingsRejected'))
       }

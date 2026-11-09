@@ -12,7 +12,9 @@ export const pathKey = (path: string) => {
   }
   // Keep `C:\` intact but drop separators elsewhere, so `C:\foo\` and `C:\foo` compare
   // equal in same-folder checks (the address bar can preserve a trailing slash).
-  const trimmed = path.length > 3 ? path.replace(/[\\/]+$/, '') : path
+  // Windows accepts `/` as a separator, and `samePath` already folds the two spellings;
+  // folding here too keeps every path-keyed cache from treating one folder as two.
+  const trimmed = (path.length > 3 ? path.replace(/[\\/]+$/, '') : path).replace(/\//g, '\\')
   return trimmed.toLowerCase()
 }
 
@@ -202,7 +204,9 @@ export function parentPath(p: string): string {
     segments.pop()
     return segments.length ? `${WEBDAV_SCHEME}${id}/${segments.join('/')}` : `${WEBDAV_SCHEME}${id}/`
   }
-  const norm = p.replace(/\\+$/, '')
+  // A command-line target keeps the user's spelling (`flowdir D:/a/b`), and Windows treats
+  // `/` as a separator; splitting on `\` alone jumped straight to the drive root.
+  const norm = p.replace(/\//g, '\\').replace(/\\+$/, '')
   // The drive overview is the top; a drive or share root climbs back to it.
   if (!norm || isShellPath(norm)) return ''
   if (/^[a-zA-Z]:$/.test(norm)) return ''
@@ -253,8 +257,8 @@ export function crumbs(p: string): { label: string; path: string }[] {
   }
   // Shell locations are one opaque node; their parsing name is not a filesystem hierarchy.
   if (isShellPath(p)) return [{ label: p, path: p }]
-  const norm = p.replace(/\\+$/, '') || p
-  if (p.startsWith('\\\\')) {
+  const norm = p.replace(/\//g, '\\').replace(/\\+$/, '') || p
+  if (norm.startsWith('\\\\')) {
     const parts = norm.slice(2).split('\\')
     const root = `\\\\${parts[0]}\\${parts[1] ?? ''}`.replace(/\\$/, '')
     const out = [{ label: root, path: root }]
@@ -276,7 +280,10 @@ export function crumbs(p: string): { label: string; path: string }[] {
 }
 
 /** Paths the built-in list can open; network locations may point at URLs the shell handles. */
-export const isFsPath = (path: string) => /^[a-zA-Z]:/.test(path) || path.startsWith('\\\\')
+export const isFsPath = (path: string) => {
+  const norm = path.replace(/\//g, '\\')
+  return /^[a-zA-Z]:/.test(norm) || norm.startsWith('\\\\')
+}
 
 /** True when `path` is `root` or sits inside it; `C:\x` does not match `C:\xy`. */
 export function underPath(path: string, root: string): boolean {
@@ -287,8 +294,8 @@ export function underPath(path: string, root: string): boolean {
     const r = root.replace(/\/+$/, '')
     return p === r || p.startsWith(`${r}/`)
   }
-  const p = path.toLowerCase()
-  const r = root.toLowerCase()
+  const p = path.replace(/\//g, '\\').toLowerCase()
+  const r = root.replace(/\//g, '\\').toLowerCase()
   return p === r || p.startsWith(r.endsWith('\\') ? r : `${r}\\`)
 }
 

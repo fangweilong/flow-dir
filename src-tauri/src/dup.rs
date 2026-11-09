@@ -67,6 +67,9 @@ pub struct DupProgress {
     pub skipped_hidden: u32,
     pub skipped_cloud: u32,
     pub skipped_hardlink: u32,
+    /// Files whose hash or link count could not be read. They cannot join a group, so the
+    /// result is incomplete; the count keeps the UI from presenting it as exhaustive.
+    pub skipped_unreadable: u32,
     pub elapsed_ms: u64,
 }
 
@@ -82,6 +85,7 @@ struct ScanStats {
     skipped_hidden: u32,
     skipped_cloud: u32,
     skipped_hardlink: u32,
+    skipped_unreadable: u32,
 }
 
 /// Cheap attribute screen shared by the walker and the hardlink pass. Directories with a
@@ -155,6 +159,7 @@ fn send_progress(
         skipped_hidden: stats.skipped_hidden,
         skipped_cloud: stats.skipped_cloud,
         skipped_hardlink: stats.skipped_hardlink,
+        skipped_unreadable: stats.skipped_unreadable,
         elapsed_ms: started.elapsed().as_millis() as u64,
     });
 }
@@ -413,6 +418,7 @@ pub fn start(
                 skipped_hidden: 0,
                 skipped_cloud: 0,
                 skipped_hardlink: 0,
+                skipped_unreadable: 0,
             };
             let mut files = Vec::new();
             walk(
@@ -455,8 +461,10 @@ pub fn start(
                     match link_count(&candidate.path) {
                         Some(1) => linked.push(candidate),
                         // Unknown count: treat like a link, since deleting it may free
-                        // nothing and the user would be told otherwise.
-                        Some(_) | None => stats.skipped_hardlink += 1,
+                        // nothing and the user would be told otherwise. Report it as an
+                        // unreadable file instead of a real hard link.
+                        Some(_) => stats.skipped_hardlink += 1,
+                        None => stats.skipped_unreadable += 1,
                     }
                 }
                 candidates = linked;
@@ -479,6 +487,9 @@ pub fn start(
                         |candidate| quick_hash(candidate, &job, &throttle),
                     );
                 let quick_groups = group_results(&candidates, &quick);
+                // `parallel_map` turns a failed hash into `None`; without this count the
+                // file silently vanished from the result and the UI called the scan done.
+                stats.skipped_unreadable += quick.iter().filter(|hash| hash.is_none()).count() as u32;
                 let survivors: Vec<Candidate> = quick_groups
                     .values()
                     .flat_map(|indices| indices.iter().map(|&i| candidates[i].clone()))
@@ -497,9 +508,9 @@ pub fn start(
                     started,
                     |candidate| hash_file(&candidate.path, "sha256", &job, Some(&throttle), |_| {}),
                 );
+                stats.skipped_unreadable += full.iter().filter(|hash| hash.is_none()).count() as u32;
                 for ((size, hash), indices) in group_results(&survivors, &full) {
-                    groups.push(DupGroup {
-                        size,
+                    groups.push(DupGroup {                        size,
                         hash,
                         files: indices
                             .iter()
@@ -537,6 +548,7 @@ pub fn start(
                 skipped_hidden: stats.skipped_hidden,
                 skipped_cloud: stats.skipped_cloud,
                 skipped_hardlink: stats.skipped_hardlink,
+                skipped_unreadable: stats.skipped_unreadable,
                 elapsed_ms: started.elapsed().as_millis() as u64,
             });
             state.finish(&job_id);

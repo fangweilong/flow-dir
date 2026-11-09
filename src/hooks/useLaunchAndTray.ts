@@ -26,7 +26,7 @@ export function useLaunchAndTray({
   startScan,
   setSearchOpen,
 }: UseLaunchAndTrayOptions) {
-  const pendingSelect = useRef<{ tabId: string; name: string } | null>(null)
+  const pendingSelect = useRef<{ tabId: string; name: string; path: string } | null>(null)
   // A ref alone cannot wake the consumer: opening a file from the folder already on
   // screen changes no list state, so the request needs its own render signal.
   const [pendingSelectTick, setPendingSelectTick] = useState(0)
@@ -48,7 +48,7 @@ export function useLaunchAndTray({
       if (req.newWindow) {
         const tabId = uid('t')
         if (select) {
-          pendingSelect.current = { tabId, name: select }
+          pendingSelect.current = { tabId, name: select, path }
           setPendingSelectTick((tick) => tick + 1)
         }
         setWs((prev) =>
@@ -73,7 +73,7 @@ export function useLaunchAndTray({
       const active = current.tabs[pane.activeTabId]
       if (active) {
         if (select) {
-          pendingSelect.current = { tabId: active.id, name: select }
+          pendingSelect.current = { tabId: active.id, name: select, path }
           setPendingSelectTick((tick) => tick + 1)
         }
         navigate(active.id, path)

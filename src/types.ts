@@ -126,6 +126,8 @@ export type DupProgress = {
   skippedHidden: number
   skippedCloud: number
   skippedHardlink: number
+  /** Files whose hash/link count could not be read; they are missing from the groups. */
+  skippedUnreadable: number
   elapsedMs: number
 }
 export type ElevatedReport = {

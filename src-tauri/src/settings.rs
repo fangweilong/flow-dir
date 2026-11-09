@@ -701,8 +701,10 @@ fn normalize_webdav(list: Vec<WebdavConnection>) -> Vec<WebdavConnection> {
         conn.name = conn.name.trim().to_string();
         // Credentials are stored in Credential Manager and have their own fields. A URL
         // pasted with `user:password@host` must not persist the password in settings.toml
-        // (or echo it back over `settings_load`).
-        conn.url = strip_url_userinfo(conn.url.trim().trim_end_matches('/'));
+        // (or echo it back over `settings_load`). A string the parser cannot prove
+        // credential-free is dropped with the connection: keeping it is a leak.
+        conn.url = crate::webdav::strip_userinfo(conn.url.trim().trim_end_matches('/'))
+            .unwrap_or_default();
         conn.username = conn.username.trim().to_string();
         if conn.url.is_empty() {
             continue;
@@ -729,28 +731,6 @@ fn normalize_webdav(list: Vec<WebdavConnection>) -> Vec<WebdavConnection> {
         out.push(conn);
     }
     out
-}
-
-/// Drops `user[:password]@` from the URL authority while keeping scheme, host and path.
-fn strip_url_userinfo(url: &str) -> String {
-    let Some(scheme_end) = url.find("://") else {
-        // Without a scheme the whole string may be `user:password@host`; persisting it
-        // would put the credential in settings.toml. The connection is unusable anyway,
-        // so the caller drops it.
-        return String::new();
-    };
-    // `user:password@https://host` is not a valid URL: the credentials sit before the
-    // scheme marker rather than in the authority, so the `@` search below would miss
-    // them and echo the password back through settings_load.
-    if url[..scheme_end].contains('@') {
-        return String::new();
-    }
-    let rest = &url[scheme_end + 3..];
-    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let Some(at) = rest[..authority_end].rfind('@') else {
-        return url.to_string();
-    };
-    format!("{}://{}", &url[..scheme_end], &rest[at + 1..])
 }
 
 /// Path-safe connection key: letters, digits, `_`, `-` and `.` survive; everything else is
@@ -1744,19 +1724,28 @@ webdav = [{ id = "nas", name = "NAS", url = "https://nas.example/dav", username 
 
     #[test]
     fn webdav_urls_never_keep_userinfo() {
+        let strip = crate::webdav::strip_userinfo;
         assert_eq!(
-            strip_url_userinfo("https://alice:pass@nas.example/dav"),
-            "https://nas.example/dav"
+            strip("https://alice:pass@nas.example/dav"),
+            Some("https://nas.example/dav".to_string())
         );
         assert_eq!(
-            strip_url_userinfo("https://nas.example/dav"),
-            "https://nas.example/dav"
+            strip("https://nas.example/dav"),
+            Some("https://nas.example/dav".to_string())
         );
         // A password may itself contain `@`; the last one separates the userinfo.
         assert_eq!(
-            strip_url_userinfo("https://alice:p@ss@nas.example/dav"),
-            "https://nas.example/dav"
+            strip("https://alice:p@ss@nas.example/dav"),
+            Some("https://nas.example/dav".to_string())
         );
+        // `/`, `?` and `#` end the authority, so a password containing one looks like
+        // `user:pa`; the old code echoed the original string (and persisted the secret).
+        assert_eq!(strip("https://alice:pa/ss@nas.example/dav"), None);
+        assert_eq!(strip("https://alice:pa?ss@nas.example/dav"), None);
+        assert_eq!(strip("https://alice:pa#ss@nas.example/dav"), None);
+        // `user:123/ss@host` is the numeric variant: the "port" is ambiguous, so an `@`
+        // in the first path segment still marks it unsafe.
+        assert_eq!(strip("https://alice:123/ss@nas.example/dav"), None);
         let normalized = Settings {
             webdav: vec![WebdavConnection {
                 id: "nas".into(),

@@ -402,6 +402,8 @@ export const en: Record<BaseKey, string> = {
   'toast.pathInvalid': 'Not a folder: {path}',
   'toast.watchLost': 'Folder monitoring stopped; the list was refreshed',
   'toast.settingsRejected': 'Settings were corrupt; the original file was kept and defaults are in use',
+  'toast.settingsUnreadable':
+    'Settings could not be read; changes will not be saved until the app is restarted',
   'toast.layoutRejected': 'Window layout was corrupt; it was clamped to a visible work area',
   'toast.layoutUnreadable': 'Window layout could not be read; the backup layout was used',
   'toast.saveFailed': 'Save failed ({code})',
@@ -639,7 +641,8 @@ export const en: Record<BaseKey, string> = {
   'tools.dupGroups': '{groups} duplicate groups, {size} reclaimable',
   'tools.dupNone': 'No duplicate files found',
   'tools.dupScanned': 'Scanned {count} files',
-  'tools.dupSkipped': 'Skipped hidden {hidden}, cloud {cloud}, hard links {hard}',
+  'tools.dupSkipped':
+    'Skipped hidden {hidden}, cloud {cloud}, hard links {hard}, unreadable {unreadable}',
   'tools.deleteSelected': 'Move selected to Recycle Bin',
   'tools.keepNewest': 'Keep newest',
   'tools.confirmTitle': 'Move to Recycle Bin',

@@ -7,7 +7,7 @@ import type { Translate } from '../i18n'
 import type { SyncAction } from '../ComparePanel'
 import { notifyOp, opRetryElevated, opStart, pathsExist, restoreRecycle } from '../api'
 import { errorCode } from '../errorCode'
-import { joinPath, parentPath, pathKey } from '../paths'
+import { baseName, joinPath, parentPath, pathKey } from '../paths'
 import { protectionError, protectWord } from '../protection'
 import type { ProtectPromptState } from '../protection'
 import { undoEntryFor, UNDO_LIMIT } from '../undo'
@@ -91,6 +91,8 @@ export function useFileOperations({
   const undoStack = useRef<UndoEntry[]>([])
   const redoStack = useRef<UndoEntry[]>([])
   const undoCounter = useRef(0)
+  /** Incremented whenever a new operation clears redo; in-flight undos compare it. */
+  const historyGen = useRef(0)
   const lastIrreversible = useRef(false)
   const opRequests = useRef<Record<string, OpRequestShape & { opId: string; record?: boolean }>>({})
 
@@ -115,6 +117,9 @@ export function useFileOperations({
       const limit = undoLimit()
       while (undoStack.current.length > limit) undoStack.current.shift()
       redoStack.current.length = 0
+      // A new operation invalidates the redo history. An undo that was already in flight
+      // must notice this, otherwise it pushes the now-obsolete entry back into redo.
+      historyGen.current += 1
       setHistoryEpoch((epoch) => epoch + 1)
     },
     [undoLimit],
@@ -580,12 +585,56 @@ export function useFileOperations({
             const dir = parentPath(item.from)
             byDir.set(dir, [...(byDir.get(dir) ?? []), item.to])
           }
-          const results = await Promise.all(
+          const moved = await Promise.all(
             [...byDir].map(([dir, paths]) =>
               runStep('move', paths, { targetDir: dir, after: afterDirs([dir]) }),
             ),
           )
-          return results.every(Boolean)
+          if (!moved.every(Boolean)) return false
+          // A conflict resolved by the shell as "keep both" left the file under
+          // `name (1).ext`. Undo must restore the name it had, or redo (which replays the
+          // original `from` path) cannot find it.
+          const renames = new Map<string, { paths: string[]; names: string[] }>()
+          for (const item of pending) {
+            const original = baseName(item.from)
+            if (baseName(item.to) === original) continue
+            const dir = parentPath(item.from)
+            const group = renames.get(dir) ?? { paths: [], names: [] }
+            group.paths.push(joinPath(dir, baseName(item.to)))
+            group.names.push(original)
+            renames.set(dir, group)
+          }
+          const restored = await Promise.all(
+            [...renames].map(([dir, group]) =>
+              runStep('rename', group.paths, {
+                newNames: group.names,
+                after: afterDirs([dir]),
+              }),
+            ),
+          )
+          // A failed rename (the original name is occupied again) still leaves the files
+          // back in their folder, so the undo succeeded. Re-arm the redo entry with the
+          // paths that exist now so Ctrl+Y never replays one that is gone.
+          const candidates = entry.items.flatMap((item) => {
+            const dir = parentPath(item.from)
+            return [joinPath(dir, baseName(item.from)), joinPath(dir, baseName(item.to))]
+          })
+          const exists = await pathsExist(candidates)
+          entry.request = {
+            ...entry.request,
+            sources: entry.items.map((item, index) =>
+              exists[index * 2]
+                ? candidates[index * 2]
+                : exists[index * 2 + 1]
+                  ? candidates[index * 2 + 1]
+                  : item.from,
+            ),
+          }
+          if (!restored.every(Boolean)) {
+            const failed = [...renames.values()].reduce((sum, group) => sum + group.paths.length, 0)
+            showToast(t('undo.partial', { ok: pending.length - failed, failed }))
+          }
+          return true
         }
         case 'copy': {
           // A copy the user already removed is already undone; deleting nothing must not
@@ -641,6 +690,9 @@ export function useFileOperations({
       return
     }
     undoBusy.current = true
+    // A new operation during the (asynchronous) reversal cleared the redo stack; its
+    // completion must not push the obsolete entry back.
+    const gen = historyGen.current
     void applyUndo(entry)
       .then((ok) => {
         if (!ok) return
@@ -649,6 +701,10 @@ export function useFileOperations({
         const at = undoStack.current.lastIndexOf(entry)
         if (at < 0) return
         undoStack.current.splice(at, 1)
+        if (historyGen.current !== gen) {
+          setHistoryEpoch((epoch) => epoch + 1)
+          return
+        }
         redoStack.current.push(entry)
         while (redoStack.current.length > undoLimit()) redoStack.current.shift()
         setHistoryEpoch((epoch) => epoch + 1)
@@ -685,6 +741,8 @@ export function useFileOperations({
     }
     let landed: ReadonlyMap<string, string> = new Map()
     undoBusy.current = true
+    // Same guard as undo: a new operation during the replay has already reset the stacks.
+    const gen = historyGen.current
     void runStep(request.kind, request.sources, {
       targetDir: request.targetDir,
       newName: request.newName,
@@ -702,6 +760,10 @@ export function useFileOperations({
         const at = redoStack.current.lastIndexOf(entry)
         if (at < 0) return
         redoStack.current.splice(at, 1)
+        if (historyGen.current !== gen) {
+          setHistoryEpoch((epoch) => epoch + 1)
+          return
+        }
         // The replay may have landed under a different name ("keep both"). Re-arm the
         // entry with what actually landed so the next Ctrl+Z never targets a path the
         // redo did not create.
@@ -727,6 +789,7 @@ export function useFileOperations({
       const index = undoStack.current.findIndex((entry) => entry.id === targetId)
       if (index === -1) return
       undoBusy.current = true
+      const gen = historyGen.current
       try {
         // Undo newest-first down to the requested entry. `targetId` is re-resolved every
         // round: the stack may have been trimmed while the previous reversal was in flight.
@@ -738,6 +801,9 @@ export function useFileOperations({
           if (!ok) break
           const current = undoStack.current.lastIndexOf(entry)
           if (current >= 0) undoStack.current.splice(current, 1)
+          // A new operation reset the history mid-loop; replaying older entries from
+          // here would reinstate an order the user already replaced.
+          if (historyGen.current !== gen) break
           redoStack.current.push(entry)
           while (redoStack.current.length > undoLimit()) redoStack.current.shift()
         }

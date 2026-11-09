@@ -29,7 +29,7 @@ import { SidebarPanel } from './components/SidebarPanel'
 import { PaneNodeRenderer } from './components/PaneNodeRenderer'
 import { pointOf } from './PaneView'
 import { DragOverlay } from './components/DragOverlay'
-import { paneIds } from './workspace'
+import { paneIds, samePath } from './workspace'
 import { opCancel, quitApp, titlebarMenu } from './api'
 import type { Drive, Lang, ListData, Place } from './types'
 import { makeT, setUiLanguage } from './i18n'
@@ -240,6 +240,14 @@ export default function App() {
   useEffect(() => {
     const pending = pendingSelect.current
     if (!pending) return
+    // The request names a folder and a row. If the tab was navigated elsewhere (the
+    // folder listing can take a while on a network share), the marker must not select a
+    // same-named row in the new folder.
+    const tab = ws?.tabs[pending.tabId]
+    if (!tab || !samePath(tab.path, pending.path)) {
+      pendingSelect.current = null
+      return
+    }
     const data = listData[pending.tabId]
     if (!data || data.loading) return
     pendingSelect.current = null
@@ -255,7 +263,7 @@ export default function App() {
       anchor: name,
       reveal: { name, id: nextRevealId() },
     }))
-  }, [listData, pendingSelect, pendingSelectTick, update])
+  }, [listData, pendingSelect, pendingSelectTick, update, ws])
 
   const { elevated, uacOn, switchPrivilege } = usePrivilegeStatus(showToast, t)
 

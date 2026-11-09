@@ -47,13 +47,23 @@ pub fn check(
     protection: &Protection,
     confirmed: &[String],
 ) -> Result<(), ApiError> {
-    let block: Vec<String> = protection.block.iter().filter_map(|raw| rule_key(raw)).collect();
-    let confirm: Vec<String> = protection.confirm.iter().filter_map(|raw| rule_key(raw)).collect();
-    let confirmed: HashSet<String> = confirmed
-        .iter()
-        .map(|raw| final_path(raw).unwrap_or_else(|| raw.clone()))
-        .filter_map(|path| key(&path))
-        .collect();
+    let block: Vec<RuleKeys> = protection.block.iter().filter_map(|raw| rule_keys(raw)).collect();
+    let confirm: Vec<RuleKeys> =
+        protection.confirm.iter().filter_map(|raw| rule_keys(raw)).collect();
+    let mut confirmed_dos = HashSet::new();
+    let mut confirmed_guid = HashSet::new();
+    for raw in confirmed {
+        let (resolved, guid) = match resolved_paths(raw) {
+            Some(pair) => pair,
+            None => (raw.clone(), None),
+        };
+        if let Some(value) = key(&resolved) {
+            confirmed_dos.insert(value);
+        }
+        if let Some(value) = guid.as_deref().and_then(guid_key_text) {
+            confirmed_guid.insert(value);
+        }
+    }
     let mut refused = Vec::new();
     let mut pending = Vec::new();
 
@@ -82,22 +92,40 @@ pub fn check(
         // The check and the shell operation are separate calls, so this closes the
         // alias-based bypass but cannot rule out a reparse point being swapped in
         // between (TOCTOU); the shell's own protected-path refusal is the second layer.
-        let final_path = final_path(candidate).unwrap_or_else(|| candidate.to_string());
+        let (final_text, final_guid) =
+            resolved_paths(candidate).unwrap_or_else(|| (candidate.to_string(), None));
         // Fail closed: a spelling that does not resolve to a filesystem location cannot be
         // proven safe, and silently skipping it was a bypass (relative paths, `...`).
-        let Some(source_key) = key(&final_path) else {
+        let Some(source_key) = key(&final_text) else {
             refused.push(source.clone());
             continue;
         };
-        if is_volume_root(&source_key) || block.iter().any(|rule| covers(&source_key, rule)) {
+        // The GUID spelling is a namespace where a drive letter and a local admin share
+        // resolve to the same string; a rule that only matched the DOS spelling left
+        // `\\localhost\C$\Windows` outside `%SystemRoot%`.
+        let source_guid = final_guid.as_deref().and_then(guid_key_text);
+        let covered = |rule: &RuleKeys| {
+            covers(&source_key, &rule.dos)
+                || match (&source_guid, &rule.guid) {
+                    (Some(source), Some(rule)) => covers(source, rule),
+                    _ => false,
+                }
+        };
+        if is_volume_root(&source_key)
+            || source_guid.as_deref().is_some_and(is_volume_root_guid)
+            || block.iter().any(covered)
+        {
             refused.push(source.clone());
-        } else if confirm.iter().any(|rule| covers(&source_key, rule))
-            && !confirmed.contains(&source_key)
+        } else if confirm.iter().any(covered)
+            && !confirmed_dos.contains(&source_key)
+            && !source_guid
+                .as_deref()
+                .is_some_and(|guid| confirmed_guid.contains(guid))
         {
             // Send the resolved spelling back: `key` cannot normalise a shell alias such
             // as `shell:Startup`, so a confirmation carrying the raw alias would never
             // match on retry.
-            pending.push(final_path);
+            pending.push(final_text);
         }
     }
 
@@ -251,9 +279,14 @@ fn strip_ascii_prefix<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
 }
 
 /// Resolves a path to the object the filesystem will act on, following reparse points and
-/// normalising mapped/`subst` drives and UNC aliases. `None` when the path does not exist
-/// or cannot be opened; the caller then keeps the lexical key.
-fn final_path(raw: &str) -> Option<String> {
+/// normalising mapped/`subst` drives and UNC aliases.
+///
+/// The second value is the same object in the volume-GUID namespace
+/// (`\\?\Volume{…}\dir`). It is the only namespace where a drive letter, a mapped drive
+/// and a local admin share (`\\localhost\C$`, also by machine name or loopback address)
+/// compare equal, so matching rules must see both spellings. `None` when the path does not
+/// exist or cannot be opened; the caller then keeps the lexical key.
+fn resolved_paths(raw: &str) -> Option<(String, Option<String>)> {
     if raw.contains('\0') {
         return None;
     }
@@ -273,28 +306,70 @@ fn final_path(raw: &str) -> Option<String> {
         )
     }
     .ok()?;
+    // 0 = `VOLUME_NAME_DOS`, 1 = `VOLUME_NAME_GUID`.
+    let dos = final_name(handle, GETFINALPATHNAMEBYHANDLE_FLAGS(0));
+    // Network shares have no volume GUID; the call fails or returns the UNC spelling,
+    // which `guid_key_text` rejects. That is not an error for this check.
+    let guid = final_name(handle, GETFINALPATHNAMEBYHANDLE_FLAGS(1));
+    let _ = unsafe { CloseHandle(handle) };
+    Some((dos?, guid))
+}
+
+fn final_name(
+    handle: windows::Win32::Foundation::HANDLE,
+    flags: GETFINALPATHNAMEBYHANDLE_FLAGS,
+) -> Option<String> {
     let mut buf = vec![0u16; 512];
     loop {
-        let len = unsafe {
-            GetFinalPathNameByHandleW(handle, &mut buf, GETFINALPATHNAMEBYHANDLE_FLAGS(0))
-        };
+        let len = unsafe { GetFinalPathNameByHandleW(handle, &mut buf, flags) };
         if len == 0 {
-            let _ = unsafe { CloseHandle(handle) };
             return None;
         }
         let needed = len as usize;
         if needed < buf.len() {
-            let text = String::from_utf16_lossy(&buf[..needed]);
-            let _ = unsafe { CloseHandle(handle) };
-            return Some(text);
+            return Some(String::from_utf16_lossy(&buf[..needed]));
         }
         // The return value is the required size when the buffer was too small.
         buf = vec![0u16; needed + 1];
     }
 }
 
-fn rule_key(raw: &str) -> Option<String> {
-    key(&expand_path(raw))
+/// Lexical key and, when the rule exists, its volume-GUID spelling. Rules are expanded
+/// once per operation; the handle probe is what lets an admin-share spelling and a drive
+/// letter collide on the same object.
+struct RuleKeys {
+    dos: String,
+    guid: Option<String>,
+}
+
+fn rule_keys(raw: &str) -> Option<RuleKeys> {
+    let expanded = expand_path(raw);
+    let dos = key(&expanded)?;
+    Some(RuleKeys {
+        dos,
+        guid: resolved_paths(&expanded)
+            .and_then(|(_, guid)| guid)
+            .as_deref()
+            .and_then(guid_key_text),
+    })
+}
+
+/// Normalises a `\\?\Volume{…}\dir` path into a comparable key. Returns `None` for a UNC
+/// path: a network resource has no local volume GUID, so it belongs to the DOS namespace.
+fn guid_key_text(raw: &str) -> Option<String> {
+    let text = raw.trim().replace('/', "\\");
+    let text = strip_ascii_prefix(&text, r"\\?\").unwrap_or(&text);
+    if !text.get(..7).is_some_and(|head| head.eq_ignore_ascii_case("volume{"))
+        || !text.contains('}')
+    {
+        return None;
+    }
+    Some(text.trim_end_matches('\\').to_lowercase())
+}
+
+/// A GUID key with nothing after the volume is that volume's root.
+fn is_volume_root_guid(key: &str) -> bool {
+    key.find('}').is_some_and(|close| key.len() == close + 1)
 }
 
 /// A source covers a rule when it is the rule itself or one of its ancestors.
@@ -353,6 +428,28 @@ mod tests {
         assert_eq!(key(r"C:\Windows...\System32 "), key(r"C:\Windows\System32"));
         // A component that is only dots/spaces names nothing; refuse to guess.
         assert_eq!(key(r"C:\..."), None);
+    }
+
+    #[test]
+    fn volume_guid_keys_share_one_namespace() {
+        // The handle-based path is always normalised, but the key still folds case and a
+        // trailing separator so a rule and a source cannot disagree on spelling.
+        assert_eq!(
+            guid_key_text(r"\\?\Volume{0123-abcd}\Windows\"),
+            guid_key_text(r"\\?\volume{0123-ABCD}\windows")
+        );
+        assert_eq!(
+            guid_key_text(r"\\?\Volume{0123-abcd}\Windows"),
+            Some(r"volume{0123-abcd}\windows".to_string())
+        );
+        // Network paths have no local volume GUID; they stay in the DOS namespace.
+        assert_eq!(guid_key_text(r"\\server\share\dir"), None);
+        assert!(is_volume_root_guid(
+            &guid_key_text(r"\\?\Volume{0123-abcd}\").unwrap()
+        ));
+        assert!(!is_volume_root_guid(
+            &guid_key_text(r"\\?\Volume{0123-abcd}\Windows").unwrap()
+        ));
     }
 
     #[test]

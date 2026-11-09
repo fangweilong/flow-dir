@@ -300,7 +300,14 @@ fn delete_sources(
                 let client = runner.client(&dav.connection)?;
                 client.delete(&dav.path)
             } else {
-                delete_local(Path::new(source))
+                // A mixed batch reaches this runner because one source is remote, and its
+                // `permanent` flag is chosen for WebDAV (which has no Recycle Bin). Using
+                // `std::fs` here would permanently delete the local half without the user
+                // asking for it. Refuse until the local half is routed through the shell.
+                Err(ApiError::new(
+                    "BAD_ARGS",
+                    "mixed WebDAV/local delete is not supported",
+                ))
             }
         })();
         match result {

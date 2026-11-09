@@ -6,7 +6,7 @@
 //! and hashes run as separately cancellable jobs.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::os::windows::fs::MetadataExt;
 use std::path::Path;
@@ -331,6 +331,7 @@ fn walk_files(
     options: &Options,
     cancel: &std::sync::atomic::AtomicBool,
     out: &mut HashMap<String, (Meta, bool)>,
+    dirs: &mut HashSet<String>,
     scanned: &mut u32,
     skipped: &mut u32,
 ) {
@@ -375,6 +376,9 @@ fn walk_files(
             };
             let is_dir = meta.is_dir();
             if is_dir {
+                // A directory on one side and a file on the other is `different` in the
+                // level view; the count needs the directory identity to agree.
+                dirs.insert(child_rel.to_lowercase());
                 // A filtered directory contributes no files, and `read_side` pairs it as
                 // compared=false at its own level; not descending keeps the recursive
                 // counts aligned with the rows the level view shows.
@@ -415,7 +419,9 @@ fn count_pair(
 ) -> Counts {
     let mut left_files = HashMap::new();
     let mut right_files = HashMap::new();
-    walk_files(left, options, cancel, &mut left_files, scanned, skipped);
+    let mut left_dirs = HashSet::new();
+    let mut right_dirs = HashSet::new();
+    walk_files(left, options, cancel, &mut left_files, &mut left_dirs, scanned, skipped);
     if cancel.load(Ordering::Relaxed) {
         return Counts {
             left_only: 0,
@@ -424,7 +430,7 @@ fn count_pair(
             same: 0,
         };
     }
-    walk_files(right, options, cancel, &mut right_files, scanned, skipped);
+    walk_files(right, options, cancel, &mut right_files, &mut right_dirs, scanned, skipped);
     let mut counts = Counts {
         left_only: 0,
         right_only: 0,
@@ -437,7 +443,13 @@ fn count_pair(
             // `compare_maps`; otherwise the row would never be shown.
             None => {
                 if *left_compared {
-                    counts.left_only += 1;
+                    // The counterpart is a directory: `compare_maps` marks the row
+                    // `different`, so counting it as one-sided disagreed with the row.
+                    if right_dirs.contains(key) {
+                        counts.different += 1;
+                    } else {
+                        counts.left_only += 1;
+                    }
                 }
             }
             Some((r, right_compared)) => {
@@ -454,10 +466,18 @@ fn count_pair(
             }
         }
     }
-    counts.right_only += right_files
-        .iter()
-        .filter(|(key, (_, compared))| *compared && !left_files.contains_key(*key))
-        .count() as u32;
+    for (key, (_, right_compared)) in &right_files {
+        if left_files.contains_key(key) {
+            continue;
+        }
+        if *right_compared {
+            if left_dirs.contains(key) {
+                counts.different += 1;
+            } else {
+                counts.right_only += 1;
+            }
+        }
+    }
     counts
 }
 

@@ -102,7 +102,12 @@ export function useDragAndDrop({
     return { dir, tabId, left: rect.left, top: rect.top, width: rect.width, height: rect.height }
   }, [])
 
-  const [pendingDrop, setPendingDrop] = useState<{ tabId: string; names: string[] } | null>(null)
+  const [pendingDrop, setPendingDrop] = useState<{
+    tabId: string
+    /** Folder the drop was made into; the tab may navigate before its listing arrives. */
+    path: string
+    names: string[]
+  } | null>(null)
   const elevated = useRef<boolean | null>(null)
   const warnedElevated = useRef(false)
 
@@ -111,11 +116,18 @@ export function useDragAndDrop({
   // with that rescan (and with a slow network share).
   useEffect(() => {
     if (!pendingDrop) return
+    const tab = wsRef.current?.tabs[pendingDrop.tabId]
+    // The same tab can be pointed at another folder while the operation runs (slow
+    // network share, conflict prompt). Selecting by name alone would then mark an
+    // unrelated same-named row, and the next Delete would hit the wrong file.
+    if (!tab?.path || !samePath(tab.path, pendingDrop.path)) return
     const listing = listData[pendingDrop.tabId]
     if (!listing || listing.loading) return
-    const wanted = new Set(pendingDrop.names.map((name) => name.toLowerCase()))
+    // WebDAV names are case-sensitive; only local folders fold case.
+    const fold = (name: string) => (isWebdavPath(pendingDrop.path) ? name : name.toLowerCase())
+    const wanted = new Set(pendingDrop.names.map(fold))
     const landed = listing.entries
-      .filter((entry) => wanted.has(entry.name.toLowerCase()))
+      .filter((entry) => wanted.has(fold(entry.name)))
       .map((entry) => entry.name)
     if (!landed.length) return
     setPendingDrop(null)
@@ -125,7 +137,7 @@ export function useDragAndDrop({
       anchor: landed[0],
       reveal: { name: landed[0], id: nextRevealId() },
     }))
-  }, [listData, pendingDrop, update])
+  }, [listData, pendingDrop, update, wsRef])
 
   useEffect(() => {
     if (!pendingDrop) return
@@ -203,7 +215,11 @@ export function useDragAndDrop({
           item.tabIds.includes(selectTabId),
         )
         if (pane && pane.activeTabId !== selectTabId) activateTab(pane.id, selectTabId)
-        setPendingDrop({ tabId: selectTabId, names: items.map((item) => baseName(item)) })
+        setPendingDrop({
+          tabId: selectTabId,
+          path: targetDir,
+          names: items.map((item) => baseName(item)),
+        })
       }
 
       // A mixed-volume drop runs as two batches; select once both have settled.

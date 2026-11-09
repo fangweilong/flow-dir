@@ -49,7 +49,7 @@ export interface UsePaneContextMenusOptions {
   createFolder: (paneId: string) => void
   pasteInto: (paneId: string) => void
   copyPaths: (paths: string[]) => void
-  startRename: (paneId: string, name: string) => void
+  startRename: (paneId: string, name: string, tabId?: string) => void
   startRenameMany: (paneId: string, names: string[]) => void
   deleteEntries: (paneId: string, names: string[], permanent: boolean) => void
   extractArchive: (archivePath: string, destDir: string) => void
@@ -149,7 +149,7 @@ export function usePaneContextMenus({
       selected: new Set([entry.name]),
       anchor: entry.name,
     }))
-    startRename(pendingNew.paneId, entry.name)
+    startRename(pendingNew.paneId, entry.name, pendingNew.tabId)
   }, [listData, pendingNew, startRename, update, wsRef])
 
   const rowFallback = useCallback(

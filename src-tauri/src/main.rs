@@ -581,12 +581,28 @@ fn settings_load(
     settings
 }
 
+/// Whether the last load returned defaults/backup because the real file could not be read.
+/// The UI must not persist changes in that state: a full save would overwrite the file it
+/// never managed to read.
+#[tauri::command]
+fn settings_unreadable() -> bool {
+    settings::load_failed()
+}
+
 #[tauri::command]
 fn settings_save(
     app: tauri::AppHandle,
     cache: tauri::State<'_, settings::SettingsCache>,
     settings: settings::Settings,
 ) -> Result<Vec<String>, ApiError> {
+    // Defensive counterpart to `settings_unreadable`: a stale/hand-rolled frontend save
+    // must not replace a configuration file that was never read this run.
+    if settings::load_failed() {
+        return Err(ApiError::new(
+            "CONFIG_UNREADABLE",
+            "settings.toml could not be read; restart before saving",
+        ));
+    }
     let previous = cache.get(&app);
     let settings = settings.normalize();
     settings::save(&app, &settings)?;
@@ -611,12 +627,21 @@ fn settings_save(
 }
 
 /// Saves (or clears, for an empty password) the WebDAV password in Credential Manager. The
-/// value is never echoed back and never enters `settings.toml`. The username comes from the
-/// form rather than the cached settings: saving a new connection is debounced, so the
-/// credential write can arrive before the connection exists in the cache.
+/// value is never echoed back and never enters `settings.toml`. The username and URL come
+/// from the form rather than the cached settings: saving a new connection is debounced, so
+/// the credential write can arrive before the connection exists in the cache.
+///
+/// The URL's origin is stored with the credential; changing the address later makes the
+/// old password unavailable instead of sending it to the new host.
 #[tauri::command(rename_all = "camelCase")]
-fn webdav_set_password(id: String, username: String, password: String) -> Result<(), ApiError> {
-    credentials::save(&id, &username, &password)
+fn webdav_set_password(
+    id: String,
+    username: String,
+    password: String,
+    url: Option<String>,
+) -> Result<(), ApiError> {
+    let origin = url.as_deref().and_then(webdav::url_origin);
+    credentials::save(&id, &username, &password, origin.as_deref())
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2293,6 +2318,7 @@ fn main() {
             layout_preserve,
             layout_load,
             settings_load,
+            settings_unreadable,
             settings_save,
             webdav_set_password,
             webdav_has_password,

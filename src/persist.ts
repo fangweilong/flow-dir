@@ -299,13 +299,6 @@ export function fromSnapshot(value: unknown): Workspace | null {
       delete pane.view
     }
   }
-  for (const tab of Object.values(tabMap)) {
-    // An empty path is the drive overview tab and must survive a restart.
-    if (!tab || typeof tab !== 'object') return null
-    if (typeof tab.path !== 'string') return null
-    if (!Array.isArray(tab.history) || typeof tab.histIdx !== 'number') return null
-    if (!tab.history.every((entry) => typeof entry === 'string')) return null
-  }
   // A tab id shared by two panes would let closing it in one pane remove the record the
   // other pane still references.
   const seenTabIds = new Set<string>()
@@ -316,11 +309,20 @@ export function fromSnapshot(value: unknown): Workspace | null {
     }
   }
   // Older builds could leave tab records no pane points at; restoring them would show
-  // closed folders in the compare pickers forever and keep growing the file.
+  // closed folders in the compare pickers forever and keep growing the file. Filter them
+  // before validating: an orphan record with missing fields is exactly the junk this
+  // pruning exists for, and rejecting the whole layout over it lost every pane.
   const referenced = new Set(Object.values(paneMap).flatMap((pane) => pane.tabIds))
-  const liveTabs = Object.fromEntries(
-    Object.entries(tabMap).filter(([id]) => referenced.has(id)),
-  )
+  const liveTabs: Record<string, TabState> = {}
+  for (const [id, tab] of Object.entries(tabMap)) {
+    if (!referenced.has(id)) continue
+    // An empty path is the drive overview tab and must survive a restart.
+    if (!tab || typeof tab !== 'object') return null
+    if (typeof tab.path !== 'string') return null
+    if (!Array.isArray(tab.history) || typeof tab.histIdx !== 'number') return null
+    if (!tab.history.every((entry) => typeof entry === 'string')) return null
+    liveTabs[id] = tab
+  }
   const activePaneId =
     typeof snapshot.activePaneId === 'string' && Object.hasOwn(paneMap, snapshot.activePaneId)
       ? snapshot.activePaneId

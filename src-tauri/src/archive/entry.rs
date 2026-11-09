@@ -69,6 +69,9 @@ fn decode_parts(
         return Err(ApiError::new("UNSAFE_PATH", "NUL in entry name"));
     }
     let mut segments = Vec::new();
+    // `./name` is how most tar writers spell a member under the archive root; the `.` is a
+    // path marker, not a file name, and rejecting it dropped every member of such archives.
+    let mut saw_root_marker = false;
     // Only `/` may split the raw bytes: GBK and Shift-JIS use 0x5C (`\`) as a trail byte,
     // so a backslash becomes a separator only after the name is decoded.
     for part in raw.split(|byte| *byte == b'/') {
@@ -87,18 +90,36 @@ fn decode_parts(
         };
         if backslash {
             for piece in text.split('\\') {
-                if !piece.is_empty() {
+                if piece == "." {
+                    saw_root_marker = true;
+                } else if !piece.is_empty() {
                     segments.push(sanitize_segment(piece)?);
                 }
             }
+        } else if text == "." {
+            saw_root_marker = true;
         } else {
             segments.push(sanitize_segment(&text)?);
         }
     }
     if segments.is_empty() {
+        // A member that only names the root (`./`) carries no content. Reporting it as a
+        // failure would make every ordinary tar archive look partly broken.
+        if saw_root_marker {
+            return Err(ApiError::new(ROOT_MARKER, "archive root marker"));
+        }
         return Err(ApiError::new("INVALID_NAME", "empty entry name"));
     }
     Ok(segments.join("\\"))
+}
+
+/// Code for a member that names the archive root itself, not a file. Callers skip it
+/// silently; it is not a broken entry.
+pub const ROOT_MARKER: &str = "ROOT_MARKER";
+
+/// Whether a decode error is the archive root marker rather than an unsafe name.
+pub fn is_root_marker(err: &ApiError) -> bool {
+    err.code == ROOT_MARKER
 }
 
 /// Legacy code page of the user's Windows language, then GBK, then CP437 — the page the

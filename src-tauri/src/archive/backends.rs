@@ -172,6 +172,16 @@ fn extract_7z(path: &str, sink: &mut Sink, password: Option<&str>) -> Result<(),
         }
         let rel = match entry::decode(file.name.as_bytes(), true) {
             Ok(rel) => rel,
+            Err(err) if entry::is_root_marker(&err) => {
+                // Still consume a solid archive's member; the name itself is skipped.
+                return match std::io::copy(read, &mut std::io::sink()) {
+                    Ok(_) => Ok(true),
+                    Err(err) => {
+                        abort = Some(ApiError::new("ARCHIVE", err.to_string()));
+                        Ok(false)
+                    }
+                };
+            }
             Err(err) => {
                 sink.skip(&file.name, &err.code);
                 // A solid archive stores members back-to-back; leaving this member's
@@ -437,6 +447,7 @@ fn extract_rar(path: &str, sink: &mut Sink, password: Option<&str>) -> Result<()
         let declared = entry.size().unwrap_or(0);
         let rel = match entry::decode_rar(&raw, false) {
             Ok(rel) => rel,
+            Err(err) if entry::is_root_marker(&err) => continue,
             Err(err) => {
                 sink.skip(&info.name, &err.code);
                 continue;
@@ -542,6 +553,7 @@ fn extract_iso_dir(
         };
         let rel = match entry::decode(raw.as_bytes(), true) {
             Ok(rel) => rel,
+            Err(err) if entry::is_root_marker(&err) => continue,
             Err(err) => {
                 sink.skip(&raw, &err.code);
                 continue;
@@ -585,6 +597,7 @@ fn extract_cab(path: &str, sink: &mut Sink) -> Result<(), ApiError> {
         // CAB stores path separators as `\` (MS-CAB, CFILE.szFile).
         let rel = match entry::decode_rar(name.as_bytes(), utf8) {
             Ok(rel) => rel,
+            Err(err) if entry::is_root_marker(&err) => continue,
             Err(err) => {
                 sink.skip(&name, &err.code);
                 continue;
@@ -650,6 +663,7 @@ fn extract_zip(path: &str, sink: &mut Sink, password: Option<&str>) -> Result<()
         let utf8 = file.flags().as_u16() & 0x800 != 0;
         let rel = match entry::decode(&raw, utf8) {
             Ok(rel) => rel,
+            Err(err) if entry::is_root_marker(&err) => continue,
             Err(err) => {
                 sink.skip(&String::from_utf8_lossy(&raw), &err.code);
                 continue;
@@ -682,8 +696,16 @@ fn extract_tar(reader: Box<dyn Read>, sink: &mut Sink) -> Result<(), ApiError> {
         if sink.cancelled() {
             return Err(ApiError::new("CANCELED", "extraction canceled"));
         }
-        // A damaged tail should not discard what already came out of the stream.
-        let Ok(mut entry) = entry else { break };
+        // A damaged tail should not discard what already came out of the stream, but it
+        // must be reported: silently breaking made a truncated archive look complete.
+        let mut entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                log::debug!(target: "flowdir::archive", "tar stream stopped: {err}");
+                sink.skip("<archive stream>", "CORRUPT");
+                break;
+            }
+        };
         let header = entry.header();
         let kind = header.entry_type();
         let is_dir = kind.is_dir();
@@ -692,6 +714,7 @@ fn extract_tar(reader: Box<dyn Read>, sink: &mut Sink) -> Result<(), ApiError> {
         let raw = entry.path_bytes().to_vec();
         let rel = match entry::decode(&raw, false) {
             Ok(rel) => rel,
+            Err(err) if entry::is_root_marker(&err) => continue,
             Err(err) => {
                 sink.skip(&String::from_utf8_lossy(&raw), &err.code);
                 continue;

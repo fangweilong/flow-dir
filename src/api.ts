@@ -60,12 +60,15 @@ export const layoutLoad = () => invoke<unknown>('layout_load')
 export const layoutPreserve = () => invoke<string>('layout_preserve')
 
 export const settingsLoad = () => invoke<Settings>('settings_load')
+/** True when the last load fell back to defaults/backup because the file was unreadable. */
+export const settingsUnreadable = () => invoke<boolean>('settings_unreadable')
 /** Probes a WebDAV server with PROPFIND (Depth 0); a blank password uses the stored one. */
 export const webdavTest = (connection: WebdavConnection, password?: string) =>
   invoke<void>('webdav_test', { connection, password })
-/** Stores the password in Windows Credential Manager; an empty string removes it. */
-export const webdavSetPassword = (id: string, username: string, password: string) =>
-  invoke<void>('webdav_set_password', { id, username, password })
+/** Stores the password in Windows Credential Manager; an empty string removes it. The URL
+ * binds the secret to the server it was entered for. */
+export const webdavSetPassword = (id: string, username: string, password: string, url?: string) =>
+  invoke<void>('webdav_set_password', { id, username, password, url: url ?? null })
 /** True when Windows Credential Manager holds a password for the connection. */
 export const webdavHasPassword = (id: string) => invoke<boolean>('webdav_has_password', { id })
 export const configWarnings = () => invoke<string[]>('config_warnings')

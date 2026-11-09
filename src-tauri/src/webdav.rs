@@ -15,7 +15,7 @@
 use std::ffi::c_void;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use percent_encoding::percent_decode_str;
@@ -419,30 +419,93 @@ fn encode_segment(segment: &str) -> String {
     percent_encoding::utf8_percent_encode(segment, SEGMENT).to_string()
 }
 
-/// Drops `user[:password]@` from the authority before a URL is echoed in an error. The
-/// settings form has separate credential fields, but a pasted URL may still carry them
-/// and a password must never reach a log or an IPC response.
-fn redact_userinfo(url: &str) -> String {
-    let Some(scheme_end) = url.find("://") else {
-        // Without a scheme the whole string may be `user:password@host`, so echoing it
-        // would leak the credential the redaction exists to hide.
-        return "<invalid url>".to_string();
-    };
-    // `user:password@https://host` is not a valid URL but would otherwise survive: the
-    // scheme marker is found, and the credentials sit before it rather than in the
-    // authority. Never echo a string whose pre-scheme part could be a credential.
+/// Drops `user[:password]@` from the URL authority. Returns `None` when the string cannot
+/// be parsed safely: a credential that is not in a well-formed authority must never be
+/// echoed into a log, an IPC error or `settings.toml`, because it may contain a password.
+///
+/// A password split by `/`, `?` or `#` (all URL delimiters) makes the authority look like
+/// `user:pa`; the tail then parses as a host without a numeric port. Treating that as a
+/// parse failure is what closes the leak; the old code returned the original string.
+pub(crate) fn strip_userinfo(url: &str) -> Option<String> {
+    let scheme_end = url.find("://")?;
     if url[..scheme_end].contains('@') {
-        return "<invalid url>".to_string();
+        return None;
     }
     let rest = &url[scheme_end + 3..];
-    let authority_end = rest
-        .find(['/', '?', '#'])
-        .unwrap_or(rest.len());
-    // Passwords may contain `@`; the last one in the authority separates the userinfo.
-    let Some(at) = rest[..authority_end].rfind('@') else {
-        return url.to_string();
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let (host_port, has_userinfo) = match authority.rfind('@') {
+        Some(at) => (&authority[at + 1..], true),
+        None => (authority, false),
     };
-    format!("{}://{}", &url[..scheme_end], &rest[at + 1..])
+    if host_port.is_empty() {
+        return None;
+    }
+    if !has_userinfo {
+        if !authority_is_host_port(host_port) {
+            // `user:pa` or `host:pa` — not a port and not a userinfo marker, so the original
+            // string may hide a password before a delimiter we already split on.
+            return None;
+        }
+        // `user:123/ss@host`: a numeric "port" can still be the first half of a password
+        // whose `/` ended the authority. An `@` in the first path segment is the only
+        // remaining signal; a literal one must be percent-encoded (`%40`).
+        if rest[authority_end..]
+            .split('/')
+            .nth(1)
+            .is_some_and(|segment| segment.contains('@'))
+        {
+            return None;
+        }
+    }
+    let mut out = String::with_capacity(url.len());
+    out.push_str(&url[..scheme_end + 3]);
+    out.push_str(host_port);
+    out.push_str(&rest[authority_end..]);
+    Some(out)
+}
+
+/// A bare authority without `@` is valid only when a colon introduces a numeric port.
+/// Bracketed IPv6 literals carry colons inside the brackets and are always allowed.
+fn authority_is_host_port(authority: &str) -> bool {
+    if authority.starts_with('[') {
+        return true;
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) => !host.contains(':') && !port.is_empty() && port.chars().all(|ch| ch.is_ascii_digit()),
+        None => true,
+    }
+}
+
+/// Drops the authority userinfo before a URL is echoed in an error. Invalid input never
+/// echoes the original string: it may be exactly the credential the redaction hides.
+fn redact_userinfo(url: &str) -> String {
+    strip_userinfo(url).unwrap_or_else(|| "<invalid url>".to_string())
+}
+
+/// Scheme, host and port without credentials or path. Used to bind a stored password to
+/// the server it was entered for, so editing the URL cannot redirect it elsewhere.
+pub(crate) fn url_origin(url: &str) -> Option<String> {
+    let cleaned = strip_userinfo(url.trim())?;
+    let lower = cleaned.to_ascii_lowercase();
+    let (secure, rest) = if let Some(rest) = lower.strip_prefix("https://").map(|_| &cleaned[8..]) {
+        (true, rest)
+    } else {
+        let rest = lower.strip_prefix("http://").map(|_| &cleaned[7..])?;
+        (false, rest)
+    };
+    let authority = rest.split('/').next().unwrap_or(rest);
+    let default_port = if secure { 443 } else { 80 };
+    let (host, port) = split_authority(authority, default_port).ok()?;
+    if host.is_empty() || host.chars().any(|ch| ch.is_whitespace() || ch.is_control()) {
+        return None;
+    }
+    let scheme = if secure { "https" } else { "http" };
+    Some(if port == default_port {
+        format!("{scheme}://{host}")
+    } else {
+        format!("{scheme}://{host}:{port}")
+    })
 }
 
 #[derive(Clone)]
@@ -627,11 +690,27 @@ impl DavClient {
         connection: &WebdavConnection,
         override_password: Option<&str>,
     ) -> Result<Self, ApiError> {
+        let endpoint = Endpoint::parse(connection)?;
         let password = match override_password {
             Some(value) => Some(value.to_string()),
-            None => credentials::load(&connection.id),
+            None => match credentials::load_with_origin(&connection.id) {
+                Some(stored) => match stored.origin.as_deref() {
+                    // The URL was edited after the password was saved: sending the old
+                    // secret to the new host would leak it. The server answers 401 until
+                    // the user enters the password for the new address.
+                    Some(origin) if !origin.eq_ignore_ascii_case(&endpoint.origin()) => None,
+                    // Entries written before the origin was recorded are bound to the
+                    // configuration they currently belong to, once, so upgrades keep
+                    // working; later edits are checked as above.
+                    None => {
+                        let _ = credentials::bind(&connection.id, &endpoint.origin());
+                        Some(stored.password)
+                    }
+                    Some(_) => Some(stored.password),
+                },
+                None => None,
+            },
         };
-        let endpoint = Endpoint::parse(connection)?;
         let agent = wide("FlowDir WebDAV");
         let host = wide(&endpoint.host);
         unsafe {
@@ -856,10 +935,33 @@ impl DavClient {
         Ok(true)
     }
 
-    /// Uploads `local` to `rel`, streaming in chunks. Authentication is negotiated by
-    /// rewinding and replaying when a 401 arrives; the body is only sent once credentials
-    /// for the first attempt are known to be accepted.
+    /// Uploads `local` to `rel` without exposing a truncated target.
+    ///
+    /// The body goes to a sibling temporary resource first and is moved into place only
+    /// after the server acknowledged the complete body. A cancel or a network failure
+    /// therefore leaves the previous `rel` untouched instead of replacing it with a
+    /// half-written file; the temporary is deleted on a best-effort basis.
     pub(crate) fn upload_file(
+        &self,
+        rel: &str,
+        local: &Path,
+        cancel: &AtomicBool,
+    ) -> Result<(), ApiError> {
+        let temp = temp_upload_rel(rel);
+        let uploaded = match self.upload_to(&temp, local, cancel) {
+            Ok(()) => self.move_to(&temp, rel, true),
+            Err(err) => Err(err),
+        };
+        if uploaded.is_err() {
+            let _ = self.delete(&temp);
+        }
+        uploaded
+    }
+
+    /// Streams the body to one resource. Authentication is negotiated by rewinding and
+    /// replaying when a 401 arrives; the body is only sent once credentials for the first
+    /// attempt are known to be accepted.
+    fn upload_to(
         &self,
         rel: &str,
         local: &Path,
@@ -1120,6 +1222,14 @@ impl DavClient {
     pub(crate) fn url_for(&self, rel: &str) -> String {
         self.rel_url(rel)
     }
+}
+
+/// Sibling resource used while an upload is in flight. The process id and a counter keep
+/// two concurrent uploads to the same name from writing into one temporary.
+fn temp_upload_rel(rel: &str) -> String {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{rel}.flowdir-{}-{seq}.part", std::process::id())
 }
 
 fn fnv_u64(text: &str) -> u64 {

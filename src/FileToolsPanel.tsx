@@ -613,6 +613,7 @@ function DupTable({
               hidden: progress.skippedHidden,
               cloud: progress.skippedCloud,
               hard: progress.skippedHardlink,
+              unreadable: progress.skippedUnreadable,
             })}
           </div>
         )}

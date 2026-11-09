@@ -357,7 +357,10 @@ impl Sink {
                     format!("{} exceeds its declared size", self.current.as_deref().unwrap_or("entry")),
                 ));
             }
-            if self.progress.bytes + written_total > self.budget {
+            // `progress.bytes` already counts the previous chunks of this member (`:378`);
+            // adding `written_total` again counted the current member twice and rejected
+            // files larger than about half of the remaining free space.
+            if self.progress.bytes + read as u64 > self.budget {
                 drop(file);
                 let _ = fs::remove_file(path);
                 self.buf = buf;
