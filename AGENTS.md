@@ -33,7 +33,7 @@
 - **禁止在 `App.tsx` 堆积业务与弹窗**：`App.tsx` 仅作为顶层纯编排层（工具栏骨架、窗格容器挂载与全局快捷键分发）。单个组件或 Hook 文件代码行数原则上不超过 800 行，严禁将多模块逻辑重新塞回单一文件。
 - **业务状态机强制 Hook 隔离**：
   - 文件底层 I/O、进度管理、撤销/重做栈与提权恢复统一维护在 `src/hooks/useFileOperations.ts`；
-  - 跨窗格拖放、系统 OLE 拖出与 WebView2 原生拖入及放置目标检测统一维护在 `src/hooks/useDragAndDrop.ts`；
+  - 跨窗格拖放、系统 OLE 拖出与 WebView2 原生拖入及放置目标检测统一维护在 `src/hooks/useDragAndDrop.ts`；系统拖入的 OLE `IDropTarget` 由 `src-tauri/src/dragdrop.rs` 覆盖注册（必须同时接受 `CF_HDROP` 与纯文本路径列表，如 VS Code），前端通过 `flowdir:drag-drop` 事件消费，Tauri 内置事件仅作备用；
   - 侧边栏目录树分级缓存、多路径失效广播与 Git 状态异步合并统一维护在 `src/hooks/useTreeAndGit.ts`；
   - 新增跨模块业务状态优先按领域收敛至 `src/hooks/`，严禁在顶层组件中直接暴露底层实现。
 - **弹窗与浮层统一收敛**：所有低频模态窗口、右键菜单及浮层统一由 `src/ModalContainer.tsx` 编排挂载，严禁在 `App.tsx` 顶层散落编写弹窗 JSX。

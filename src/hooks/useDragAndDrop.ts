@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, RefObject } from 'react'
+import { listen } from '@tauri-apps/api/event'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import type { Entry, ListData, OpKind } from '../types'
 import { samePath } from '../workspace'
@@ -50,6 +51,16 @@ export type RowDragState = {
 }
 
 export type OsDragState = { paths: string[]; target: DropTarget | null }
+
+/**
+ * Native drag events from `src-tauri/src/dragdrop.rs` use the same shape as Tauri's
+ * built-in drag-drop event, so one handler serves both.
+ */
+type NativeDragPayload =
+  | { type: 'enter'; paths: string[]; position: { x: number; y: number } }
+  | { type: 'over'; position: { x: number; y: number } }
+  | { type: 'drop'; paths: string[]; position: { x: number; y: number } }
+  | { type: 'leave' }
 
 export interface UseDragAndDropProps {
   wsRef: RefObject<Workspace | null>
@@ -415,41 +426,47 @@ export function useDragAndDrop({
   useEffect(() => {
     let paths: string[] = []
     let disposed = false
-    let unlisten: (() => void) | undefined
-    void getCurrentWebview()
-      .onDragDropEvent((event) => {
-        const payload = event.payload
-        if (payload.type === 'leave') {
-          paths = []
-          setOsDrag(null)
-          return
-        }
-        const dpr = window.devicePixelRatio || 1
-        const target = resolveDropTarget(payload.position.x / dpr, payload.position.y / dpr)
-        if (payload.type === 'enter') paths = payload.paths
-        if (payload.type === 'drop') {
-          const dropped = payload.paths.filter((path) => isFsPath(path))
-          setOsDrag(null)
-          if (!target || !dropped.length) return
-          // The drop payload carries no keyboard state and the webview saw no keydown
-          // while another process was dragging, so ask the OS which modifiers are held.
-          void dropModifiers()
-            .then((mask) => {
-              const forced = mask & 1 ? 'copy' : mask & 2 ? 'move' : null
-              dropPaths(dropped, target, forced)
-            })
-            .catch(() => dropPaths(dropped, target, null))
-          return
-        }
-        setOsDrag({ paths, target })
-      })
-      .then((fn) => {
+    const unlistens: (() => void)[] = []
+    const handle = (payload: NativeDragPayload) => {
+      if (payload.type === 'leave') {
+        paths = []
+        setOsDrag(null)
+        return
+      }
+      const dpr = window.devicePixelRatio || 1
+      const target = resolveDropTarget(payload.position.x / dpr, payload.position.y / dpr)
+      if (payload.type === 'enter') paths = payload.paths
+      if (payload.type === 'drop') {
+        const dropped = payload.paths.filter((path) => isFsPath(path))
+        setOsDrag(null)
+        if (!target || !dropped.length) return
+        // The drop payload carries no keyboard state and the webview saw no keydown
+        // while another process was dragging, so ask the OS which modifiers are held.
+        void dropModifiers()
+          .then((mask) => {
+            const forced = mask & 1 ? 'copy' : mask & 2 ? 'move' : null
+            dropPaths(dropped, target, forced)
+          })
+          .catch(() => dropPaths(dropped, target, null))
+        return
+      }
+      setOsDrag({ paths, target })
+    }
+    const register = (subscribe: () => Promise<() => void>) => {
+      void subscribe().then((fn) => {
         if (disposed) fn()
-        else unlisten = fn
+        else unlistens.push(fn)
       })
+    }
+    // The Rust drop target normally replaces Tauri's; the built-in listener stays as a
+    // fallback for any WebView2 window the replacement could not reach.
+    register(() =>
+      listen<NativeDragPayload>('flowdir:drag-drop', (event) => handle(event.payload)),
+    )
+    register(() => getCurrentWebview().onDragDropEvent((event) => handle(event.payload)))
     return () => {
       disposed = true
-      unlisten?.()
+      for (const unlisten of unlistens) unlisten()
     }
   }, [dropPaths, resolveDropTarget])
 

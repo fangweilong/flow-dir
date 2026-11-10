@@ -1,6 +1,6 @@
 [package]
 name = "flowdir"
-version = "0.6.40"
+version = "0.6.41"
 description = "FlowDir file manager"
 edition = "2021"
 rust-version = "1.93"

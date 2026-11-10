@@ -5,6 +5,7 @@ mod archive;
 mod clipboard;
 mod credentials;
 mod compare;
+mod dragdrop;
 mod dragout;
 mod elevated;
 mod error;
@@ -2279,6 +2280,10 @@ fn main() {
                 .get_webview_window("main")
                 .and_then(|window| window.hwnd().ok())
                 .map(|hwnd| windows::Win32::Foundation::HWND(hwnd.0));
+            // Replace wry's CF_HDROP-only target so text-only file drags (VS Code) work.
+            if let Some(hwnd) = hwnd {
+                dragdrop::install(app.handle(), hwnd);
+            }
             theme::apply(hwnd, &saved.theme);
             titlebar::apply(&window);
             webview_mem::watch(app.handle().clone());
