@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { makeT } from './i18n'
+import { isTextInput } from './shortcuts'
 import type { Lang } from './types'
 import { FileIcon } from './icons'
 
@@ -7,6 +8,13 @@ export type ConfirmItem = {
   name: string
   path?: string
 }
+
+/**
+ * Mounted confirmation dialogs in commit order. Only the last (topmost) one consumes
+ * keyboard input: stacked dialogs would otherwise both answer Escape/Y/N and run two
+ * actions from one keystroke.
+ */
+const dialogStack: symbol[] = []
 
 type Props = {
   title: string
@@ -22,6 +30,11 @@ type Props = {
    * unlocks. Used for the user-configured `protect_confirm` tier.
    */
   requireText?: string
+  /**
+   * Plain yes/no dialogs opt into Y = confirm, N = cancel. Typed-confirmation dialogs
+   * never receive this: their input must keep accepting those letters.
+   */
+  yesNoShortcuts?: boolean
   lang: Lang
   onConfirm: () => void
   onClose: () => void
@@ -30,6 +43,8 @@ type Props = {
 /**
  * Blocking confirmation for destructive actions. Focus starts on Cancel so a stray Enter
  * never deletes anything; Enter still confirms once the user has deliberately moved focus.
+ * Arrow keys move focus between the two buttons (Left/Up = Cancel, Right/Down = Confirm)
+ * unless a text field owns the keyboard.
  */
 export function ConfirmDialog({
   title,
@@ -39,14 +54,17 @@ export function ConfirmDialog({
   confirmLabel,
   danger,
   requireText,
+  yesNoShortcuts,
   lang,
   onConfirm,
   onClose,
 }: Props) {
   const t = makeT(lang)
   const cancelRef = useRef<HTMLButtonElement>(null)
+  const confirmRef = useRef<HTMLButtonElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const [typed, setTyped] = useState('')
+  const [dialogId] = useState(() => Symbol('confirm-dialog'))
   const unlocked = !requireText || typed === requireText
 
   useEffect(() => {
@@ -55,19 +73,56 @@ export function ConfirmDialog({
   }, [requireText])
 
   useEffect(() => {
+    dialogStack.push(dialogId)
+    return () => {
+      const index = dialogStack.indexOf(dialogId)
+      if (index !== -1) dialogStack.splice(index, 1)
+    }
+  }, [dialogId])
+
+  useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
+      if (dialogStack[dialogStack.length - 1] !== dialogId) return
       if (ev.key === 'Escape') {
-        // Two stacked dialogs both listen in the capture phase on `window`;
-        // `stopPropagation` does not stop the other listener on the same node.
+        // `stopImmediatePropagation` also covers listeners on the same node; the stack
+        // check above already keeps background dialogs out.
         ev.stopImmediatePropagation()
         ev.preventDefault()
         ev.stopPropagation()
         onClose()
+        return
+      }
+      const arrow =
+        ev.key === 'ArrowLeft' || ev.key === 'ArrowRight' || ev.key === 'ArrowUp' || ev.key === 'ArrowDown'
+      if (arrow) {
+        if (ev.ctrlKey || ev.altKey || ev.metaKey) return
+        // Inside the typed-confirmation field the arrows belong to the caret.
+        if (isTextInput(ev.target)) return
+        const toConfirm = ev.key === 'ArrowRight' || ev.key === 'ArrowDown'
+        if (toConfirm && !unlocked) return
+        ev.preventDefault()
+        ev.stopPropagation()
+        const target = toConfirm ? confirmRef : cancelRef
+        target.current?.focus()
+        return
+      }
+      if (!yesNoShortcuts || requireText) return
+      // Bare letters must not fire while a field owns the keyboard, and key repeat would
+      // re-trigger an action whose dialog has already been dismissed.
+      if (ev.repeat || ev.isComposing) return
+      if (ev.ctrlKey || ev.altKey || ev.metaKey) return
+      if (isTextInput(ev.target)) return
+      const key = ev.key.toLowerCase()
+      if (key === 'y' || key === 'n') {
+        ev.preventDefault()
+        ev.stopPropagation()
+        if (key === 'y') onConfirm()
+        else onClose()
       }
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [onClose])
+  }, [dialogId, onClose, onConfirm, requireText, unlocked, yesNoShortcuts])
 
   return (
     <div
@@ -173,8 +228,12 @@ export function ConfirmDialog({
             className="rounded-lg border border-line bg-surface px-3.5 py-1.5 text-[0.75rem] font-medium text-fg transition-colors hover:bg-surface-3 active:bg-surface-2"
           >
             {t('dialog.cancel')}
+            {yesNoShortcuts && !requireText && (
+              <span className="ml-1 text-[0.6875rem] opacity-60">(N)</span>
+            )}
           </button>
           <button
+            ref={confirmRef}
             type="button"
             data-confirm-ok
             disabled={!unlocked}
@@ -186,6 +245,9 @@ export function ConfirmDialog({
             }`}
           >
             {confirmLabel}
+            {yesNoShortcuts && !requireText && (
+              <span className="ml-1 text-[0.6875rem] opacity-60">(Y)</span>
+            )}
           </button>
         </div>
       </div>

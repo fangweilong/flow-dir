@@ -367,6 +367,7 @@ export function ModalContainer({
               deleteConfirm.permanent ? 'confirm.deletePermanentAction' : 'confirm.recycleAction',
             )}
             danger={deleteConfirm.permanent}
+            yesNoShortcuts
             onConfirm={() => {
               const pending = deleteConfirm
               setDeleteConfirm(null)
