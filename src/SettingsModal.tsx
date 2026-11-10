@@ -55,7 +55,7 @@ export function SettingsModal({ settings, lang, onChange, onOpenLocation, onClos
       t('settings.themeDarkGroup'),
       t('settings.font'),
       t('settings.fontSize'),
-      t('settings.fontCustom'),
+      t('settings.fontHint'),
       t('settings.iconSize'),
       t('settings.iconTheme'),
       ...ICON_THEMES.map((entry) => `${t(entry.label)} ${t(entry.hint)}`),

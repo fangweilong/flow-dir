@@ -1,5 +1,7 @@
 /** UI typography options shared by the settings page and the root CSS variables. */
 
+import { systemFonts } from './api'
+
 export const BASE_FONT_SIZE = 13
 export const FONT_SIZE_MIN = 12
 export const FONT_SIZE_MAX = 20
@@ -12,7 +14,7 @@ export const DEFAULT_NAV_FONT_SIZE = 12
 export const DEFAULT_ICON_SIZE = 20
 export const ICON_SIZE_MIN = 14
 export const ICON_SIZE_MAX = 32
-/** Common Windows families; any other installed family can be typed in. */
+/** Curated families shown first; every other installed family is appended at runtime. */
 export const FONT_FAMILIES = [
   DEFAULT_FONT_FAMILY,
   'Segoe UI',
@@ -22,6 +24,35 @@ export const FONT_FAMILIES = [
   'Consolas',
   'Arial',
 ]
+
+let installedFamilies: Promise<string[]> | null = null
+
+/**
+ * Installed families merged with the curated defaults. Enumerated once per session,
+ * because the OS font table is static and the pickers remount with the settings modal.
+ * A failed call keeps the static list so family selection still works without a backend.
+ */
+export function loadFontFamilies(): Promise<string[]> {
+  installedFamilies ??= systemFonts()
+    .then(mergeFontFamilies)
+    .catch(() => {
+      installedFamilies = null
+      return FONT_FAMILIES
+    })
+  return installedFamilies
+}
+
+function mergeFontFamilies(names: string[]): string[] {
+  const seen = new Set(FONT_FAMILIES.map((name) => name.toLowerCase()))
+  const extra = names.filter((name) => {
+    const key = name.toLowerCase()
+    if (!name || seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+  extra.sort((left, right) => left.localeCompare(right))
+  return [...FONT_FAMILIES, ...extra]
+}
 
 const DEFAULT_STACK = `"${DEFAULT_FONT_FAMILY}", "Segoe UI", system-ui, sans-serif`
 

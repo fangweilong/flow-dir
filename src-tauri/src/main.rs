@@ -9,6 +9,7 @@ mod dragout;
 mod elevated;
 mod error;
 mod folder_picker;
+mod fonts;
 mod fs;
 mod git;
 mod hash;
@@ -575,6 +576,15 @@ fn layout_unreadable() -> bool {
 #[tauri::command]
 fn layout_preserve(app: tauri::AppHandle) -> Result<String, ApiError> {
     layout::preserve(&app).map(|path| path.display().to_string())
+}
+
+/// Installed font families for the settings pickers; enumeration touches the GDI font
+/// table, so it runs off the UI thread.
+#[tauri::command]
+async fn system_fonts() -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(fonts::installed_families)
+        .await
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -2357,6 +2367,7 @@ fn main() {
             layout_preserve,
             layout_load,
             layout_unreadable,
+            system_fonts,
             settings_load,
             settings_unreadable,
             settings_save,

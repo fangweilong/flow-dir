@@ -62,6 +62,8 @@ export const layoutUnreadable = () => invoke<boolean>('layout_unreadable')
 export const layoutPreserve = () => invoke<string>('layout_preserve')
 
 export const settingsLoad = () => invoke<Settings>('settings_load')
+/** Installed font family names, for the font pickers; empty when enumeration failed. */
+export const systemFonts = () => invoke<string[]>('system_fonts')
 /** True when the last load fell back to defaults/backup because the file was unreadable. */
 export const settingsUnreadable = () => invoke<boolean>('settings_unreadable')
 /** Probes a WebDAV server with PROPFIND (Depth 0); a blank password uses the stored one. */

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { NumberField } from '../NumberField'
 import type { Translate } from '../../i18n'
 import type { Settings } from '../../persist'
@@ -17,7 +17,9 @@ import {
   clampFontSize,
   clampIconSize,
   clampRegionFontSize,
+  loadFontFamilies,
 } from '../../fonts'
+import { FontFamilyPicker } from './FontFamilyPicker'
 import { ActiveCheck, RegionFontRow, ThemeCard, ThemeSwatch, ToggleRow } from './SettingsShared'
 import { ICON_THEMES, type IconThemeId } from '../../iconThemes'
 
@@ -30,10 +32,14 @@ export type GeneralSectionProps = {
 }
 
 export function GeneralSection({ settings, onChange, t, visible, everything }: GeneralSectionProps) {
-  const [customFont, setCustomFont] = useState(!FONT_FAMILIES.includes(settings.fontFamily))
-  const [customDraft, setCustomDraft] = useState(
-    FONT_FAMILIES.includes(settings.fontFamily) ? '' : settings.fontFamily,
-  )
+  // Starts with the curated families and expands once the OS font table is read.
+  const [fontOptions, setFontOptions] = useState<string[]>(FONT_FAMILIES)
+  const fontsRequested = useRef(false)
+  useEffect(() => {
+    if (!visible || fontsRequested.current) return
+    fontsRequested.current = true
+    void loadFontFamilies().then(setFontOptions)
+  }, [visible])
   // The exclude list is edited as text: committing on every keystroke would drop a
   // trailing comma and make the second entry impossible to type.
   const [excludeDraft, setExcludeDraft] = useState<string | null>(null)
@@ -114,42 +120,16 @@ export function GeneralSection({ settings, onChange, t, visible, everything }: G
               <div className="text-[0.75rem] text-fg">{t('settings.font')}</div>
               <div className="text-[0.65625rem] text-muted-2">{t('settings.fontHint')}</div>
             </div>
-            <div className="flex shrink-0 items-center gap-1">
-              <select
-                value={customFont ? '__custom' : settings.fontFamily}
-                onChange={(ev) => {
-                  const value = ev.target.value
-                  if (value === '__custom') {
-                    setCustomFont(true)
-                    setCustomDraft('')
-                    return
-                  }
-                  setCustomFont(false)
-                  onChange({ ...settings, fontFamily: value })
-                }}
-                aria-label={t('settings.font')}
-                className="h-6 w-[9.5rem] rounded border border-line bg-surface-2 px-1.5 text-[0.71875rem] text-fg outline-none focus:border-accent-soft focus:bg-surface"
-              >
-                {FONT_FAMILIES.map((family) => (
-                  <option key={family} value={family}>
-                    {family}
-                  </option>
-                ))}
-                <option value="__custom">{t('settings.fontCustom')}</option>
-              </select>
-              {customFont && (
-                <input
-                  value={customDraft}
-                  onChange={(ev) => {
-                    setCustomDraft(ev.target.value)
-                    onChange({ ...settings, fontFamily: ev.target.value.trim() || DEFAULT_FONT_FAMILY })
-                  }}
-                  placeholder={t('settings.fontCustomPh')}
-                  aria-label={t('settings.fontCustomPh')}
-                  className="h-6 w-[9.5rem] rounded border border-line bg-surface-2 px-1.5 text-[0.71875rem] outline-none placeholder:text-muted-2 focus:border-accent-soft focus:bg-surface"
-                />
-              )}
-            </div>
+            <FontFamilyPicker
+              value={settings.fontFamily}
+              options={fontOptions}
+              onChange={(family) =>
+                onChange({ ...settings, fontFamily: family.trim() || DEFAULT_FONT_FAMILY })
+              }
+              ariaLabel={t('settings.font')}
+              noMatchLabel={t('settings.fontNoMatch')}
+              className="w-[9.5rem] shrink-0"
+            />
           </div>
           <div className="flex items-center justify-between gap-3 rounded-lg border border-line px-3 py-2">
             <div className="min-w-0">
@@ -215,6 +195,7 @@ export function GeneralSection({ settings, onChange, t, visible, everything }: G
               label={t('settings.fontTab')}
               family={settings.tabFontFamily}
               size={tabFontSize}
+              options={fontOptions}
               inheritHint={t('settings.fontInherit')}
               onChangeFamily={(family) => onChange({ ...settings, tabFontFamily: family })}
               onChangeSize={(size) => onChange({ ...settings, tabFontSize: size })}
@@ -223,6 +204,7 @@ export function GeneralSection({ settings, onChange, t, visible, everything }: G
               label={t('settings.fontList')}
               family={settings.listFontFamily}
               size={listFontSize}
+              options={fontOptions}
               inheritHint={t('settings.fontInherit')}
               onChangeFamily={(family) => onChange({ ...settings, listFontFamily: family })}
               onChangeSize={(size) => onChange({ ...settings, listFontSize: size })}
@@ -231,15 +213,11 @@ export function GeneralSection({ settings, onChange, t, visible, everything }: G
               label={t('settings.fontNav')}
               family={settings.navFontFamily}
               size={navFontSize}
+              options={fontOptions}
               inheritHint={t('settings.fontInherit')}
               onChangeFamily={(family) => onChange({ ...settings, navFontFamily: family })}
               onChangeSize={(size) => onChange({ ...settings, navFontSize: size })}
             />
-            <datalist id="font-family-options">
-              {FONT_FAMILIES.map((family) => (
-                <option key={family} value={family} />
-              ))}
-            </datalist>
           </div>
         </div>
       </section>

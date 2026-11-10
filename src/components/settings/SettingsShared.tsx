@@ -3,6 +3,7 @@ import type { LogLevel } from '../../persist'
 import type { Theme } from '../../types'
 import { themeIsDark } from '../../themes'
 import { FONT_SIZE_MAX, REGION_FONT_SIZE_MIN } from '../../fonts'
+import { FontFamilyPicker } from './FontFamilyPicker'
 
 export type SectionId =
   | 'general'
@@ -182,6 +183,7 @@ export function RegionFontRow({
   label,
   family,
   size,
+  options,
   inheritHint,
   onChangeFamily,
   onChangeSize,
@@ -189,6 +191,7 @@ export function RegionFontRow({
   label: string
   family: string
   size: number
+  options: string[]
   inheritHint: string
   onChangeFamily: (family: string) => void
   onChangeSize: (size: number) => void
@@ -196,13 +199,15 @@ export function RegionFontRow({
   return (
     <div className="flex items-center gap-2">
       <span className="w-14 shrink-0 text-[0.71875rem] text-fg">{label}</span>
-      <input
-        list="font-family-options"
+      <FontFamilyPicker
         value={family}
+        options={options}
+        onChange={onChangeFamily}
+        ariaLabel={label}
         placeholder={inheritHint}
-        aria-label={label}
-        onChange={(ev) => onChangeFamily(ev.target.value)}
-        className="h-6 min-w-0 flex-1 rounded border border-line bg-surface-2 px-1.5 text-[0.6875rem] outline-none placeholder:text-muted-2 focus:border-accent-soft focus:bg-surface"
+        allowEmpty
+        emptyLabel={inheritHint}
+        className="min-w-0 flex-1"
       />
       <input
         type="range"
