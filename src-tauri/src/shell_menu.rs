@@ -508,7 +508,10 @@ unsafe fn build_items(
         let extract = extract.filter(|_| extract_applies(paths));
         // Shell-namespace items cannot be read as files; compression has nothing to add.
         let compress = compress.filter(|_| !paths.iter().any(|p| crate::shellfs::is_shell_path(p)));
-        let outcome = track(hwnd, &context, x, y, flags, &extras, extract, compress);
+        // Real filesystem items have a path `ops::run` can handle; shell-namespace items
+        // (recycle bin, control panel) do not, so those keep the shell's own behaviour.
+        let defer_delete = !paths.iter().any(|p| crate::shellfs::is_shell_path(p));
+        let outcome = track(hwnd, &context, x, y, flags, defer_delete, &extras, extract, compress);
         drop(context);
         drop(array);
         drop(cleanup);
@@ -587,7 +590,7 @@ unsafe fn build_background(
                 glyph: Some(MenuGlyph::Compare),
             },
         ];
-        let outcome = track(hwnd, &context, x, y, flags, &extras, None, None);
+        let outcome = track(hwnd, &context, x, y, flags, false, &extras, None, None);
         drop(context);
         drop(cleanup);
         outcome
@@ -611,6 +614,12 @@ unsafe fn command_string(context: &IContextMenu, offset: u32) -> Option<String> 
         let len = buffer.iter().position(|c| *c == 0).unwrap_or(buffer.len());
         Some(String::from_utf16_lossy(&buffer[..len]))
     }
+}
+
+/// Whether a command verb is the shell's delete command. `GCS_VERBW` returns the canonical
+/// verb, not the localized label, so the menu's "删除"/"Delete" text never reaches here.
+fn is_delete_verb(verb: &str) -> bool {
+    verb.trim().eq_ignore_ascii_case("delete")
 }
 
 /// Whether a command verb names a shell "New" entry. The New submenu is not consistent:
@@ -670,6 +679,7 @@ unsafe fn track(
     x: i32,
     y: i32,
     flags: u32,
+    defer_delete: bool,
     extras: &[Extra<'_>],
     extract: Option<&ExtractLabels>,
     compress: Option<&CompressLabels>,
@@ -751,34 +761,42 @@ unsafe fn track(
             outcome.action = Some(extra.action.into());
         } else if (ID_CMD_FIRST..=ID_CMD_LAST).contains(&command) {
             let offset = command - ID_CMD_FIRST;
-            // The New submenu mixes canonical verbs (`NewFolder`, `NewLink`) with ShellNew
-            // templates whose verb is the extension (`.txt`, `.xlsx`, …), so the selected
-            // entry cannot be classified by its verb alone. The menu is still alive here:
-            // identify the submenu that holds a `New…` entry instead.
-            let creates_item = in_new_submenu(context, menu, command);
             let verb = command_string(context, offset).unwrap_or_default();
-            let info = CMINVOKECOMMANDINFOEX {
-                cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
-                fMask: CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE,
-                hwnd,
-                lpVerb: PCSTR(offset as usize as *const u8),
-                lpVerbW: PCWSTR(offset as usize as *const u16),
-                nShow: windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL.0,
-                ptInvoke: windows::Win32::Foundation::POINT { x, y },
-                ..Default::default()
-            };
-            let invoked = context.InvokeCommand(&info as *const _ as *const CMINVOKECOMMANDINFO);
-            if let Err(err) = invoked {
-                CONTEXT.with(|cell| *cell.borrow_mut() = None);
-                let _ = DestroyMenu(menu);
-                let _ = DestroyWindow(hwnd);
-                return Err(ApiError::new("SHELL_MENU", err.to_string()));
-            }
-            outcome.invoked = true;
-            // The verb is the fallback for a New submenu whose entries the shell has
-            // already torn down; the extension form covers ShellNew templates.
-            if creates_item || new_verb(&verb) {
-                outcome.action = Some("newItem".into());
+            if defer_delete && is_delete_verb(&verb) {
+                // Invoking this verb runs the shell's delete inside Explorer: no FlowDir
+                // confirmation, no undo entry and no progress card, so a folder could be
+                // emptied with a single menu click. Report the verb instead; the frontend
+                // replays it as a normal delete through `ops::run`.
+                outcome.action = Some("delete".into());
+            } else {
+                // The New submenu mixes canonical verbs (`NewFolder`, `NewLink`) with
+                // ShellNew templates whose verb is the extension (`.txt`, `.xlsx`, …), so
+                // the selected entry cannot be classified by its verb alone. The menu is
+                // still alive here: identify the submenu that holds a `New…` entry instead.
+                let creates_item = in_new_submenu(context, menu, command);
+                let info = CMINVOKECOMMANDINFOEX {
+                    cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
+                    fMask: CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE,
+                    hwnd,
+                    lpVerb: PCSTR(offset as usize as *const u8),
+                    lpVerbW: PCWSTR(offset as usize as *const u16),
+                    nShow: windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL.0,
+                    ptInvoke: windows::Win32::Foundation::POINT { x, y },
+                    ..Default::default()
+                };
+                let invoked = context.InvokeCommand(&info as *const _ as *const CMINVOKECOMMANDINFO);
+                if let Err(err) = invoked {
+                    CONTEXT.with(|cell| *cell.borrow_mut() = None);
+                    let _ = DestroyMenu(menu);
+                    let _ = DestroyWindow(hwnd);
+                    return Err(ApiError::new("SHELL_MENU", err.to_string()));
+                }
+                outcome.invoked = true;
+                // The verb is the fallback for a New submenu whose entries the shell has
+                // already torn down; the extension form covers ShellNew templates.
+                if creates_item || new_verb(&verb) {
+                    outcome.action = Some("newItem".into());
+                }
             }
         }
 
@@ -1128,5 +1146,18 @@ mod tests {
             let _ = DestroyWindow(hwnd);
             CoUninitialize();
         }
+    }
+
+    /// The shell's Delete verb must never be invoked straight from the menu: doing so
+    /// deletes outside `ops::run`, without FlowDir's confirmation, undo entry or progress
+    /// card. `GCS_VERBW` is canonical, but the comparison still ignores case and padding.
+    #[test]
+    fn delete_verb_is_recognised_in_any_spelling() {
+        assert!(is_delete_verb("delete"));
+        assert!(is_delete_verb("Delete"));
+        assert!(is_delete_verb(" DELETE "));
+        assert!(!is_delete_verb("open"));
+        assert!(!is_delete_verb("deleteToRecycleBin"));
+        assert!(!is_delete_verb(""));
     }
 }

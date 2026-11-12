@@ -244,7 +244,12 @@ export function usePaneContextMenus({
         },
       )
         .then((outcome) => {
-          if (outcome.action === 'hash') setFileTools({ mode: 'hash', paths })
+          if (outcome.action === 'delete') {
+            // The shell's Delete runs inside Explorer, outside FlowDir's confirmation,
+            // protection check, undo entry and progress card, so the backend reports the
+            // verb instead of invoking it. Replay it as a normal, confirmed delete.
+            deleteEntries(paneId, names, false)
+          } else if (outcome.action === 'hash') setFileTools({ mode: 'hash', paths })
           else if (outcome.action === 'extractHere') extractArchive(paths[0], tab.path)
           else if (outcome.action === 'extractTo') {
             setExtractTarget({ archive: paths[0], initial: tab.path })
@@ -257,6 +262,7 @@ export function usePaneContextMenus({
         })
     },
     [
+      deleteEntries,
       extractArchive,
       listData,
       refreshPanes,
