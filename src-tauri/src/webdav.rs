@@ -387,14 +387,19 @@ fn safe_component(raw: &str) -> String {
             out.push(ch);
         }
     }
-    // `CON`, `NUL`, … are reserved device names even with an extension; a cache basename
-    // must never become one.
-    const RESERVED: [&str; 22] = [
-        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7",
-        "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    // Win32 strips trailing dots and spaces, so `foo.` and `foo` name the same directory;
+    // keeping the strip here means the cache key and the filesystem agree.
+    out = out.trim_end_matches([' ', '.']).to_string();
+    // `CON`, `NUL`, the superscript digit aliases, … are reserved device names even with an
+    // extension; a cache basename must never become one. `.` and `..` would escape the
+    // cache root, and a name that strips down to nothing has no usable spelling.
+    const RESERVED: [&str; 30] = [
+        "con", "prn", "aux", "nul", "conin$", "conout$", "com1", "com2", "com3", "com4", "com5",
+        "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7",
+        "lpt8", "lpt9", "com¹", "com²", "com³", "lpt¹", "lpt²", "lpt³",
     ];
-    let lower = out.to_lowercase();
-    if out.is_empty() || RESERVED.contains(&lower.as_str()) {
+    let stem = out.split('.').next().unwrap_or(&out).to_lowercase();
+    if out.is_empty() || out == "." || out == ".." || RESERVED.contains(&stem.as_str()) {
         out.push('_');
     }
     out.chars().take(120).collect()
@@ -1693,6 +1698,20 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_components_cannot_become_dot_segments() {
+        for raw in [".", "..", "...", " . "] {
+            let name = safe_component(raw);
+            assert_ne!(name, ".", "{raw:?} escaped the cache root");
+            assert_ne!(name, "..", "{raw:?} escaped the cache root");
+            assert!(!name.is_empty());
+            assert!(!name.ends_with([' ', '.']), "{raw:?} -> {name:?}");
+        }
+        assert_eq!(safe_component("report.txt"), "report.txt");
+        assert_eq!(safe_component("CON"), "CON_");
+        assert_eq!(safe_component("con.txt"), "con.txt_");
+    }
 
     #[test]
     fn parses_virtual_addresses() {

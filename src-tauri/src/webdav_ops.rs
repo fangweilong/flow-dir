@@ -898,8 +898,13 @@ fn download_tree(
         .stat(rel)?
         .ok_or_else(|| ApiError::new("NOT_FOUND", client.url_for(rel)))?;
     if stat.is_dir {
+        // The root of the download is checked exactly like every child: a junction already
+        // sitting at the destination name would redirect the whole tree. It is checked
+        // again after creation to narrow the window in which one could be swapped in.
+        reject_reparse_dir_target(local)?;
         std::fs::create_dir_all(local)
             .map_err(|e| ApiError::from_io(&local.to_string_lossy(), &e))?;
+        reject_reparse_dir_target(local)?;
         let mut bytes = 0u64;
         let (entries, truncated) = client.list_detailed(rel, cancel)?;
         if truncated {
@@ -1147,9 +1152,10 @@ fn safe_local_name(name: &str) -> Result<&str, ApiError> {
     // `CON`, `NUL`, `COM1`, … name devices even with an extension (`NUL.txt`). Writing to
     // such a path silently targets the device instead of the downloaded file.
     let stem = name.split('.').next().unwrap_or(name).to_lowercase();
-    const RESERVED: [&str; 22] = [
-        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7",
-        "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    const RESERVED: [&str; 30] = [
+        "con", "prn", "aux", "nul", "conin$", "conout$", "com1", "com2", "com3", "com4", "com5",
+        "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7",
+        "lpt8", "lpt9", "com¹", "com²", "com³", "lpt¹", "lpt²", "lpt³",
     ];
     if RESERVED.contains(&stem.as_str()) {
         return Err(ApiError::new("UNSAFE_PATH", name.to_string()));

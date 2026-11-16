@@ -868,9 +868,19 @@ fn installer_body(pid: u32, digest: &str) -> String {
 fn spawn_helper(script: &str, envs: &[(&str, &Path)]) -> Result<(), ApiError> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let powershell = std::env::var_os("SystemRoot")
-        .map(|root| PathBuf::from(root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe"))
-        .unwrap_or_else(|| PathBuf::from("powershell.exe"));
+    // Never fall back to a bare `powershell.exe`: resolving it through `PATH` would let a
+    // directory earlier in the search order replace the interpreter that applies the
+    // update. Without `SystemRoot` there is no trusted absolute path, so the update stops.
+    let root = std::env::var_os("SystemRoot")
+        .ok_or_else(|| ApiError::new("UPDATE_LAUNCH", "SystemRoot is not set"))?;
+    let powershell =
+        PathBuf::from(root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+    if !powershell.is_file() {
+        return Err(ApiError::new(
+            "UPDATE_LAUNCH",
+            powershell.to_string_lossy().into_owned(),
+        ));
+    }
     let mut command = std::process::Command::new(powershell);
     command.args([
         "-NoProfile",

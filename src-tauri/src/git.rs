@@ -139,6 +139,15 @@ pub fn status(path: &str) -> GitStatus {
         };
     };
     let repos = repo_states(git, path, names);
+    // The config scan precedes the first git call: `rev-parse` already parses the
+    // repository's config, so an include or a share-pointing worktree would be contacted
+    // before any `-c` override could apply.
+    if !config_is_safe(Path::new(path)) {
+        return GitStatus {
+            repos,
+            ..GitStatus::default()
+        };
+    }
     let Some(root) = toplevel(git, path) else {
         return GitStatus {
             repos,
@@ -364,6 +373,186 @@ fn child_repos(dir: &str) -> Vec<String> {
     repos
 }
 
+/// `FILE_ATTRIBUTE_REPARSE_POINT`: the path may redirect to another volume or a share.
+fn is_reparse(meta: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    meta.file_attributes() & 0x400 != 0
+}
+
+/// True for a plain drive-absolute path. UNC (`\\server\share`) and verbatim (`\\?\`)
+/// spellings are excluded: following one makes Windows contact the server and offer NTLM.
+fn is_drive_absolute(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    let bytes = text.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+}
+
+/// Reads a small metadata file without following a reparse point.
+fn read_metadata_file(path: &Path, limit: u64) -> Option<String> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.is_file() || is_reparse(&meta) || meta.len() > limit {
+        return None;
+    }
+    std::fs::read(path)
+        .ok()
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The repository directory for `dir`, discovered without running git.
+///
+/// Walking up mirrors git's discovery (`.git` directory or pointer file, then a bare
+/// repository) and touches only local metadata; git itself would parse the repository's
+/// config, which is exactly what [`config_is_safe`] must inspect first.
+///
+/// `Err(())` marks a repository marker that cannot be inspected safely (a reparse point or
+/// an unreadable marker); `Ok(None)` means there is simply no repository here.
+fn find_git_dir(dir: &Path) -> Result<Option<PathBuf>, ()> {
+    let mut current = dir.to_path_buf();
+    for _ in 0..64 {
+        let dot = current.join(".git");
+        match std::fs::symlink_metadata(&dot) {
+            Ok(meta) if meta.is_dir() && !is_reparse(&meta) => return Ok(Some(dot)),
+            Ok(meta) if meta.is_file() && !is_reparse(&meta) => {
+                let Some(text) = read_metadata_file(&dot, 8192) else {
+                    return Err(());
+                };
+                let Some(target) = text.lines().find_map(|line| {
+                    let line = line.trim();
+                    let prefix = line.get(..7)?;
+                    if !prefix.eq_ignore_ascii_case("gitdir:") {
+                        return None;
+                    }
+                    Some(line[7..].trim())
+                }) else {
+                    // A malformed marker makes git fail discovery as well.
+                    return Ok(None);
+                };
+                if target.is_empty() {
+                    return Ok(None);
+                }
+                let target = PathBuf::from(target.replace('/', "\\"));
+                return Ok(Some(if target.is_absolute() {
+                    target
+                } else {
+                    current.join(target)
+                }));
+            }
+            // A reparse point could redirect every later read; refuse instead of following.
+            Ok(_) => return Err(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(()),
+        }
+        if current.join("HEAD").is_file()
+            && current.join("objects").is_dir()
+            && current.join("refs").is_dir()
+        {
+            return Ok(Some(current));
+        }
+        if !current.pop() {
+            return Ok(None);
+        }
+    }
+    Ok(None)
+}
+
+/// Whether git may be run in this repository at all.
+///
+/// Repository-local config is parsed by git before any `-c` override exists, and several
+/// keys make git read or run something chosen by the repository: `include`/`includeIf`
+/// load another config file, while `core.worktree`, `core.attributesFile`,
+/// `core.excludesFile` and submodule `path` values are read during status. A repository
+/// extracted from an untrusted archive can therefore force an SMB connection (and NTLM
+/// authentication) merely by being listed. The raw files are inspected here first; anything
+/// suspicious leaves the badges empty and never starts git.
+fn config_is_safe(dir: &Path) -> bool {
+    let git_dir = match find_git_dir(dir) {
+        Ok(Some(git_dir)) => git_dir,
+        Ok(None) => return true,
+        Err(()) => return false,
+    };
+    let start_is_local = is_drive_absolute(dir);
+    // A pointer file (`gitdir:` or `commondir`) may name a share even though the listing
+    // itself is local.
+    if start_is_local && !is_drive_absolute(&git_dir) {
+        return false;
+    }
+    let mut configs = vec![git_dir.join("config"), git_dir.join("config.worktree")];
+    let commondir = git_dir.join("commondir");
+    match std::fs::symlink_metadata(&commondir) {
+        Ok(meta) if meta.is_file() && !is_reparse(&meta) => {
+            let Some(common) = read_metadata_file(&commondir, 4096) else {
+                return false;
+            };
+            let target = PathBuf::from(common.trim().replace('/', "\\"));
+            let common_dir = if target.is_absolute() {
+                target
+            } else {
+                git_dir.join(target)
+            };
+            if start_is_local && !is_drive_absolute(&common_dir) {
+                return false;
+            }
+            configs.push(common_dir.join("config"));
+        }
+        Ok(_) => return false,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return false,
+    }
+    configs.iter().all(|path| config_file_is_safe(path))
+}
+
+/// Scans one raw config file. Missing files are fine; unreadable or oversized ones are not.
+fn config_file_is_safe(path: &Path) -> bool {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return true,
+        Err(_) => return false,
+    };
+    if !meta.is_file() || is_reparse(&meta) || meta.len() > 1024 * 1024 {
+        return false;
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&bytes).to_ascii_lowercase();
+    // Git continues a value across a trailing backslash, so fold those before scanning:
+    // otherwise `//server/share` split over two lines would miss the prefix test. Folding
+    // can only make a match more likely, never hide one.
+    let text = text.replace("\\\r\n", "").replace("\\\n", "");
+    // Any include form can load a path the repository chooses, including one that lives on
+    // a share; refusing all of them is simpler than deciding where each target is. Only a
+    // section header counts: a remote URL that merely contains the word is harmless.
+    if text
+        .lines()
+        .any(|line| line.trim_start_matches('\u{feff}').trim_start().starts_with("[include"))
+    {
+        return false;
+    }
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if !matches!(
+            key.trim(),
+            "worktree" | "attributesfile" | "excludesfile" | "path"
+        ) {
+            continue;
+        }
+        let value = value.trim().trim_matches('"').trim();
+        if value.starts_with("\\\\") || value.starts_with("//") || value.contains("://") {
+            return false;
+        }
+    }
+    true
+}
+
 /// Repository-local config can name programs that git executes while reading the index:
 /// `core.fsmonitor` and `filter.<driver>.clean/smudge/process`. A work tree extracted from
 /// an untrusted archive would otherwise run them merely by being listed in the app, so
@@ -385,6 +574,19 @@ fn untrusted_config(git: &Path, dir: &Path, timeout: Duration) -> Option<Vec<OsS
     // entries again, which only costs a duplicate lookup.
     if let Some(worktree) = config_names(git, dir, "--worktree", timeout) {
         names.extend(worktree);
+    } else {
+        // `git config --worktree` fails when the scope cannot be read. With
+        // `extensions.worktreeConfig` enabled and no `config.worktree` file that is
+        // expected and there is nothing to enumerate; any other failure (permissions, a
+        // timeout, a key that is not valid UTF-8) may hide a filter, and the caller must
+        // then skip git entirely. Only a provably absent file is treated as benign.
+        let provably_absent = find_git_dir(dir)
+            .ok()
+            .flatten()
+            .is_some_and(|git_dir| !git_dir.join("config.worktree").exists());
+        if !provably_absent {
+            return None;
+        }
     }
     Some(config_overrides(&names))
 }
@@ -565,6 +767,9 @@ fn repo_state(git: &Path, dir: &Path) -> GitRepo {
             .unwrap_or_default(),
         ..GitRepo::default()
     };
+    if !config_is_safe(dir) {
+        return state;
+    }
     let Some(overrides) = untrusted_config(git, dir, CHILD_TIMEOUT) else {
         return state;
     };
@@ -1232,6 +1437,117 @@ mod tests {
             .collect();
         assert!(overrides.contains(&"filter.evil.clean=".to_string()));
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A repository extracted from an archive can also point its config at another location;
+    /// that is refused before `rev-parse` runs, not neutralised afterwards.
+    fn config_scan_root(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "flowdir-git-config-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        root
+    }
+
+    #[test]
+    fn config_scan_accepts_plain_repository_config() {
+        let root = config_scan_root("plain");
+        std::fs::write(
+            root.join(".git").join("config"),
+            "[core]\n\trepositoryformatversion = 0\n\tbare = false\n",
+        )
+        .unwrap();
+        assert!(config_is_safe(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn config_scan_rejects_includes_and_share_reads() {
+        let cases = [
+            ("include", "[include]\n\tpath = C:/elsewhere\n"),
+            ("includeif", "[includeIf \"gitdir:/\"]\n\tpath = C:/elsewhere\n"),
+            ("worktree", "[core]\n\tworktree = //attacker/share/x\n"),
+            (
+                "attributes",
+                "[core]\n\tattributesFile = \\\\attacker\\share\\x\n",
+            ),
+            (
+                "excludes",
+                "[core]\n\texcludesFile = \"file://attacker/share/x\"\n",
+            ),
+            ("submodule", "[submodule \"m\"]\n\tpath = //attacker/share/m\n"),
+            (
+                "continuation",
+                "[core]\n\tworktree = \\\n//attacker/share/x\n",
+            ),
+        ];
+        for (name, body) in cases {
+            let root = config_scan_root(name);
+            std::fs::write(root.join(".git").join("config"), body).unwrap();
+            assert!(!config_is_safe(&root), "{name} must be refused");
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    #[test]
+    fn config_scan_rejects_gitdir_pointer_to_a_share() {
+        let root = config_scan_root("pointer-share");
+        std::fs::remove_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git"), "gitdir: //attacker/share/repo\n").unwrap();
+        assert!(!config_is_safe(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn config_scan_accepts_gitdir_pointer_on_a_drive() {
+        let root = config_scan_root("pointer-drive");
+        std::fs::remove_dir_all(root.join(".git")).unwrap();
+        let target = root.join("actual-git-dir");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(root.join(".git"), format!("gitdir: {}\n", target.display())).unwrap();
+        std::fs::write(target.join("config"), "[core]\n\tbare = false\n").unwrap();
+        assert!(config_is_safe(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `git config --worktree` exits 128 when the extension is enabled but the file is
+    /// absent. That is an empty scope, not a reason to stop showing badges.
+    #[test]
+    fn absent_worktree_config_is_not_a_read_failure() {
+        let Some(git) = git_binary() else {
+            return;
+        };
+        let root =
+            std::env::temp_dir().join(format!("flowdir-git-wt-absent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let init = Command::new(git)
+            .arg("-C")
+            .arg(&root)
+            .args(["init", "-q"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .unwrap();
+        assert!(init.status.success());
+        let enable = Command::new(git)
+            .arg("-C")
+            .arg(&root)
+            .args(["config", "extensions.worktreeConfig", "true"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .unwrap();
+        if !enable.status.success() {
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        assert!(!root.join(".git").join("config.worktree").exists());
+        assert!(
+            untrusted_config(git, &root, STATUS_TIMEOUT).is_some(),
+            "an absent worktree config is an empty scope"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

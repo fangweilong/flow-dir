@@ -54,6 +54,12 @@ pub fn handle_request<R: Runtime>(app: &AppHandle<R>, uri: &tauri::http::Uri) ->
                 .collect()
         })
         .unwrap_or_default();
+    // Must precede the existence check: a rendered document inside the preview iframe can
+    // request this origin, and `exists()` on a UNC path both discloses credentials and
+    // blocks the backend on a network round trip.
+    if !crate::preview::authorized(&params) {
+        return plain(StatusCode::FORBIDDEN, "forbidden");
+    }
 
     let Some(path) = params.get("path") else {
         return plain(StatusCode::BAD_REQUEST, "missing path");

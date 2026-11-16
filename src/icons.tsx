@@ -1,4 +1,5 @@
 import { useState, useSyncExternalStore } from 'react'
+import { previewToken } from './api'
 import { fileIconKey, folderIconKey } from './iconThemes/catalog'
 import { useIconTheme } from './iconThemes'
 import { isWebdavPath } from './paths'
@@ -115,7 +116,7 @@ export function FileIcon({
     const px = Math.max(16, Math.round((size ?? 96) * (window.devicePixelRatio || 1)))
     return (
       <img
-        src={`http://fd.localhost/icon?path=${encodeURIComponent(path)}&s=${px}&v=${revision}&thumb=1`}
+        src={`http://fd.localhost/icon?path=${encodeURIComponent(path)}&s=${px}&v=${revision}&thumb=1&t=${previewToken()}`}
         width={size ?? 16}
         height={size ?? 16}
         alt=""
@@ -147,7 +148,7 @@ export function FileIcon({
     const px = Math.max(16, Math.round((size ?? 20 * scale) * (window.devicePixelRatio || 1)))
     return (
       <img
-        src={`http://fd.localhost/icon?path=${encodeURIComponent(path)}&s=${px}&v=${revision}`}
+        src={`http://fd.localhost/icon?path=${encodeURIComponent(path)}&s=${px}&v=${revision}&t=${previewToken()}`}
         width={size ?? 16}
         height={size ?? 16}
         alt=""

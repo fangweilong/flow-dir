@@ -1246,6 +1246,21 @@ async fn shell_menu_background_show(
     .map_err(|e| ApiError::new("THREAD", e.to_string()))?
 }
 
+/// Suffix for temporary files written next to their final location.
+///
+/// Uniqueness is enforced by `create_new`; the clock and counter only make the name
+/// unpredictable enough that a pre-planted reparse point cannot be targeted at all.
+fn temp_salt() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.subsec_nanos() as u64)
+        .unwrap_or(0);
+    (nanos << 16) | (SEQ.fetch_add(1, Ordering::Relaxed) & 0xffff)
+}
+
 /// Writes an exported report into a user-picked folder and returns its full path.
 #[tauri::command]
 async fn export_text(dir: String, name: String, content: String) -> Result<String, ApiError> {
@@ -1282,24 +1297,52 @@ async fn export_text(dir: String, name: String, content: String) -> Result<Strin
             .next()
             .unwrap_or(&clean)
             .to_ascii_uppercase();
-        const RESERVED: [&str; 22] = [
-            "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
-            "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        const RESERVED: [&str; 30] = [
+            "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "COM1", "COM2", "COM3", "COM4",
+            "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5",
+            "LPT6", "LPT7", "LPT8", "LPT9", "COM¹", "COM²", "COM³", "LPT¹", "LPT²", "LPT³",
         ];
         if clean.ends_with([' ', '.']) || RESERVED.contains(&stem.as_str()) {
             return Err(ApiError::new("INVALID_NAME", clean));
         }
         let path = dir_path.join(&clean);
         // Write beside the target and rename: an interrupted export must not leave a
-        // truncated report where the previous one was.
-        let tmp = dir_path.join(format!(".{clean}.{}.tmp", std::process::id()));
-        let result = std::fs::write(&tmp, content).and_then(|()| std::fs::rename(&tmp, &path));
-        match result {
-            Ok(()) => Ok(path.display().to_string()),
-            Err(err) => {
-                let _ = std::fs::remove_file(&tmp);
-                Err(ApiError::from_io(&path.display().to_string(), &err))
+        // truncated report where the previous one was. `create_new` never follows a
+        // reparse point planted at the temporary name, and the unpredictable suffix keeps
+        // the name from being squatted; a failed attempt only retries with a new name.
+        use std::io::Write as _;
+        let result = (0..8u32).find_map(|_| {
+            let tmp = dir_path.join(format!(
+                ".{clean}.{}.{}.tmp",
+                std::process::id(),
+                temp_salt()
+            ));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
+            {
+                Ok(mut file) => {
+                    let written = file.write_all(content.as_bytes());
+                    drop(file);
+                    Some(match written {
+                        Ok(()) => std::fs::rename(&tmp, &path).inspect_err(|_| {
+                            let _ = std::fs::remove_file(&tmp);
+                        }),
+                        Err(err) => {
+                            let _ = std::fs::remove_file(&tmp);
+                            Err(err)
+                        }
+                    })
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(err) => Some(Err(err)),
             }
+        });
+        match result {
+            Some(Ok(())) => Ok(path.display().to_string()),
+            Some(Err(err)) => Err(ApiError::from_io(&path.display().to_string(), &err)),
+            None => Err(ApiError::new("EXPORT_FAILED", "no free temporary name")),
         }
     })
     .await
@@ -1326,6 +1369,14 @@ struct AppInfo {
     repository_url: String,
     profile_url: String,
     dependencies: Vec<Dependency>,
+}
+
+/// Hands the frontend the token every `fd://` URL must carry. Only the app's own page can
+/// call IPC; a document rendered inside the preview iframe cannot, so it cannot reach the
+/// protocol and use it as a local-file or SMB probe.
+#[tauri::command]
+fn preview_token() -> String {
+    preview::token().to_string()
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1771,6 +1822,13 @@ async fn open_path(
             } else {
                 path
             };
+        // `open_url` owns http(s) links and `shellfs` owns shell namespace paths, so what
+        // reaches this channel must be a real filesystem path. Without the check a crafted
+        // string such as `search-ms:query=...` or `ms-settings:` would be handed to
+        // ShellExecuteW and resolved as a protocol instead of a file.
+        if target_path.contains("://") || !std::path::Path::new(&target_path).is_absolute() {
+            return Err(ApiError::new("INVALID_PATH", target_path));
+        }
         let wide: Vec<u16> = target_path.encode_utf16().chain(std::iter::once(0)).collect();
         let result = unsafe {
             ShellExecuteW(
@@ -1988,8 +2046,20 @@ fn open_terminal_blocking(path: String) -> Result<(), ApiError> {
         return Err(ApiError::new("NOT_DIR", path));
     }
 
+    use std::os::windows::process::CommandExt;
+
+    // Windows Terminal splits its command line on `;`, and `Command::args` only quotes
+    // arguments containing a space, tab or quote. A folder named `x;calc.exe` would be
+    // passed unquoted and start a second command, so the argument is quoted here. A Windows
+    // file name cannot contain `"`, so the quoting cannot be escaped by the path itself.
+    // A trailing separator would escape the closing quote under the C runtime rules, so it
+    // is doubled (Win32 collapses `\\`); a drive root reaches this function as `D:\`.
+    let mut target = path.clone();
+    if target.ends_with('\\') {
+        target.push('\\');
+    }
     if std::process::Command::new("wt")
-        .args(["-d", &path])
+        .raw_arg(format!("-d \"{target}\""))
         .spawn()
         .is_ok()
     {
@@ -2018,7 +2088,6 @@ fn open_terminal_blocking(path: String) -> Result<(), ApiError> {
     // `Command::args` would escape the embedded quotes as `\"`, which cmd does not treat
     // as an escape and rejects as an invalid path. `raw_arg` passes the `/k` command line
     // through unchanged so the quoted environment variable expands inside `cd`.
-    use std::os::windows::process::CommandExt;
     std::process::Command::new("cmd")
         .raw_arg("/k cd /d \"%FLOWDIR_TERM_CWD%\"")
         .env(CWD_ENV, &path)
@@ -2415,6 +2484,7 @@ fn main() {
             titlebar_menu,
             preview_info,
             preview_external,
+            preview_token,
             search_start,
             search_cancel,
             everything_status,

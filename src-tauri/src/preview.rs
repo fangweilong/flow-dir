@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path as FsPath;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use serde::Serialize;
 use tauri::http::{header, Response, StatusCode};
@@ -59,6 +59,57 @@ const MAX_RENDER_BYTES: usize = 64 * 1024 * 1024;
 /// full frame even when the scaler downscales afterwards, so the render budget alone does
 /// not stop a small file that declares a 30k×30k image.
 const MAX_SOURCE_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Random per-process secret required on every `fd://` request.
+///
+/// The custom protocol is same-origin with the app page, so HTML/SVG rendered in the
+/// preview iframe can issue `<img>` requests against it even with scripts disabled. Those
+/// requests would otherwise make the backend canonicalise and stat an arbitrary path,
+/// which resolves UNC targets and leaks NTLM. The frontend receives this token over IPC,
+/// which untrusted documents cannot call, and it is never written into the iframe.
+static TOKEN: OnceLock<String> = OnceLock::new();
+
+/// The token every `fd://` request must carry in its `t` query parameter.
+pub(crate) fn token() -> &'static str {
+    TOKEN.get_or_init(|| {
+        let mut bytes = [0u8; 16];
+        let generated = unsafe {
+            windows::Win32::Security::Cryptography::BCryptGenRandom(
+                None,
+                &mut bytes,
+                windows::Win32::Security::Cryptography::BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+            )
+            .is_ok()
+        };
+        if generated {
+            return bytes.iter().map(|b| format!("{b:02x}")).collect();
+        }
+        // `RandomState` is seeded from the OS CSPRNG. This fallback only runs when CNG is
+        // unavailable, and still produces a per-process value an iframe cannot guess.
+        use std::hash::{BuildHasher, Hasher};
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0),
+        );
+        hasher.write_u32(std::process::id());
+        let low = hasher.finish();
+        format!("{low:016x}{:016x}", low.rotate_left(17))
+    })
+}
+
+/// Whether a protocol request carries the token. Checked before any filesystem access.
+pub(crate) fn authorized(params: &HashMap<String, String>) -> bool {
+    params.get("t").is_some_and(|value| value == token())
+}
+
+/// Builds an `fd://` preview URL for a validated local path, with the token attached.
+fn preview_url(path: &str, extra: &str) -> String {
+    let encoded = percent_encoding::utf8_percent_encode(path, percent_encoding::NON_ALPHANUMERIC);
+    format!("http://fd.localhost/preview?path={encoded}{extra}&t={}", token())
+}
 
 /// Caps applied to every preview read. They come from settings so a slow volume or a
 /// very large PDF can be tuned without a rebuild.
@@ -334,6 +385,11 @@ pub fn handle_request<R: Runtime>(
         .query()
         .map(|q| url_form(q).into_iter().collect::<HashMap<_, _>>())
         .unwrap_or_default();
+    // Before touching the filesystem: a request without the IPC-issued token cannot probe
+    // local paths (or resolve a UNC path and disclose credentials) from rendered content.
+    if !authorized(&params) {
+        return plain(StatusCode::FORBIDDEN, "forbidden");
+    }
 
     let Some(path) = params.get("path") else {
         return status(StatusCode::BAD_REQUEST);
@@ -677,12 +733,8 @@ pub fn info(
         _ => {}
     }
     if ext == "svg" {
-        let encoded =
-            percent_encoding::utf8_percent_encode(&path, percent_encoding::NON_ALPHANUMERIC);
         info.kind = "svg".to_string();
-        info.url = Some(format!(
-            "http://fd.localhost/preview?path={encoded}&v={mtime}-{size}"
-        ));
+        info.url = Some(preview_url(&path, &format!("&v={mtime}-{size}")));
         if let Ok(bytes) = read_prefix(&path, limits.text_bytes) {
             info.text = Some(decode_text(&bytes));
         }
@@ -690,18 +742,12 @@ pub fn info(
     }
 
     if FONT_EXT.contains(&ext.as_str()) {
-        let encoded =
-            percent_encoding::utf8_percent_encode(&path, percent_encoding::NON_ALPHANUMERIC);
         info.kind = "font".to_string();
-        info.url = Some(format!(
-            "http://fd.localhost/preview?path={encoded}&v={mtime}-{size}"
-        ));
+        info.url = Some(preview_url(&path, &format!("&v={mtime}-{size}")));
         return Ok(info);
     }
 
     if IMAGE_EXT.contains(&ext.as_str()) {
-        let encoded =
-            percent_encoding::utf8_percent_encode(&path, percent_encoding::NON_ALPHANUMERIC);
         info.kind = "image".to_string();
         if let Some((w, h)) = probe_image_dimensions(&path) {
             info.dimensions = Some(format!("{w} × {h}"));
@@ -710,34 +756,30 @@ pub fn info(
                 value: format!("{w} × {h} px"),
             }]);
         }
-        info.url = Some(format!(
-            "http://fd.localhost/preview?path={encoded}&w={width}&bg={bg:06x}&v={mtime}-{size}"
+        info.url = Some(preview_url(
+            &path,
+            &format!("&w={width}&bg={bg:06x}&v={mtime}-{size}"),
         ));
         return Ok(info);
     }
 
     if ext == "pdf" || VIDEO_EXT.contains(&ext.as_str()) {
-        let encoded =
-            percent_encoding::utf8_percent_encode(&path, percent_encoding::NON_ALPHANUMERIC);
         info.kind = if ext == "pdf" {
             "pdf"
         } else {
             "video"
         }
         .to_string();
-        info.url = Some(format!(
-            "http://fd.localhost/preview?path={encoded}&w={width}&bg={bg:06x}&v={mtime}-{size}"
+        info.url = Some(preview_url(
+            &path,
+            &format!("&w={width}&bg={bg:06x}&v={mtime}-{size}"),
         ));
         return Ok(info);
     }
 
     if AUDIO_EXT.contains(&ext.as_str()) {
-        let encoded =
-            percent_encoding::utf8_percent_encode(&path, percent_encoding::NON_ALPHANUMERIC);
         info.kind = "audio".to_string();
-        info.url = Some(format!(
-            "http://fd.localhost/preview?path={encoded}&v={mtime}-{size}"
-        ));
+        info.url = Some(preview_url(&path, &format!("&v={mtime}-{size}")));
         return Ok(info);
     }
 
@@ -1515,6 +1557,28 @@ fn version_rows(path: &str) -> Vec<MetaRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protocol_token_is_required_and_urls_carry_it() {
+        let token = token();
+        assert_eq!(token.len(), 32, "128-bit hex");
+        let with = HashMap::from([
+            ("path".to_string(), r"C:\data\a.png".to_string()),
+            ("t".to_string(), token.to_string()),
+        ]);
+        assert!(authorized(&with));
+        assert!(!authorized(&HashMap::from([(
+            "path".to_string(),
+            r"C:\data\a.png".to_string()
+        )])));
+        assert!(!authorized(&HashMap::from([(
+            "t".to_string(),
+            "not-the-token".to_string()
+        )])));
+        let url = preview_url(r"C:\data\a b.png", "&v=1");
+        assert!(url.contains(&format!("&t={token}")));
+        assert!(!url.contains(' '), "the path is percent-encoded");
+    }
 
     #[test]
     fn range_requests_are_parsed_and_bounded() {

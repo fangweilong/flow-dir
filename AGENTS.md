@@ -38,6 +38,11 @@
   - 新增跨模块业务状态优先按领域收敛至 `src/hooks/`，严禁在顶层组件中直接暴露底层实现。
 - **弹窗与浮层统一收敛**：所有低频模态窗口、右键菜单及浮层统一由 `src/ModalContainer.tsx` 编排挂载，严禁在 `App.tsx` 顶层散落编写弹窗 JSX。
 
+## 自定义协议（fd://）
+
+- `http://fd.localhost/icon` 与 `/preview` 必须携带启动时经 `preview_token` IPC 取得的随机 `t` 参数，校验必须在任何文件系统访问之前完成；后端预览 URL 统一由 `preview.rs#preview_url` 生成，前端图标 URL 统一经 `src/api.ts#previewToken` 追加。禁止为预览 iframe 开启 `allow-same-origin` 或脚本，否则隔离文档可借该协议探测本地路径或触发 UNC/NTLM 认证。
+- 协议处理器不得跟随 UNC/reparse 目标做存在性判断后再放行；令牌缺失一律返回 403，不返回路径细节。
+
 ## 打包分包与体积红线（Code Splitting）
 
 - **低频模态组件强制按需加载**：设置面板、文件比较、多重命名、校验/去重、解压/压缩等非首屏必须的模态组件，必须通过 `React.lazy` 动态导入并配合 `<Suspense fallback={null}>` 挂载，严禁在应用主链路静态同步 `import`。

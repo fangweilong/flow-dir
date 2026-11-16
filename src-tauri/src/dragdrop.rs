@@ -21,13 +21,13 @@ use windows::core::{implement, Ref, Result as WinResult, BOOL};
 use windows::Win32::Foundation::{DRAGDROP_E_INVALIDHWND, HWND, LPARAM, POINT, POINTL};
 use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::System::Com::{IDataObject, DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL};
-use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::System::Ole::{
     IDropTarget, IDropTarget_Impl, RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop, CF_HDROP,
     CF_UNICODETEXT, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE,
 };
 use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
-use windows::Win32::UI::Shell::{DragFinish, DragQueryFileW, HDROP};
+use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::EnumChildWindows;
 
 /// Event consumed by `useDragAndDrop`; the payload mirrors Tauri's native drag event.
@@ -102,13 +102,17 @@ fn format(cf: u16) -> FORMATETC {
 
 /// Reads every path from the drag's `CF_HDROP` payload.
 ///
-/// `finish` releases the handle with `DragFinish` once the drop is done; during
-/// `DragEnter` the source keeps ownership so a later render still succeeds.
-fn hdrop_paths(data: &IDataObject, finish: bool) -> Vec<PathBuf> {
-    let medium = unsafe { data.GetData(&format(CF_HDROP.0)) };
-    let Ok(medium) = medium else {
-        return Vec::new();
+/// The data object hands out a copy of the medium, so it is released here in every phase
+/// (also during `DragEnter`); the source's own handle is not affected.
+fn hdrop_paths(data: &IDataObject) -> Vec<PathBuf> {
+    let mut medium = match unsafe { data.GetData(&format(CF_HDROP.0)) } {
+        Ok(medium) => medium,
+        Err(_) => return Vec::new(),
     };
+    if medium.tymed != TYMED_HGLOBAL.0 as u32 {
+        unsafe { ReleaseStgMedium(&mut medium) };
+        return Vec::new();
+    }
     let hdrop = HDROP(unsafe { medium.u.hGlobal.0 } as _);
     let mut paths = Vec::new();
     loop {
@@ -124,28 +128,41 @@ fn hdrop_paths(data: &IDataObject, finish: bool) -> Vec<PathBuf> {
         }
         paths.push(PathBuf::from(OsString::from_wide(&buf[..copied])));
     }
-    if finish {
-        unsafe { DragFinish(hdrop) };
-    }
+    unsafe { ReleaseStgMedium(&mut medium) };
     paths
 }
 
 /// Copies the drag's `CF_UNICODETEXT` payload.
 fn unicode_text(data: &IDataObject) -> Option<String> {
     let mut medium = unsafe { data.GetData(&format(CF_UNICODETEXT.0)) }.ok()?;
+    if medium.tymed != TYMED_HGLOBAL.0 as u32 {
+        unsafe { ReleaseStgMedium(&mut medium) };
+        return None;
+    }
     let text = unsafe {
         let handle = medium.u.hGlobal;
-        let ptr = GlobalLock(handle) as *const u16;
+        let capacity = GlobalSize(handle) / 2;
+        let ptr = if capacity == 0 {
+            std::ptr::null()
+        } else {
+            GlobalLock(handle) as *const u16
+        };
         if ptr.is_null() {
             None
         } else {
+            // The scan must stop at the allocation and at this module's size limit: a
+            // hostile drag source can hand over an unterminated block, and reading past it
+            // would be an out-of-bounds read. An unterminated block is treated as malformed.
+            let limit = capacity.min(MAX_TEXT_BYTES / 2 + 1);
             let mut len = 0usize;
-            while *ptr.add(len) != 0 {
+            while len < limit && *ptr.add(len) != 0 {
                 len += 1;
             }
-            let text = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
+            let text = (len < limit).then(|| {
+                String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len))
+            });
             let _ = GlobalUnlock(handle);
-            Some(text)
+            text
         }
     };
     unsafe { ReleaseStgMedium(&mut medium) };
@@ -165,10 +182,8 @@ fn file_uri_path(line: &str) -> Option<PathBuf> {
     let decoded = percent_decode_str(&line[7..]).decode_utf8().ok()?;
     let path = if let Some(path) = decoded.strip_prefix("localhost/") {
         path
-    } else if let Some(path) = decoded.strip_prefix('/') {
-        path
     } else {
-        return None;
+        decoded.strip_prefix('/')?
     };
     let path = Path::new(path);
     path.is_absolute().then(|| path.to_path_buf())
@@ -204,8 +219,8 @@ fn text_paths(data: &IDataObject) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-fn drag_paths(data: &IDataObject, finish: bool) -> Vec<PathBuf> {
-    let paths = hdrop_paths(data, finish);
+fn drag_paths(data: &IDataObject) -> Vec<PathBuf> {
+    let paths = hdrop_paths(data);
     if !paths.is_empty() {
         return paths;
     }
@@ -231,7 +246,7 @@ impl IDropTarget_Impl for FlowDirDropTarget_Impl {
         let Some(data) = pDataObj.as_ref() else {
             return Ok(());
         };
-        let paths = drag_paths(data, false);
+        let paths = drag_paths(data);
         let valid = !paths.is_empty();
         unsafe { *self.enter_is_valid.get() = valid };
         if !valid {
@@ -279,7 +294,7 @@ impl IDropTarget_Impl for FlowDirDropTarget_Impl {
     ) -> WinResult<()> {
         if unsafe { *self.enter_is_valid.get() } {
             if let Some(data) = pDataObj.as_ref() {
-                let paths = drag_paths(data, true);
+                let paths = drag_paths(data);
                 if !paths.is_empty() {
                     self.emit(DragPayload::Drop {
                         paths: strings(paths),

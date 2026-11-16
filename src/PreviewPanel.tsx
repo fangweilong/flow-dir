@@ -244,7 +244,9 @@ export function PreviewPanel({
                 {htmlViewMode === 'preview' ? (
                   <iframe
                     srcDoc={info.text ?? ''}
-                    sandbox="allow-same-origin"
+                    // No allow-same-origin: the document gets an opaque origin, so even a
+                    // future script-enabled path could not read app state or call IPC.
+                    sandbox=""
                     title={name}
                     className="min-h-0 flex-1 w-full rounded border border-line bg-white"
                   />

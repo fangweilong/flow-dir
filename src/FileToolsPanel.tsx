@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { NumberField } from './components/NumberField'
 import { dupStart, exportText, hashStart, pickFolder, toolCancel, toolPause } from './api'
+import { csvCell } from './compare/plan'
 import { describeError, makeT, type Translate } from './i18n'
 import type { DupGroup, DupProgress, HashProgress } from './types'
 import type { Lang } from './types'
@@ -43,11 +44,6 @@ const formatDuration = (ms: number) => {
   const minutes = Math.floor(seconds / 60)
   if (minutes < 60) return `${minutes}m ${seconds % 60}s`
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
-}
-
-const csvCell = (value: string | number) => {
-  const text = String(value)
-  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
 }
 
 export function FileToolsPanel({

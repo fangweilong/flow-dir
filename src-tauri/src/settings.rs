@@ -754,7 +754,13 @@ fn sanitize_webdav_id(raw: &str) -> String {
             out.push('-');
         }
     }
-    out.trim_matches('-').chars().take(64).collect()
+    let id: String = out.trim_matches('-').chars().take(64).collect();
+    // The id is also the WebDAV cache folder name; `.` and `..` would name the cache root
+    // or its parent instead of a per-connection directory.
+    if id.is_empty() || id.trim_matches('.').is_empty() {
+        return String::new();
+    }
+    id
 }
 
 /// `\a\b\..\c` → `a/c`; leading and trailing separators are dropped.
@@ -1816,6 +1822,24 @@ webdav = [{ id = "nas", name = "NAS", url = "https://nas.example/dav", username 
         assert_eq!(settings.webdav[0].id, "家用-NAS");
         assert_ne!(settings.webdav[0].id, settings.webdav[1].id);
         assert_eq!(settings.webdav[0].url, "https://a.example/dav");
+    }
+
+    #[test]
+    fn webdav_ids_cannot_become_dot_segments() {
+        let settings = Settings {
+            webdav: vec![WebdavConnection {
+                id: "..".into(),
+                name: "..".into(),
+                url: "https://a.example/dav".into(),
+                ..Default::default()
+            }],
+            ..Settings::default()
+        }
+        .normalize();
+        assert_eq!(settings.webdav.len(), 1);
+        assert_ne!(settings.webdav[0].id, "..");
+        assert_ne!(settings.webdav[0].id, ".");
+        assert!(!settings.webdav[0].id.is_empty());
     }
 
     #[test]

@@ -23,11 +23,13 @@ const CP437: [char; 128] = [
     '≡', '±', '≥', '≤', '⌠', '⌡', '÷', '≈', '°', '∙', '·', '√', 'ⁿ', '²', '■', '\u{a0}',
 ];
 
-/// Windows device names are reserved with any extension (`CON.txt`, `NUL.tar.gz`).
-const RESERVED: [&str; 24] = [
+/// Windows device names are reserved with any extension (`CON.txt`, `NUL.tar.gz`). The
+/// superscript digit aliases are device names too, and `CONIN$`/`CONOUT$` are the console
+/// streams that `NUL` does not cover.
+const RESERVED: [&str; 30] = [
     "con", "prn", "aux", "nul", "conin$", "conout$", "com1", "com2", "com3", "com4", "com5",
     "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7",
-    "lpt8", "lpt9",
+    "lpt8", "lpt9", "com¹", "com²", "com³", "lpt¹", "lpt²", "lpt³",
 ];
 
 /// Decodes a raw archive name into a relative `\`-separated path.

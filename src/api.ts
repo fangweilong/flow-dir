@@ -3,6 +3,24 @@ import type { ApiError, AppInfo, Clip, CompareCount, CompareHashEvent, CompareHa
 import type { GitStatus, LaunchRequest, PreviewInfo, SearchBatch } from './types'
 import type { Settings, WebdavConnection } from './persist'
 
+/**
+ * Secret the `fd://` protocol requires on every icon and preview URL.
+ *
+ * It is fetched once over IPC before the first render. Rendered content inside the preview
+ * iframe cannot call IPC, so it cannot reach the protocol and use it to probe local files
+ * or resolve UNC paths.
+ */
+let previewTokenValue: string | null = null
+
+export function previewToken(): string {
+  return previewTokenValue ?? ''
+}
+
+export async function initPreviewToken(): Promise<void> {
+  if (previewTokenValue !== null) return
+  previewTokenValue = await invoke<string>('preview_token')
+}
+
 export function listDir(
   path: string,
   tabId: string,
