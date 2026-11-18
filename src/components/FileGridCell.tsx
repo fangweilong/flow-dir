@@ -68,11 +68,7 @@ export function FileGridCell({
       data-dir={dir ? '1' : '0'}
       data-drop-dir={dir ? fullPath : undefined}
       onPointerDown={(e) => {
-        if (e.button === 0 && (e.ctrlKey || e.metaKey) && dir && newTabOnMiddleClick) {
-          e.preventDefault()
-          onOpenInNewTab(fullPath)
-          return
-        }
+        // Ctrl+click toggles selection (Explorer convention); see FileTableRow.
         if (e.button !== 0) return
         selectRow(index, e)
         onRowDragStart(entry, e)

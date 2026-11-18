@@ -82,11 +82,9 @@ export function FileTableRow({
       data-dir={dir ? '1' : '0'}
       data-drop-dir={dir ? fullPath : undefined}
       onPointerDown={(e) => {
-        if (e.button === 0 && (e.ctrlKey || e.metaKey) && dir && newTabOnMiddleClick) {
-          e.preventDefault()
-          onOpenInNewTab(fullPath)
-          return
-        }
+        // Ctrl+click is the multi-select toggle in Explorer; claiming it for "open in a
+        // background tab" made Ctrl multi-select silently fail on folders. New tabs open
+        // on middle-click (below) instead.
         if (e.button !== 0) return
         selectRow(index, e)
         onRowDragStart(entry, e)

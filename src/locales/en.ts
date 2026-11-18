@@ -169,7 +169,7 @@ export const en: Record<BaseKey, string> = {
   'settings.closedTabLimit': 'Reopenable closed tabs',
   'settings.closedTabLimitHint': 'How many steps Ctrl+Shift+T can walk back (1–50)',
   'settings.restoreTabs': 'Restore the previous tabs and panes on launch',
-  'settings.middleClickNewTab': 'Middle-click or Ctrl+click a folder to open a background tab',
+  'settings.middleClickNewTab': 'Middle-click a folder to open a background tab',
   'settings.dupConcurrency': 'Duplicate-scan workers',
   'settings.dupConcurrencyHint': '0 = auto (min(4, cores / 2)), max 16',
   'settings.dupSpeed': 'Duplicate-scan read limit (MB/s)',

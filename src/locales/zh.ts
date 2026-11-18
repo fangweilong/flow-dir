@@ -167,7 +167,7 @@ export const zh = {
   'settings.closedTabLimit': '可恢复的已关闭标签数',
   'settings.closedTabLimitHint': '连续恢复多少步（1–50）',
   'settings.restoreTabs': '启动时恢复上次的标签与窗格',
-  'settings.middleClickNewTab': '中键或 Ctrl+点击文件夹时在后台新标签打开',
+  'settings.middleClickNewTab': '中键点击文件夹时在后台新标签打开',
   'settings.dupConcurrency': '重复扫描并发线程',
   'settings.dupConcurrencyHint': '0 = 自动（min(4, 核心数/2)），最大 16',
   'settings.dupSpeed': '重复扫描限速 (MB/s)',
