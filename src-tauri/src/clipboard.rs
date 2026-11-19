@@ -2,18 +2,20 @@ use std::ptr;
 use std::sync::Mutex;
 
 use windows::core::{w, BOOL};
-use windows::Win32::Foundation::{GlobalFree, HANDLE, POINT};
+use windows::Win32::Foundation::{GlobalFree, HGLOBAL, HANDLE, POINT};
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, GetClipboardSequenceNumber, OpenClipboard,
-    RegisterClipboardFormatW, SetClipboardData,
+    CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
+    GetClipboardFormatNameW, GetClipboardSequenceNumber, OpenClipboard, RegisterClipboardFormatW,
+    SetClipboardData,
 };
 use windows::Win32::System::Memory::{
     GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
 };
-use windows::Win32::System::Ole::CF_HDROP;
-use windows::Win32::UI::Shell::DROPFILES;
+use windows::Win32::System::Ole::{CF_HDROP, CF_TEXT, CF_UNICODETEXT};
+use windows::Win32::UI::Shell::{DragQueryFileW, DROPFILES, HDROP};
 
 use crate::error::ApiError;
+use crate::pathlist::{list_from_hglobal, parse_text_paths, parse_uri_list, text_from_hglobal};
 
 const DROPEFFECT_COPY: u32 = 1;
 const DROPEFFECT_MOVE: u32 = 2;
@@ -87,6 +89,29 @@ pub fn copy_paths(paths: &[String], cut: bool) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Moves `bytes` into a clipboard-owned `GMEM_MOVEABLE` block.
+///
+/// # Safety
+/// `bytes` must be readable for its whole length.
+unsafe fn set_block(format: u32, bytes: &[u8]) -> windows::core::Result<()> {
+    let hglobal = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes.len())? };
+    let target = unsafe { GlobalLock(hglobal) };
+    if target.is_null() {
+        let _ = unsafe { GlobalFree(Some(hglobal)) };
+        return Err(windows::core::Error::from_thread());
+    }
+    unsafe {
+        ptr::copy_nonoverlapping(bytes.as_ptr(), target as *mut u8, bytes.len());
+        let _ = GlobalUnlock(hglobal);
+    }
+    // SetClipboardData takes ownership only on success; otherwise the block leaks.
+    if let Err(err) = unsafe { SetClipboardData(format, Some(HANDLE(hglobal.0))) } {
+        let _ = unsafe { GlobalFree(Some(hglobal)) };
+        return Err(err);
+    }
+    Ok(())
+}
+
 /// Writes the shell-compatible subset. An empty list still empties the clipboard, so a
 /// remote-only copy cannot leave an unrelated file list behind for a later paste.
 fn write_os_paths(paths: &[String], cut: bool) -> Result<u32, ApiError> {
@@ -98,7 +123,6 @@ fn write_os_paths(paths: &[String], cut: bool) -> Result<u32, ApiError> {
     wide.push(0);
 
     let header = std::mem::size_of::<DROPFILES>();
-    let size = header + wide.len() * 2;
 
     unsafe {
         open_clipboard_with_retry().map_err(|e| ApiError::new("CLIPBOARD", e.to_string()))?;
@@ -107,16 +131,12 @@ fn write_os_paths(paths: &[String], cut: bool) -> Result<u32, ApiError> {
             if paths.is_empty() {
                 return Ok(());
             }
-            let hglobal = GlobalAlloc(GMEM_MOVEABLE, size)?;
-            let target = GlobalLock(hglobal);
-            if target.is_null() {
-                let _ = GlobalFree(Some(hglobal));
-                return Err(windows::core::Error::from_thread());
-            }
-            ptr::write_bytes(target as *mut u8, 0, size);
-            let dropfiles = target as *mut DROPFILES;
+
+            // `CF_HDROP` first: this is what Explorer, other file managers and FlowDir
+            // itself paste from.
+            let mut drop = vec![0u8; header + wide.len() * 2];
             ptr::write(
-                dropfiles,
+                drop.as_mut_ptr() as *mut DROPFILES,
                 DROPFILES {
                     pFiles: header as u32,
                     pt: POINT { x: 0, y: 0 },
@@ -124,16 +144,23 @@ fn write_os_paths(paths: &[String], cut: bool) -> Result<u32, ApiError> {
                     fWide: BOOL(1),
                 },
             );
-            ptr::copy_nonoverlapping(
-                wide.as_ptr(),
-                (target as *mut u8).add(header).cast(),
-                wide.len(),
-            );
-            let _ = GlobalUnlock(hglobal);
-            // SetClipboardData takes ownership only on success; otherwise the block leaks.
-            if let Err(err) = SetClipboardData(CF_HDROP.0 as u32, Some(HANDLE(hglobal.0))) {
-                let _ = GlobalFree(Some(hglobal));
-                return Err(err);
+            for (index, unit) in wide.iter().enumerate() {
+                let offset = header + index * 2;
+                drop[offset..offset + 2].copy_from_slice(&unit.to_le_bytes());
+            }
+            set_block(CF_HDROP.0 as u32, &drop)?;
+
+            // Text forms beside it, so an application that cannot take a file list (an
+            // editor's open dialog, a terminal, IntelliJ's paste) still receives the paths.
+            // `CF_UNICODETEXT` is the format Windows text consumers actually read — a custom
+            // format merely *named* `text/plain` would be written and never read.
+            let text = paths.join("\r\n");
+            let text_wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+            let text_bytes: Vec<u8> = text_wide.iter().flat_map(|unit| unit.to_le_bytes()).collect();
+            // A missing text form is not a failure: the file list is what makes the paste
+            // work, so a rejected side format is logged and stepped over.
+            if let Err(err) = set_block(CF_UNICODETEXT.0 as u32, &text_bytes) {
+                log::debug!("CF_UNICODETEXT write failed: {err}");
             }
 
             let effect_format = RegisterClipboardFormatW(w!("Preferred DropEffect"));
@@ -177,13 +204,237 @@ pub struct Clip {
     pub cut: bool,
 }
 
-/// Reads `CF_HDROP` (plus `Preferred DropEffect`) written by Explorer or by us. A still
-/// current in-process WebDAV selection takes precedence because it also carries the remote
-/// paths that `CF_HDROP` could not represent.
-pub fn read_paths() -> Result<Clip, ApiError> {
-    use windows::Win32::System::DataExchange::GetClipboardData;
-    use windows::Win32::UI::Shell::DragQueryFileW;
+/// The block a clipboard format currently publishes, or `None` when it is absent. The
+/// clipboard must be open; the handle stays owned by the clipboard.
+fn block(format: u16) -> Option<HGLOBAL> {
+    let handle = unsafe { GetClipboardData(format as u32) }.ok()?;
+    Some(HGLOBAL(handle.0))
+}
 
+/// `Preferred DropEffect` says whether the copy was a cut. Absent means copy.
+fn read_drop_effect() -> bool {
+    let format = unsafe { RegisterClipboardFormatW(w!("Preferred DropEffect")) };
+    if format == 0 {
+        return false;
+    }
+    let Some(hglobal) = block(format as u16) else {
+        return false;
+    };
+    // Read the drop effect only when the block can actually hold one.
+    if unsafe { GlobalSize(hglobal) } < std::mem::size_of::<u32>() {
+        return false;
+    }
+    let ptr = unsafe { GlobalLock(hglobal) };
+    if ptr.is_null() {
+        return false;
+    }
+    let effect = unsafe { (ptr as *const u32).read_unaligned() };
+    let _ = unsafe { GlobalUnlock(hglobal) };
+    effect == DROPEFFECT_MOVE
+}
+
+/// Every path in the clipboard's `CF_HDROP` list.
+fn hdrop_paths() -> Vec<String> {
+    let Some(handle) = block(CF_HDROP.0) else {
+        return Vec::new();
+    };
+    let drop = HDROP(handle.0);
+    let count = unsafe { DragQueryFileW(drop, 0xFFFF_FFFF, None) };
+    let mut paths = Vec::with_capacity(count as usize);
+    for index in 0..count {
+        let len = unsafe { DragQueryFileW(drop, index, None) } as usize;
+        if len == 0 {
+            continue;
+        }
+        let mut buffer = vec![0u16; len + 1];
+        let written = unsafe { DragQueryFileW(drop, index, Some(&mut buffer)) } as usize;
+        if written == 0 {
+            continue;
+        }
+        buffer.truncate(written);
+        paths.push(String::from_utf16_lossy(&buffer));
+    }
+    paths
+}
+
+/// `FileName` (ANSI) is a NUL-separated list of single-byte paths; lifting each byte to a
+/// code point is the only lossless read without knowing the source's code page.
+fn ansi_list(hglobal: HGLOBAL) -> Vec<String> {
+    let size = unsafe { GlobalSize(hglobal) } as usize;
+    if size == 0 {
+        return Vec::new();
+    }
+    let ptr = unsafe { GlobalLock(hglobal) } as *const u8;
+    if ptr.is_null() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    unsafe {
+        while start < size {
+            let mut end = start;
+            while end < size && *ptr.add(end) != 0 {
+                end += 1;
+            }
+            if end == start {
+                break;
+            }
+            out.push(
+                std::slice::from_raw_parts(ptr.add(start), end - start)
+                    .iter()
+                    .map(|byte| *byte as char)
+                    .collect(),
+            );
+            start = end + 1;
+        }
+        let _ = GlobalUnlock(hglobal);
+    }
+    out
+}
+
+/// Keeps only entries that name an existing local path.
+///
+/// A clipboard list is untrusted input: a stale `FileNameW` block or one written for a
+/// different purpose can hold names that are relative, gone, or not paths at all. Handing
+/// those to a copy would fail mid-batch, and a relative name would resolve against the
+/// process directory.
+fn existing_local(entries: impl IntoIterator<Item = String>) -> Vec<String> {
+    entries
+        .into_iter()
+        .filter(|entry| {
+            let path = std::path::Path::new(entry);
+            path.is_absolute() && std::fs::symlink_metadata(path).is_ok()
+        })
+        .collect()
+}
+
+/// Reads the clipboard's non-file-list formats, in order of how specific they are.
+///
+/// A copy made in another application is not required to publish a file list at all:
+/// IntelliJ and much of the Java ecosystem put a single `file:` URI in plain text, and the
+/// pre-`CF_HDROP` `FileNameW` format is still emitted by some tools. Relying on `CF_HDROP`
+/// alone is what made Ctrl+V answer "no files in clipboard" after copying in the IDE.
+fn fallback_paths() -> Vec<String> {
+    // Registered clipboard formats that carry a path list, and whether the block is UTF-16.
+    // The format id is resolved below; the `PCWSTR` spelling itself is never compared,
+    // because two identical `w!` literals are different pointers.
+    for (name, wide, uri_list) in [
+        (w!("FileNameW"), true, false),
+        (w!("FileName"), false, false),
+        (w!("text/uri-list"), true, true),
+    ] {
+        let id = unsafe { RegisterClipboardFormatW(name) };
+        // An unregistered name is one nobody can be publishing either.
+        if id == 0 {
+            continue;
+        }
+        let Some(hglobal) = block(id as u16) else {
+            continue;
+        };
+        let entries = if wide {
+            list_from_hglobal(hglobal)
+        } else {
+            ansi_list(hglobal)
+        };
+        let paths: Vec<String> = if uri_list {
+            parse_uri_list(&entries.join("\r\n"))
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect()
+        } else {
+            existing_local(entries)
+        };
+        if !paths.is_empty() {
+            return paths;
+        }
+    }
+
+    // Plain text last: it is the one form every application agrees on, and the shared
+    // parser rejects anything that is not a list of existing absolute paths, so a copied
+    // snippet of code cannot masquerade as a file transfer.
+    if let Some(hglobal) = block(CF_UNICODETEXT.0) {
+        if let Some(text) = text_from_hglobal(hglobal) {
+            let paths: Vec<String> = parse_text_paths(&text)
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect();
+            if !paths.is_empty() {
+                return paths;
+            }
+            // The clipboard holds text, not files. Recording it is what makes "why does
+            // paste say there are no files?" answerable from the log alone.
+            log::debug!(
+                target: "flowdir::clipboard",
+                "clipboard text is not a path list: {:?}",
+                text.chars().take(120).collect::<String>()
+            );
+        }
+    }
+    if let Some(hglobal) = block(CF_TEXT.0) {
+        let text = ansi_list(hglobal).join("\r\n");
+        let paths: Vec<String> = parse_text_paths(&text)
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+        if !paths.is_empty() {
+            return paths;
+        }
+    }
+    Vec::new()
+}
+
+/// Names of every format the clipboard currently offers, for the diagnostic log below.
+///
+/// Without this, the only symptom of an unreadable copy is the "no files in clipboard" toast,
+/// which says nothing about what the source actually published — the same dead end that made
+/// the IntelliJ case unguessable.
+fn clipboard_format_names() -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = 0u32;
+    // `EnumClipboardFormats` returns 0 when the list ends; the cap keeps a misbehaving
+    // clipboard client from looping forever on the thread that opened it.
+    for _ in 0..256 {
+        current = unsafe { EnumClipboardFormats(current) };
+        if current == 0 {
+            break;
+        }
+        let mut buffer = [0u16; 128];
+        let len = unsafe { GetClipboardFormatNameW(current, &mut buffer) };
+        let name = if len > 0 {
+            String::from_utf16_lossy(&buffer[..(len as usize).min(buffer.len())])
+        } else {
+            format!("cf={current}")
+        };
+        if !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out
+}
+
+fn read_locked() -> Clip {
+    let cut = read_drop_effect();
+    let paths = hdrop_paths();
+    if !paths.is_empty() {
+        return Clip { paths, cut };
+    }
+    let paths = fallback_paths();
+    if paths.is_empty() {
+        // Reaching here is the "paste says there are no files" case. Naming the formats is
+        // what turns the next report into a fix instead of another round of guessing.
+        log::info!(
+            target: "flowdir::clipboard",
+            "clipboard holds no readable paths; formats: {}",
+            clipboard_format_names().join(", ")
+        );
+    }
+    Clip { paths, cut }
+}
+
+/// Reads the clipboard's file list, falling back to its textual forms. A still current
+/// in-process WebDAV selection takes precedence because it also carries the remote paths
+/// that `CF_HDROP` could not represent.
+pub fn read_paths() -> Result<Clip, ApiError> {
     let sequence = unsafe { GetClipboardSequenceNumber() };
     {
         let mut internal = INTERNAL.lock().unwrap();
@@ -197,39 +448,8 @@ pub fn read_paths() -> Result<Clip, ApiError> {
 
     unsafe {
         open_clipboard_with_retry().map_err(|e| ApiError::new("CLIPBOARD", e.to_string()))?;
-        let result = (|| -> windows::core::Result<Clip> {
-            let handle = GetClipboardData(CF_HDROP.0 as u32)?;
-            let drop = windows::Win32::UI::Shell::HDROP(handle.0);
-            let count = DragQueryFileW(drop, 0xFFFF_FFFF, None);
-            let mut paths = Vec::with_capacity(count as usize);
-            for index in 0..count {
-                let len = DragQueryFileW(drop, index, None) as usize;
-                let mut buffer = vec![0u16; len + 1];
-                let written = DragQueryFileW(drop, index, Some(&mut buffer)) as usize;
-                if written == 0 {
-                    continue;
-                }
-                buffer.truncate(written);
-                paths.push(String::from_utf16_lossy(&buffer));
-            }
-            let mut cut = false;
-            let format = RegisterClipboardFormatW(w!("Preferred DropEffect"));
-            if format != 0 {
-                if let Ok(effect) = GetClipboardData(format) {
-                    let hglobal = windows::Win32::Foundation::HGLOBAL(effect.0);
-                    // Read the drop effect only when the block can actually hold one.
-                    if GlobalSize(hglobal) >= std::mem::size_of::<u32>() {
-                        let ptr = windows::Win32::System::Memory::GlobalLock(hglobal);
-                        if !ptr.is_null() {
-                            cut = (ptr as *const u32).read_unaligned() == DROPEFFECT_MOVE;
-                            let _ = windows::Win32::System::Memory::GlobalUnlock(hglobal);
-                        }
-                    }
-                }
-            }
-            Ok(Clip { paths, cut })
-        })();
+        let clip = read_locked();
         let _ = CloseClipboard();
-        result.map_err(|e| ApiError::new("CLIPBOARD", e.to_string()))
+        Ok(clip)
     }
 }

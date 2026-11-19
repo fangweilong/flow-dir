@@ -23,6 +23,7 @@ mod naming;
 mod office;
 mod ops;
 mod pathkey;
+mod pathlist;
 mod preview;
 mod privilege;
 mod protect;

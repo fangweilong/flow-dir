@@ -73,6 +73,38 @@ pub fn filesystem_path(path: &str) -> Option<String> {
     }
 }
 
+/// Whether the path carries the `.lnk` extension, case-insensitively.
+pub fn is_shortcut(path: &std::path::Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("lnk"))
+}
+
+/// Resolves a `.lnk` shortcut to the filesystem target inside it.
+///
+/// A shortcut handed to the process from outside — Explorer's "open with", a file dropped
+/// onto the executable, a shell `SendTo` entry — is a *file* whose name happens to end in
+/// `.lnk`; the path the user meant is the one stored inside it. Without this the caller
+/// treats the shortcut itself as the target and shows an empty or failing listing, with no
+/// error, because a `.lnk` file relative to its own parent is a perfectly valid path.
+pub fn resolve_shortcut(path: &str) -> Option<String> {
+    use windows::core::Interface;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER, STGM_READ,
+    };
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+
+    let _com = ComGuard::new();
+    unsafe {
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+        let persist: IPersistFile = link.cast().ok()?;
+        persist.Load(&HSTRING::from(path), STGM_READ).ok()?;
+        let mut buffer = [0u16; 260];
+        link.GetPath(&mut buffer, std::ptr::null_mut(), 0).ok()?;
+        let len = buffer.iter().position(|unit| *unit == 0)?;
+        (len > 0).then(|| String::from_utf16_lossy(&buffer[..len]))
+    }
+}
+
 /// Whether a parsing name resolves to a shell folder.
 ///
 /// Namespace-only locations (`shell:RecycleBinFolder`, `::{CLSID}`) have no filesystem
@@ -319,4 +351,13 @@ mod tests {
         assert!(outcome.entries.iter().any(|entry| entry.attrs & ATTR_DIRECTORY != 0));
     }
 
+    /// Rows carry the shell's own parsing name, which is what every other command resolves
+    /// them by. The two shapes seen here are `::{CLSID}\0\::{CLSID}` for namespace items and
+    /// a plain `C:\` for drives; both must survive `is_shell_path` classification as written.
+    #[test]
+    fn parsed_names_are_either_namespace_or_filesystem() {
+        assert!(is_shell_path("::{26EE0668-A00A-44D7-9371-BEB064C98683}\\0\\::{025A5937}"));
+        assert!(!is_shell_path(r"C:\"));
+        assert!(!is_shell_path(r"C:\$Recycle.Bin\S-1-5-21\$R02FNV8"));
     }
+}

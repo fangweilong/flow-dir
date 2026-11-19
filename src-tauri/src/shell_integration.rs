@@ -505,6 +505,11 @@ pub fn parse_launch<I: IntoIterator<Item = String>>(
 
 /// Splits a command-line target into a folder and an optional row name. `as_file` treats
 /// the input as a file even when it does not exist yet (`--select`).
+///
+/// A `.lnk` handed over by Explorer's "open with", a drop onto the executable or a `SendTo`
+/// shortcut names the folder someone *meant*; the shortcut's own location says nothing about
+/// it. Resolving first is what keeps that launch from landing on an unrelated folder — the
+/// failure is silent otherwise, because the shortcut path is a perfectly valid path.
 fn split_target(
     path: &str,
     as_file: bool,
@@ -517,6 +522,13 @@ fn split_target(
             .or_else(|| std::env::current_dir().ok());
         if let Some(base) = base {
             target = base.join(target);
+        }
+    }
+    // A shortcut to a folder must still be treated as a folder, so the resolution happens
+    // before the `is_dir` decision below rather than after it.
+    if crate::shellfs::is_shortcut(&target) {
+        if let Some(resolved) = crate::shellfs::resolve_shortcut(&target.to_string_lossy()) {
+            target = PathBuf::from(resolved);
         }
     }
     if !as_file && (target.is_dir() || (!target.exists() && target.extension().is_none())) {
@@ -813,6 +825,63 @@ mod tests {
             Some(Path::new(r"D:\work\sub")),
         );
         assert_eq!(request.path.as_deref(), Some(r"D:\work\sub\other"));
+    }
+
+    #[test]
+    fn shortcut_extension_is_recognized_case_insensitively() {
+        for name in ["x.lnk", "x.LNK", "x.Lnk"] {
+            assert!(crate::shellfs::is_shortcut(Path::new(name)), "{name}");
+        }
+        for name in ["x.txt", "xlnk", "lnk"] {
+            assert!(!crate::shellfs::is_shortcut(Path::new(name)), "{name}");
+        }
+    }
+
+    /// A `.lnk` handed in as the launch target must open the folder it points at, not the
+    /// folder the shortcut happens to sit in.
+    #[test]
+    fn launch_follows_a_shortcut_to_its_target() {
+        use windows::core::Interface;
+        use windows::Win32::System::Com::{
+            CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER,
+        };
+        use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+
+        let root = std::env::temp_dir().join(format!("flowdir-lnk-{}", std::process::id()));
+        let target = root.join("target-dir");
+        let shortcuts = root.join("shortcuts");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(&shortcuts).unwrap();
+        let link_path = shortcuts.join("go.lnk");
+
+        let saved = (|| -> windows::core::Result<()> {
+            unsafe {
+                let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
+                link.SetPath(&windows::core::HSTRING::from(
+                    target.to_string_lossy().to_string(),
+                ))?;
+                let persist: IPersistFile = link.cast()?;
+                persist.Save(
+                    &windows::core::HSTRING::from(link_path.to_string_lossy().to_string()),
+                    true,
+                )?;
+            }
+            Ok(())
+        })();
+        if saved.is_err() {
+            // Without a shell that can write a link there is nothing to assert.
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+
+        assert_eq!(
+            crate::shellfs::resolve_shortcut(&link_path.to_string_lossy()).as_deref(),
+            Some(target.to_string_lossy().as_ref())
+        );
+        let (dir, file) = split_target(&link_path.to_string_lossy(), false, None);
+        assert_eq!(dir, target.to_string_lossy());
+        assert_eq!(file, None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A `--select` target with a folder component keeps that folder even when another

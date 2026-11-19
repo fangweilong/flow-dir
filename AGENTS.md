@@ -25,7 +25,8 @@
 - 密码只存 Windows 凭据管理器（`src-tauri/src/credentials.rs`，target `FlowDir/WebDAV/<id>`）。密码不得出现在 `settings.toml`、日志或任何 IPC 响应里；`webdav_set_password` 不依赖设置缓存，新增连接可先写凭据再等防抖保存。
 - 协议实现集中在 `src-tauri/src/webdav.rs`（WinHTTP + `quick-xml`，不新增网络/加密依赖）。TLS 忽略仅按连接生效，不得改成全局开关。
 - 任何涉及 `webdav://` 源或目标的复制/移动/删除/重命名/新建都必须走 `ops::validate`，再由 `ops::run` 的 `involves_webdav` 路由到 `webdav_ops::run`；不要绕过保护、进度与取消另开通道。远端没有回收站，前端删除必须强制 `permanent: true`，且不记录可恢复的撤销项。
-- 内部剪贴板：`clipboard.rs` 只把本地子集写入 `CF_HDROP`，完整选择留在进程内并以剪贴板序列号失效；不要假设系统剪贴板能表达 `webdav://`。
+- 内部剪贴板：`clipboard.rs` 只把本地子集写入 `CF_HDROP`（并附带 `CF_UNICODETEXT` 文本形式），完整选择留在进程内并以剪贴板序列号失效；不要假设系统剪贴板能表达 `webdav://`。
+- 剪贴板读取同样不能只看 `CF_HDROP`：`read_paths` 依次回退到 `FileNameW`、`FileName`、`text/uri-list` 与文本，再判定"没有文件"。路径解析规则（`file:` URI 的单斜杠/UNC/百分号转义、逐行路径列表、引号剥离）统一在 `src-tauri/src/pathlist.rs`，拖入与粘贴共用，改一处两边同步。
 - 搜索、目录大小、去重、压缩/解压、哈希、终端、属性页只支持本地路径，菜单必须隐藏；`list_dir`、`tree_dirs`、`path_is_dir`、`paths_exist`、`unique_paths`、`open_path`、`preview_*` 已按路径分流，新增命令时保持同样的判断。
 
 ## 前端架构与模块划分规范
@@ -33,7 +34,7 @@
 - **禁止在 `App.tsx` 堆积业务与弹窗**：`App.tsx` 仅作为顶层纯编排层（工具栏骨架、窗格容器挂载与全局快捷键分发）。单个组件或 Hook 文件代码行数原则上不超过 800 行，严禁将多模块逻辑重新塞回单一文件。
 - **业务状态机强制 Hook 隔离**：
   - 文件底层 I/O、进度管理、撤销/重做栈与提权恢复统一维护在 `src/hooks/useFileOperations.ts`；
-  - 跨窗格拖放、系统 OLE 拖出与 WebView2 原生拖入及放置目标检测统一维护在 `src/hooks/useDragAndDrop.ts`；系统拖入的 OLE `IDropTarget` 由 `src-tauri/src/dragdrop.rs` 覆盖注册（必须同时接受 `CF_HDROP` 与纯文本路径列表，如 VS Code），前端通过 `flowdir:drag-drop` 事件消费，Tauri 内置事件仅作备用；
+  - 跨窗格拖放、系统 OLE 拖出与 WebView2 原生拖入及放置目标检测统一维护在 `src/hooks/useDragAndDrop.ts`；系统拖入的 OLE `IDropTarget` 由 `src-tauri/src/dragdrop.rs` 覆盖注册（必须接受 `CF_HDROP`、`FileNameW`、`text/uri-list` 与纯文本路径列表，如 VS Code、IntelliJ），前端通过 `flowdir:drag-drop` 事件消费，Tauri 内置事件仅作备用；拒绝拖入时必须把 `*pdwEffect` 置为 `DROPEFFECT_NONE` 并记录一次格式日志，否则症状退化为"拖进来毫无反应"；
   - 侧边栏目录树分级缓存、多路径失效广播与 Git 状态异步合并统一维护在 `src/hooks/useTreeAndGit.ts`；
   - 新增跨模块业务状态优先按领域收敛至 `src/hooks/`，严禁在顶层组件中直接暴露底层实现。
 - **弹窗与浮层统一收敛**：所有低频模态窗口、右键菜单及浮层统一由 `src/ModalContainer.tsx` 编排挂载，严禁在 `App.tsx` 顶层散落编写弹窗 JSX。
