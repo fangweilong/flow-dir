@@ -101,6 +101,14 @@ impl FailureLog {
 
     /// Queue-time failures already carry a mapped {@link ApiError}.
     fn push(&self, path: &str, err: ApiError) {
+        // The final progress message carries the details, but it only reaches the webview;
+        // without this line a failed operation is undiagnosable from the log.
+        log::warn!(
+            target: "flowdir::ops",
+            "op item failed: {path} {} {}",
+            err.code,
+            err.detail
+        );
         self.total.fetch_add(1, Ordering::Relaxed);
         if err.code == "ACCESS_DENIED" {
             self.denied.store(true, Ordering::Relaxed);
@@ -744,6 +752,11 @@ fn run(
 /// rejects paths past MAX_PATH otherwise, and the manifest's `longPathAware` only covers
 /// the API surface, not every internal shell parser.
 fn shell_path(path: &str) -> String {
+    // A path copied out of a webview host arrives with `/` separators, which
+    // `SHCreateItemFromParsingName` refuses with `E_INVALIDARG`. Rewriting happens here, at
+    // the shell boundary, so every caller — clipboard, drop, address bar — is covered.
+    let path = crate::pathlist::native_separators(path);
+    let path = path.as_str();
     // Ordinary paths keep their usual form: the marker also disables `..`/`.` cleanup
     // and trailing-dot trimming inside the shell, which would change their meaning.
     // MAX_PATH is counted in UTF-16 units, not UTF-8 bytes. Counting bytes prefixed
@@ -1501,6 +1514,41 @@ mod tests {
         assert!(!report.aborted);
         assert!(dir.join("after.txt").exists());
         assert!(!source.exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A source copied from a web UI can arrive with forward slashes (`D:/x/y.txt`) — that
+    /// is the spelling Chromium's `FileDrop`/`text/plain` carries. `validate_operation_path`
+    /// accepts it, so the shell item resolver must too, or every such paste fails instantly
+    /// with no copy attempt.
+    #[test]
+    fn headless_copy_accepts_a_forward_slash_source() {
+        let dir = temp_dir("fwd-source");
+        let target = dir.join("dest");
+        fs::create_dir_all(&target).unwrap();
+        let source = dir.join("docker-compose.yml");
+        fs::write(&source, b"services: {}\n").unwrap();
+        let slashed = source.to_string_lossy().replace('\\', "/");
+        assert!(slashed.contains('/') && !slashed.contains('\\'));
+
+        let report = run_headless(
+            Request {
+                op_id: "headless".into(),
+                kind: "copy".into(),
+                sources: vec![slashed.clone()],
+                target_dir: Some(target.to_string_lossy().into_owned()),
+                new_name: None,
+                new_names: None,
+                permanent: false,
+                overwrite: false,
+                confirmed_protected: Vec::new(),
+            },
+            protect::Protection::default(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert!(report.error.is_none(), "{:?}", report.error);
+        assert_eq!(report.failed_total, 0, "{:?}", report.failed);
+        assert!(target.join("docker-compose.yml").exists());
         let _ = fs::remove_dir_all(dir);
     }
 

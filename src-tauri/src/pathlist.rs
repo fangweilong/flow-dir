@@ -105,6 +105,22 @@ impl Drop for Units {
     }
 }
 
+/// Rewrites `/` separators into `\` on an absolute Windows path.
+///
+/// A `CF_HDROP` published by a Chromium/webview host spells paths with forward slashes
+/// (`D:/x/y.txt`). Rust's `Path` accepts that spelling, but `SHCreateItemFromParsingName`
+/// rejects it with `E_INVALIDARG` (0x80070057), so the operation fails before a single file
+/// is touched. Windows file names cannot contain `/`, so the rewrite cannot change which
+/// item the path names. Shell namespaces and WebDAV addresses are left alone: neither is an
+/// absolute filesystem path, and `/` is meaningful in both.
+pub fn native_separators(path: &str) -> String {
+    if path.contains('/') && std::path::Path::new(path).is_absolute() {
+        path.replace('/', "\\")
+    } else {
+        path.to_string()
+    }
+}
+
 /// Strips one matching pair of surrounding quotes, which Explorer adds when copying a path
 /// as text and which a plain `PathBuf` would keep as part of the file name.
 fn unquote(line: &str) -> &str {
@@ -187,7 +203,8 @@ pub fn parse_text_paths(text: &str) -> Vec<PathBuf> {
         if raw.trim().is_empty() {
             continue;
         }
-        let path = file_uri_path(raw).unwrap_or_else(|| PathBuf::from(unquote(raw)));
+        let path = file_uri_path(raw)
+            .unwrap_or_else(|| PathBuf::from(native_separators(unquote(raw))));
         if !path.is_absolute() || std::fs::symlink_metadata(&path).is_err() {
             return Vec::new();
         }
@@ -314,6 +331,25 @@ mod tests {
     #[test]
     fn file_uri_without_a_drive_is_rejected() {
         assert!(file_uri_path("file:///etc/passwd").is_none());
+    }
+
+    #[test]
+    fn native_separators_rewrite_only_filesystem_paths() {
+        // A webview-hosted app publishes a `D:/x` spelling; the shell resolver needs `\`.
+        assert_eq!(native_separators("D:/a/b.txt"), r"D:\a\b.txt");
+        assert_eq!(native_separators("//server/share/x"), r"\\server\share\x");
+        // The two spellings whose `/` is meaningful, and relative text, stay untouched.
+        assert_eq!(native_separators("::{20D04FE0}\\0"), "::{20D04FE0}\\0");
+        assert_eq!(native_separators("webdav://nas/a/b"), "webdav://nas/a/b");
+        assert_eq!(native_separators("b.txt"), "b.txt");
+    }
+
+    #[test]
+    fn text_path_list_normalizes_forward_slash_paths() {
+        let (dir, file) = temp_file("slash");
+        let slashed = file.to_string_lossy().replace('\\', "/");
+        assert_eq!(parse_text_paths(&slashed), vec![file]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

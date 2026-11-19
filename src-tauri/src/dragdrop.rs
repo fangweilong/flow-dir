@@ -30,9 +30,11 @@ use windows::Win32::System::Ole::{
 };
 use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
 use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
-use windows::Win32::UI::WindowsAndMessaging::EnumChildWindows;
+use windows::Win32::UI::WindowsAndMessaging::{EnumChildWindows, GetClassNameW};
 
-use crate::pathlist::{list_from_hglobal, parse_text_paths, parse_uri_list, text_from_hglobal};
+use crate::pathlist::{
+    list_from_hglobal, native_separators, parse_text_paths, parse_uri_list, text_from_hglobal,
+};
 
 /// Event consumed by `useDragAndDrop`; the payload mirrors Tauri's native drag event.
 const DRAG_EVENT: &str = "flowdir:drag-drop";
@@ -215,7 +217,7 @@ fn drag_paths(data: &IDataObject) -> Vec<PathBuf> {
 fn strings(paths: Vec<PathBuf>) -> Vec<String> {
     paths
         .into_iter()
-        .map(|path| path.to_string_lossy().into_owned())
+        .map(|path| native_separators(&path.to_string_lossy()))
         .collect()
 }
 
@@ -276,6 +278,15 @@ impl IDropTarget_Impl for FlowDirDropTarget_Impl {
             }
             return Ok(());
         }
+        // One line per drag: without it, "dropping does nothing" cannot be told apart from
+        // "the drop never reached this target" (blocked by UIPI, or handled by WebView2's
+        // own target on a child window we could not replace).
+        log::info!(
+            target: "flowdir::dragdrop",
+            "drag enter: {} item(s), first={:?}",
+            paths.len(),
+            paths.first().map(|p| p.to_string_lossy().into_owned())
+        );
         self.emit(DragPayload::Enter {
             paths: strings(paths),
             position: self.position(pt),
@@ -322,6 +333,11 @@ impl IDropTarget_Impl for FlowDirDropTarget_Impl {
         if unsafe { *self.enter_is_valid.get() } {
             if let Some(data) = pDataObj.as_ref() {
                 let paths = drag_paths(data);
+                log::info!(
+                    target: "flowdir::dragdrop",
+                    "drag drop: {} item(s)",
+                    paths.len()
+                );
                 if !paths.is_empty() {
                     self.emit(DragPayload::Drop {
                         paths: strings(paths),
@@ -333,6 +349,17 @@ impl IDropTarget_Impl for FlowDirDropTarget_Impl {
         }
         Ok(())
     }
+}
+
+/// Window class of `hwnd`, for the registration log. A failed query is reported as its
+/// handle rather than hidden, so the log still accounts for every replaced window.
+fn class_name(hwnd: HWND) -> String {
+    let mut buffer = [0u16; 128];
+    let len = unsafe { GetClassNameW(hwnd, &mut buffer) };
+    if len <= 0 {
+        return format!("hwnd=0x{:X}", hwnd.0 as usize);
+    }
+    String::from_utf16_lossy(&buffer[..len as usize])
 }
 
 /// Replaces the drop target wry registered for this window.
@@ -356,6 +383,7 @@ pub fn install(app: &AppHandle, parent: HWND) {
     };
 
     let mut targets = Vec::new();
+    let mut replaced: Vec<String> = Vec::new();
     for hwnd in children {
         let target: IDropTarget = FlowDirDropTarget {
             hwnd,
@@ -371,10 +399,19 @@ pub fn install(app: &AppHandle, parent: HWND) {
             && unsafe { RegisterDragDrop(hwnd, &target) }.is_ok()
         {
             targets.push(target);
+            replaced.push(class_name(hwnd));
         }
     }
     let registered = targets.len();
     TARGETS.with(|slot| slot.borrow_mut().extend(targets));
+    // Which windows carry the target decides whether a drag can ever reach this module: the
+    // WebView2 render surface is one child among several, and a drag over any other child
+    // goes to whatever target that window has.
+    log::info!(
+        target: "flowdir::dragdrop",
+        "drop target installed on {registered} window(s): {}",
+        replaced.join(", ")
+    );
     if registered == 0 {
         // Registration is silent; without a target only Tauri's CF_HDROP handler would see
         // drags, which is exactly the state this module exists to avoid.

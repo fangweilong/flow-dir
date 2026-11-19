@@ -26,7 +26,7 @@
 - 协议实现集中在 `src-tauri/src/webdav.rs`（WinHTTP + `quick-xml`，不新增网络/加密依赖）。TLS 忽略仅按连接生效，不得改成全局开关。
 - 任何涉及 `webdav://` 源或目标的复制/移动/删除/重命名/新建都必须走 `ops::validate`，再由 `ops::run` 的 `involves_webdav` 路由到 `webdav_ops::run`；不要绕过保护、进度与取消另开通道。远端没有回收站，前端删除必须强制 `permanent: true`，且不记录可恢复的撤销项。
 - 内部剪贴板：`clipboard.rs` 只把本地子集写入 `CF_HDROP`（并附带 `CF_UNICODETEXT` 文本形式），完整选择留在进程内并以剪贴板序列号失效；不要假设系统剪贴板能表达 `webdav://`。
-- 剪贴板读取同样不能只看 `CF_HDROP`：`read_paths` 依次回退到 `FileNameW`、`FileName`、`text/uri-list` 与文本，再判定"没有文件"。路径解析规则（`file:` URI 的单斜杠/UNC/百分号转义、逐行路径列表、引号剥离）统一在 `src-tauri/src/pathlist.rs`，拖入与粘贴共用，改一处两边同步。
+- 剪贴板读取同样不能只看 `CF_HDROP`：`read_paths` 依次回退到 `FileNameW`、`FileName`、`text/uri-list` 与文本，再判定"没有文件"。路径解析规则（`file:` URI 的单斜杠/UNC/百分号转义、逐行路径列表、引号剥离、正斜杠归一为反斜杠）统一在 `src-tauri/src/pathlist.rs`，拖入与粘贴共用，改一处两边同步。正斜杠必须归一：WebView2/Chromium 应用发布的 `CF_HDROP` 用 `D:/x` 拼写，`SHCreateItemFromParsingName` 会以 `E_INVALIDARG (0x80070057)` 拒绝，表现为复制/拖入瞬间整批失败；`ops::shell_path` 在 shell 边界再兜一层。
 - 搜索、目录大小、去重、压缩/解压、哈希、终端、属性页只支持本地路径，菜单必须隐藏；`list_dir`、`tree_dirs`、`path_is_dir`、`paths_exist`、`unique_paths`、`open_path`、`preview_*` 已按路径分流，新增命令时保持同样的判断。
 
 ## 前端架构与模块划分规范

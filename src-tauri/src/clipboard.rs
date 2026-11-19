@@ -15,7 +15,9 @@ use windows::Win32::System::Ole::{CF_HDROP, CF_TEXT, CF_UNICODETEXT};
 use windows::Win32::UI::Shell::{DragQueryFileW, DROPFILES, HDROP};
 
 use crate::error::ApiError;
-use crate::pathlist::{list_from_hglobal, parse_text_paths, parse_uri_list, text_from_hglobal};
+use crate::pathlist::{
+    list_from_hglobal, native_separators, parse_text_paths, parse_uri_list, text_from_hglobal,
+};
 
 const DROPEFFECT_COPY: u32 = 1;
 const DROPEFFECT_MOVE: u32 = 2;
@@ -252,7 +254,7 @@ fn hdrop_paths() -> Vec<String> {
             continue;
         }
         buffer.truncate(written);
-        paths.push(String::from_utf16_lossy(&buffer));
+        paths.push(native_separators(&String::from_utf16_lossy(&buffer)));
     }
     paths
 }
@@ -305,6 +307,7 @@ fn existing_local(entries: impl IntoIterator<Item = String>) -> Vec<String> {
             let path = std::path::Path::new(entry);
             path.is_absolute() && std::fs::symlink_metadata(path).is_ok()
         })
+        .map(|entry| native_separators(&entry))
         .collect()
 }
 
